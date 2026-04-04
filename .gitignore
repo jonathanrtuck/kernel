@@ -1,1 +1,9 @@
+.claude/
 .DS_Store
+.vscode/
+*.bin
+*.dtb
+*.elf
+*.img
+rustc-ice-*.txt
+target/
