@@ -18,9 +18,19 @@ The root Cargo.toml IS the kernel crate. `host/` is an independent Cargo project
 # Build the kernel
 cargo build
 
+# Run the kernel (native Apple Hypervisor.framework — preferred)
+hypervisor target/aarch64-unknown-none/debug/kernel --no-gpu --timeout 5
+
 # Run host-side tests
 cd host && cargo test
 ```
+
+Use `hypervisor` (installed at `~/.local/bin/hypervisor`, source at `~/Sites/hypervisor/`) for all kernel testing. QEMU is a fallback only. Key flags:
+
+- `--no-gpu` — serial-only mode (no Metal window)
+- `--timeout SECS` — exit after N seconds (for automated runs)
+- `--capture N PATH` — capture frame N as PNG, then exit
+- `--events FILE` — run scripted input + captures
 
 The prebuilt `core` for `aarch64-unknown-none` comes from the nightly toolchain (pinned in `rust-toolchain.toml`).
 
