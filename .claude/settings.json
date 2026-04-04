@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": ".claude/hooks/rustfmt-post-edit.sh",
+            "statusMessage": "rustfmt…",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit|Write"
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "python3 .claude/hooks/load-design-claims.py",
+            "timeout": 5,
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}

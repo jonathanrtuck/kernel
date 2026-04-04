@@ -1,6 +1,6 @@
 # kernel
 
-ARM64 microkernel, built from first principles. See `design/principles.md` for the foundational reasoning, `design/philosophy.md` for the general design thinking framework.
+ARM64 microkernel, built from first principles. Design decisions live in `design/claims.toml` (loaded automatically at session start). See `design/philosophy.md` for the general thinking framework.
 
 ## Working Protocol (MANDATORY)
 
@@ -39,10 +39,12 @@ When completing a milestone, verify design documents reflect the current archite
 
 ## Working Mode
 
+This project produces two deliverables: the **kernel source** and the **design** (`design/claims.toml`). Both are first-class outputs. A session that explores architecture for two hours and records one claim is as productive as a session that implements a subsystem. Every session should advance one or both.
+
 This is a long-running exploration project with no deadline. Sessions may be days or months apart. The designer wants a **thinking partner**, not a project manager:
 
 - **Explore, don't push.** Help think through ideas, poke holes, surface tradeoffs. Don't rush toward decisions or implementation.
-- **Hold context across sessions.** Use MEMORY.md and design documents to resume seamlessly.
+- **Hold context across sessions.** Use MEMORY.md and design claims to resume seamlessly.
 - **Connect the dots.** Flag similarities, inconsistencies, or connections to previous discussions. Remind when something was already explored or rejected.
 - **Guide gently.** Suggest topics that would address gaps in the emerging design. Ask for clarity when needed. Flag dead ends or common traps.
 - **Respect the pace.** The designer may want to deep-dive a topic, switch to coding, or just chat loosely. Follow their energy.
@@ -52,7 +54,7 @@ This is a long-running exploration project with no deadline. Sessions may be day
 ```text
 src/        — kernel source (no_std, aarch64-unknown-none)
 host/       — host-side tests (independent crate, native target)
-design/     — design documents and first-principles reasoning
+design/     — claims.toml (decisions SSOT), philosophy, derivations
 ```
 
 The root Cargo.toml IS the kernel crate. `host/` is an independent Cargo project (not a workspace member) that runs on the host.
@@ -123,9 +125,9 @@ The kernel's scope is defined by what the hardware requires at EL1:
 2. Route interrupts and faults (exception vectors, GIC)
 3. Manage the privilege boundary (register save/restore, `eret`)
 
-Everything else must earn its way in. See `design/principles.md`.
+Everything else must earn its way in. See `design/claims.toml`.
 
 ## Design Documents
 
-- `design/philosophy.md` — **Read first.** Two root principles and their consequences. The general thinking framework.
-- `design/principles.md` — First-principles reasoning about what a microkernel must do and why. Three irreducible responsibilities, CPU/memory multiplexing models, memory object abstraction, isolation rules.
+- `design/claims.toml` — **Single source of truth for design decisions.** Each claim has a statement, status, confidence, scope, and rationale. Loaded automatically at session start via hook. To add a decision, add a `[[claim]]` entry.
+- `design/philosophy.md` — **Read first.** Two root principles and their consequences. The general thinking framework that produces decisions.

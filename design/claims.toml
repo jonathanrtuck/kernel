@@ -1,0 +1,219 @@
+# Kernel Design Claims
+#
+# Single source of truth for design decisions and their rationale.
+#
+# Status:     canonical (settled), signal (strong direction), working (exploratory)
+# Confidence: certain, high, medium
+# Scope:      kernel, cpu, memory, ipc, architecture, hardware
+
+[[claim]]
+id = "three-irreducible-responsibilities"
+statement = "The kernel has exactly three irreducible responsibilities: multiplex CPU/RAM, route interrupts/faults, manage the privilege boundary"
+status = "canonical"
+confidence = "certain"
+scope = ["kernel", "architecture"]
+date = "2026-04-04"
+rationale = """
+The kernel exists because hardware restricts certain operations to a privileged \
+exception level. The irreducible responsibilities are exactly the operations \
+silicon won't let userspace perform: programming the MMU and preemption timer \
+(CPU/RAM multiplexing), receiving exceptions via VBAR_EL1 and GIC (interrupt/fault \
+routing), and save/restore plus eret (privilege boundary management). Everything \
+else — process lifecycle, IPC, capabilities, scheduling policy — is built on top \
+and must earn its way in."""
+
+[[claim]]
+id = "kernel-owns-scheduling-policy"
+statement = "The kernel owns both scheduling mechanism and policy — userspace does M:N threading on top"
+status = "canonical"
+confidence = "certain"
+scope = ["kernel", "cpu"]
+date = "2026-04-04"
+rationale = """
+Scheduling policy is tightly coupled with the events that trigger it (timer \
+interrupt, IPC block, fault, interrupt arrival). Pushing policy to userspace \
+creates a chatty upcall protocol costing more than the simplicity it buys — \
+every kernel event affecting scheduling would require an upcall. The kernel is \
+already in the loop for all these events; deciding right there avoids the round \
+trip. Historical evidence: Scheduler Activations (NetBSD, experimental systems) \
+were tried; the industry converged on kernel scheduling with M:N threading."""
+
+[[claim]]
+id = "thread-is-schedulable-unit"
+statement = "A thread is the schedulable unit — a saved register set the kernel loads onto a core, conceptually independent of address spaces"
+status = "canonical"
+confidence = "certain"
+scope = ["kernel", "cpu"]
+date = "2026-04-04"
+rationale = """
+A thread is an execution context (saved registers including PC) that the kernel \
+switches between. It runs in an address space but is independent of it. A \
+'process' is a management convention bundling threads with a shared address \
+space — hardware doesn't know what it is. Whether the kernel bundles threads and \
+address spaces or keeps them independent is a design choice (seL4 separates them; \
+QNX bundles). Userspace builds lightweight concurrency on top via M:N threading."""
+
+[[claim]]
+id = "memory-object-abstraction"
+statement = "Memory is exposed as byte-sized objects with a two-step create-then-map model — backing type on the object, permissions on the mapping"
+status = "canonical"
+confidence = "certain"
+scope = ["kernel", "memory"]
+date = "2026-04-04"
+rationale = """
+Memory objects are kernel-managed entities with a two-step model: create (with \
+size and backing type), then map (into an address space with permissions). These \
+are independent operations — an object exists before mapping, the same object \
+maps into multiple address spaces (sharing), unmapping doesn't destroy it. Backing \
+type (anonymous, device MMIO, file-backed) is an object property. Permissions \
+(read/write/execute) attach to the mapping, not the object — same object can be \
+read-only in one place, read-write in another. Sharing is natural: hand another \
+thread a handle, it maps into its own space."""
+
+[[claim]]
+id = "page-size-hidden"
+statement = "Page size is an implementation detail of the MMU and does not leak into the kernel interface"
+status = "canonical"
+confidence = "certain"
+scope = ["kernel", "memory"]
+date = "2026-04-04"
+rationale = """
+Every argument for leaking page size follows the same structure: MMU operates at \
+page granularity → some operation is constrained → userspace must know. Every \
+argument collapses the same way: redesign at object granularity and the leak \
+disappears. Shared memory alignment → map whole objects. Device MMIO → kernel \
+maps region, driver accesses offsets. TLB pressure → hint API (LARGE_MAPPINGS). \
+Protection granularity → per-mapping permissions. Page size is essential \
+complexity of the MMU leaf node; the memory object interface absorbs it. An \
+optional query_page_size() can exist for rare expert use."""
+
+[[claim]]
+id = "slab-packing-isolation"
+statement = "Slab packing is safe within one address space, forbidden across address spaces — the kernel never enforces sub-page isolation"
+status = "canonical"
+confidence = "certain"
+scope = ["kernel", "memory"]
+date = "2026-04-04"
+rationale = """
+The MMU enforces isolation at page granularity. Objects in the same address space \
+share a trust boundary, so packing small objects into one page is a resource \
+optimization with no isolation implications. Across address spaces, packing would \
+give each side access to the other's data. The kernel uses hardware MMU as the \
+sole isolation mechanism and never replicates protection at finer granularity in \
+software. Slab-packed objects transparently promote to own page(s) when shared."""
+
+[[claim]]
+id = "lazy-allocation"
+statement = "Creating a memory object does not allocate physical pages immediately — the kernel uses demand paging"
+status = "canonical"
+confidence = "high"
+scope = ["kernel", "memory"]
+date = "2026-04-04"
+rationale = """
+Deferring physical allocation until pages are touched avoids wasting RAM on \
+allocated-but-unused memory. Page faults become normal memory management (triggering \
+allocation), not just errors. The fault handler must distinguish valid lazy \
+allocation from illegal access."""
+
+[[claim]]
+id = "overcommit-policy-open"
+statement = "Policy for physical RAM exhaustion with outstanding lazy commitments is an open design question"
+status = "working"
+confidence = "medium"
+scope = ["kernel", "memory"]
+date = "2026-04-04"
+rationale = """
+When physical RAM is exhausted but lazy commitments remain, the kernel must \
+choose: deny allocation up front (no overcommit), kill something (OOM killer), \
+block until memory is available, or report an error. Each has different tradeoffs \
+for predictability, utilization, and complexity. Not yet settled."""
+
+[[claim]]
+id = "ipc-is-kernel-concern"
+statement = "Cross-isolation-boundary communication is a kernel concern — the kernel created the wall, so it provides the door"
+status = "canonical"
+confidence = "certain"
+scope = ["kernel", "ipc"]
+date = "2026-04-04"
+rationale = """
+The kernel enforces memory isolation via the MMU. Threads in different address \
+spaces cannot see each other's memory, so they cannot communicate without kernel \
+involvement. Cross-boundary communication reduces to three primitives the kernel \
+already provides: shared memory setup (page table modification), waking sleeping \
+threads (scheduler), and transferring capabilities (trusted authority). Message \
+format, buffering, and protocols live in userspace libraries on top."""
+
+[[claim]]
+id = "ipc-mechanism-deferred"
+statement = "The specific IPC mechanism design is deferred until memory objects and threading are settled"
+status = "signal"
+confidence = "high"
+scope = ["kernel", "ipc"]
+date = "2026-04-04"
+rationale = """
+IPC design depends on the memory object model (shared memory regions) and \
+threading model (synchronous rendezvous, notification). Three composable \
+primitives are identified — shared memory for bulk data, synchronous message \
+passing for request/reply, async notification for signaling — but specific \
+design requires the foundation to be in place first."""
+
+[[claim]]
+id = "kernel-is-leaf-node"
+statement = "The kernel is a leaf node behind an interface — syscalls + ABI + fault delivery + boot protocol"
+status = "canonical"
+confidence = "certain"
+scope = ["kernel", "architecture"]
+date = "2026-04-04"
+rationale = """
+The kernel is a service behind an API. Userspace never reaches into kernel \
+internals. The interface is wider than syscalls alone: ABI, fault delivery \
+conventions, boot protocol, and shared-memory conventions (e.g. clock page). \
+The kernel is special — its interface shapes all others — but encapsulation \
+still applies. Scheduling internals, page table format, and slab allocator \
+design are implementation details that don't leak."""
+
+[[claim]]
+id = "complement-hardware"
+statement = "The kernel complements hardware isolation, never competes — the MMU is the sole enforcement mechanism"
+status = "canonical"
+confidence = "certain"
+scope = ["kernel", "architecture"]
+date = "2026-04-04"
+rationale = """
+The MMU enforces page-granular isolation. The kernel manages which entries exist; \
+the CPU enforces them. Each does what it's best at. The kernel never replicates \
+hardware protection at a different granularity in software — that would be a \
+weaker guarantee competing with a stronger one."""
+
+[[claim]]
+id = "mechanism-irreducible-policy-choice"
+statement = "Mechanisms the hardware requires are irreducible — whether the kernel also owns the policy built on each mechanism is always a separate design choice"
+status = "canonical"
+confidence = "certain"
+scope = ["kernel", "architecture"]
+date = "2026-04-04"
+rationale = """
+The kernel must provide mechanisms that only privileged code can perform (context \
+switching, page table manipulation, exception dispatch). Whether the kernel also \
+owns the policy layered on each mechanism — scheduling policy, memory allocation \
+policy, interrupt priority policy — is a design choice with its own tradeoffs. \
+For scheduling, we chose kernel-owned policy because the coupling between policy \
+and triggering events makes separation costly. Future mechanism/policy splits \
+should be evaluated individually on the same basis."""
+
+[[claim]]
+id = "hardware-target"
+statement = "Target: personal interactive devices (desktops, laptops, phones, tablets) — ARM64 with MMU, fixed cores, fixed RAM"
+status = "canonical"
+confidence = "certain"
+scope = ["kernel", "hardware"]
+date = "2026-04-04"
+rationale = """
+The device class is personal, interactive, GUI-driven: the kind of hardware that \
+runs macOS or iOS. Desktops, laptops, smartphones, tablets. This excludes servers \
+(different performance/reliability tradeoffs), embedded devices (resource constraints, \
+no MMU assumed), and safety-critical systems (medical, military, space — certification \
+requirements that dictate design). The shared characteristics of the target class: \
+ARM64 with MMU, fixed CPU topology (no hot-swap), fixed RAM (no hot-add), a user \
+present and interacting. These assumptions simplify the kernel significantly — no \
+hot-plug, no NUMA discovery, no hard-realtime certification paths."""
