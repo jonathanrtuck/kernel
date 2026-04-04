@@ -131,3 +131,4 @@ Everything else must earn its way in. See `design/claims.toml`.
 
 - `design/claims.toml` — **Single source of truth for design decisions.** Each claim has a statement, status, confidence, scope, and rationale. Loaded automatically at session start via hook. To add a decision, add a `[[claim]]` entry.
 - `design/philosophy.md` — **Read first.** Two root principles and their consequences. The general thinking framework that produces decisions.
+- `design/landscape.md` — **Reference.** Survey of how 18+ real kernels and academic systems resolved each major design decision. Organized by decision point. Consult when facing a design fork to see known approaches, tradeoffs, and novelty opportunities.

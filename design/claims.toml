@@ -57,7 +57,7 @@ QNX bundles). Userspace builds lightweight concurrency on top via M:N threading.
 id = "memory-object-abstraction"
 statement = "Memory is exposed as byte-sized objects with a two-step create-then-map model — backing type on the object, permissions on the mapping"
 status = "canonical"
-confidence = "certain"
+confidence = "high"
 scope = ["kernel", "memory"]
 date = "2026-04-04"
 rationale = """
@@ -74,7 +74,7 @@ thread a handle, it maps into its own space."""
 id = "page-size-hidden"
 statement = "Page size is an implementation detail of the MMU and does not leak into the kernel interface"
 status = "canonical"
-confidence = "certain"
+confidence = "high"
 scope = ["kernel", "memory"]
 date = "2026-04-04"
 rationale = """
@@ -105,7 +105,7 @@ software. Slab-packed objects transparently promote to own page(s) when shared."
 [[claim]]
 id = "lazy-allocation"
 statement = "Creating a memory object does not allocate physical pages immediately — the kernel uses demand paging"
-status = "canonical"
+status = "signal"
 confidence = "high"
 scope = ["kernel", "memory"]
 date = "2026-04-04"
@@ -159,7 +159,7 @@ design requires the foundation to be in place first."""
 
 [[claim]]
 id = "kernel-is-leaf-node"
-statement = "The kernel is a leaf node behind an interface — syscalls + ABI + fault delivery + boot protocol"
+statement = "The kernel is a leaf node behind an interface, e.g. syscalls + ABI + fault delivery + boot protocol"
 status = "canonical"
 confidence = "certain"
 scope = ["kernel", "architecture"]
