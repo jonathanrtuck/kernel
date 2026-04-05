@@ -271,3 +271,129 @@ requirements that dictate design). The shared characteristics of the target clas
 ARM64 with MMU, fixed CPU topology (no hot-swap), fixed RAM (no hot-add), a user \
 present and interacting. These assumptions simplify the kernel significantly — no \
 hot-plug, no NUMA discovery, no hard-realtime certification paths."""
+
+[[claim]]
+id = "supervision-tree"
+statement = "Every Object (except the root) has exactly one supervisor, which is another Object. This forms a tree. The kernel is the supervisor of the root Object — the prime mover. Faults that propagate to the root propagate to the kernel."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "architecture"]
+date = "2026-04-05"
+rationale = """
+An Object that faults needs a handler. A handler that itself faults needs a \
+handler. This chain must terminate. The simplest structure that provides \
+per-Object fault handling with guaranteed termination is a tree rooted at \
+the kernel. Each Object has exactly one supervisor — the relationship is \
+unambiguous, and the tree is the fault propagation path: faults bubble up \
+from Object to supervisor until caught or reaching the kernel. \
+\
+Making the kernel the root Object's supervisor eliminates a special case: \
+the root Object is just another supervised Object, not a unique entity with \
+different fault semantics. The kernel already receives exceptions via \
+VBAR_EL1 and manages lifecycle — it naturally fills the supervisor role. \
+\
+Converges with Erlang supervision trees (same problem: reliable systems \
+from unreliable parts → same shape) and React error boundaries (faults \
+bubble up the component tree until caught). Genode's component tree is the \
+closest kernel-level prior art, though it adds full parent mediation."""
+
+[[claim]]
+id = "unified-ownership-tree"
+statement = "The supervision tree is the ownership tree. An Object owns the resources it creates (memory objects, time objects, child Objects). Shared resources live at the lowest common ancestor. When an Object is destroyed, its entire subtree is destroyed and its resources are reclaimed."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "architecture"]
+date = "2026-04-05"
+rationale = """
+An Object creates resources and supervised children. If the Object dies, \
+what happens to them? The simplest answer: they die too. The Object that \
+created something is responsible for it. This makes the supervision tree \
+and the ownership tree the same structure — one relationship, not two \
+overlapping graphs. \
+\
+Shared resources (a memory object used by two Objects in different subtrees) \
+live at the lowest common ancestor, which maps it into both subtrees. This \
+follows from the rule that an Object can only map resources into its own \
+subtree. Cross-subtree sharing requires the common ancestor to create and \
+own the shared resource. Same structural principle as React's "lift state \
+to the nearest common ancestor." \
+\
+Recursive destruction is the default — supervisor dies, subtree dies. \
+Userspace builds persistence patterns on top (a meta-supervisor that \
+restarts subtrees). The kernel provides the structure; userspace provides \
+the policy. Reparenting Objects across subtrees is not a kernel primitive \
+because it would divorce ownership from supervision."""
+
+[[claim]]
+id = "events-unified"
+statement = "Faults and interrupts are both events routed by the supervision tree. Faults enter at the faulting Object's supervisor. Interrupts enter at the delegated handler Object. Both bubble up the tree if unhandled."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "architecture"]
+date = "2026-04-05"
+rationale = """
+Faults and interrupts are structurally similar: an event occurs that an \
+Object must handle. Faults originate from a specific Object's execution \
+(bad instruction, page fault). Interrupts originate from hardware (device \
+ready, timer fired). Both need a handler, and both need a fallback if the \
+handler fails. \
+\
+The supervision tree provides both. Faults are delivered to the faulting \
+Object's supervisor — "your child broke." Interrupts are delivered to \
+whichever Object the interrupt was delegated to. If either handler fails \
+(crashes, doesn't exist), the event bubbles up to the next supervisor. \
+\
+Unifying faults and interrupts as "events routed by the tree" means the \
+kernel has one routing mechanism, not two. The difference is only where \
+the event enters the tree (supervisor for faults, delegated handler for \
+interrupts), not how it propagates."""
+
+[[claim]]
+id = "interrupt-delegation"
+statement = "Interrupt authority flows down the supervision tree via delegation. The root Object initially receives all hardware interrupts. It delegates specific interrupts to children, who may delegate further. The kernel caches delegation targets for direct delivery — the tree is the source of truth, direct delivery is an optimization."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "architecture"]
+date = "2026-04-05"
+rationale = """
+At boot, the root Object is the only Object — all interrupts go to it. \
+As it creates children (device drivers), it delegates specific interrupts \
+down the tree. Each delegation is an authority grant: "you may handle \
+this interrupt." The kernel records the delegation chain and delivers \
+directly to the final handler for performance, but the tree structure is \
+the authoritative routing table. \
+\
+When a handler Object dies, the delegation is unwound — the interrupt \
+bubbles back up to the delegator (the handler's supervisor), which can \
+re-delegate to a restarted driver or handle it directly. No separate \
+interrupt registration mechanism is needed; delegation through the tree \
+is the mechanism. \
+\
+This parallels how all systems ultimately work (a driver registers for \
+an IRQ), but makes the authority chain explicit and ties interrupt \
+lifecycle to the supervision tree rather than maintaining a separate \
+IRQ-to-handler table."""
+
+[[claim]]
+id = "tree-authorizes-ipc"
+statement = "The supervision tree authorizes IPC connections — requests walk up to the common ancestor and back down, with each supervisor able to allow, deny, redirect, or interpose. Once authorized, the kernel provides a direct channel. The tree governs connection establishment, not data transfer."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "architecture", "ipc"]
+date = "2026-04-05"
+rationale = """
+If Object X wants to communicate with distant cousin Object Y, the \
+authorization request walks up through X's supervisors to the common \
+ancestor, then down to Y's supervisors. Each intermediate supervisor can \
+allow, deny, redirect, or interpose on the connection — the tree is the \
+policy enforcement structure. This happens once per connection. \
+\
+Once authorized, the kernel creates a direct channel between X and Y. \
+Subsequent messages flow directly with no tree hops — this is the \
+performance-sensitive path and cannot afford intermediary forwarding. \
+\
+The pattern is: authority is tree-shaped, data flow is a graph. Same \
+separation seen in DNS (hierarchy resolves names, packets go direct), \
+Genode (session requests route through parent chain, session data flows \
+directly), and interrupt delegation (authority down the tree, delivery \
+direct). The tree is always the authority structure, never the hot path."""
