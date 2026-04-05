@@ -39,19 +39,73 @@ trip. Historical evidence: Scheduler Activations (NetBSD, experimental systems) 
 were tried; the industry converged on kernel scheduling with M:N threading."""
 
 [[claim]]
-id = "thread-is-schedulable-unit"
-statement = "A thread is the schedulable unit — a saved register set the kernel loads onto a core, conceptually independent of address spaces"
-status = "canonical"
-confidence = "certain"
-scope = ["kernel", "cpu"]
+id = "external-object-model"
+statement = "The kernel's external object model has three types: Objects, memory objects (units of space), and time objects (units of time). An Object is a register set that binds to memory objects and time objects. Space and time are symmetric resources — created, bound to Objects, and shared using the same mechanism."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "architecture"]
 date = "2026-04-04"
 rationale = """
-A thread is an execution context (saved registers including PC) that the kernel \
-switches between. It runs in an address space but is independent of it. A \
-'process' is a management convention bundling threads with a shared address \
-space — hardware doesn't know what it is. Whether the kernel bundles threads and \
-address spaces or keeps them independent is a design choice (seL4 separates them; \
-QNX bundles). Userspace builds lightweight concurrency on top via M:N threading."""
+Derived from first principles: an executing entity needs space (memory for \
+instructions and data) and time (CPU to execute). Space and time are the only \
+two irreducible resources. Both are managed the same way: the kernel creates \
+resource objects, binds them to Objects, and sharing means multiple Objects \
+bound to the same resource. An Object's structure is its set of mapped memory \
+objects; its activity is fueled by bound time objects. The Object itself is \
+just a register set (PC, SP, general-purpose registers) — the execution \
+identity. Address spaces, page tables, physical memory, and cores are \
+kernel-internal implementation details, not exposed. Any additional object \
+types must be justified by concrete scenarios these three cannot serve."""
+
+[[claim]]
+id = "structure-precondition-for-activity"
+statement = "Structure is a practical precondition for activity — an Object without mapped memory objects will fault immediately when given time. The kernel does not enforce this constraint; the hardware does (MMU fault). An Object can exist without space or time in any combination."
+status = "signal"
+confidence = "certain"
+scope = ["kernel", "architecture"]
+date = "2026-04-04"
+rationale = """
+An Object's register set (PC) must point into mapped memory for execution to \
+proceed. Without mapped memory objects, the first instruction fetch faults. \
+The kernel does not need to pre-check this — the MMU enforces it naturally. \
+This keeps the kernel simpler: no special validation, just fault handling. \
+An Object can exist with space but no time (alive, not awake), with neither \
+(just a register set, perhaps during setup), or with both (running). The \
+'time without space' case is handled by the same fault delivery mechanism \
+as any other invalid memory access."""
+
+[[claim]]
+id = "authority-is-os-governance"
+statement = "Authority (capabilities/permissions) is the OS's governance over structure and activity, not a resource the program itself needs. Programs act; the kernel constrains."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "architecture"]
+date = "2026-04-04"
+rationale = """
+From the program's perspective, it simply executes instructions and accesses \
+memory. It has no concept of 'permission' — it acts, and the hardware + kernel \
+constrain what happens (MMU faults on invalid access, kernel rejects unauthorized \
+syscalls). Capabilities are the kernel's bookkeeping for deciding whether to \
+grant requests. They govern who gets space, who gets time, and who receives \
+events. This framing prevents treating authority as a program-level resource \
+on par with space and time. The specific mechanism (handles, capability tables, \
+etc.) is a downstream design choice about how the kernel implements governance."""
+
+[[claim]]
+id = "dynamic-resource-bindings"
+statement = "Resource bindings (memory objects and time objects to Objects) are dynamic — they can be added and removed at any time. This generalizes thread migration (rebinding all space) and scheduling changes (rebinding time) as ordinary resource operations, not special mechanisms."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "architecture"]
+date = "2026-04-04"
+rationale = """
+If space and time are symmetric resources bound to Objects, and bindings can \
+change, then many operations that appear special in other systems become \
+general cases. Mapping a new memory object is loading a library. Unmapping \
+one is unloading it. Rebinding all memory objects at once during IPC is thread \
+migration. Changing time bindings is rescheduling. None of these require \
+special mechanisms — they are all instances of 'change which resources an \
+Object is bound to.' The abstraction absorbs the edge cases."""
 
 [[claim]]
 id = "memory-object-abstraction"
@@ -62,13 +116,13 @@ scope = ["kernel", "memory"]
 date = "2026-04-04"
 rationale = """
 Memory objects are kernel-managed entities with a two-step model: create (with \
-size and backing type), then map (into an address space with permissions). These \
-are independent operations — an object exists before mapping, the same object \
-maps into multiple address spaces (sharing), unmapping doesn't destroy it. Backing \
-type (anonymous, device MMIO, file-backed) is an object property. Permissions \
-(read/write/execute) attach to the mapping, not the object — same object can be \
-read-only in one place, read-write in another. Sharing is natural: hand another \
-thread a handle, it maps into its own space."""
+size and backing type), then map (into an Object with permissions). These are \
+independent operations — a memory object exists before mapping, the same memory \
+object maps into multiple Objects (sharing), unmapping doesn't destroy it. \
+Backing type (anonymous, device MMIO, file-backed) is a memory object property. \
+Permissions (read/write/execute) attach to the mapping, not the memory object — \
+same memory object can be read-only in one Object, read-write in another. Sharing \
+is natural: another Object maps the same memory object into its own space."""
 
 [[claim]]
 id = "page-size-hidden"
