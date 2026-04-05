@@ -198,25 +198,41 @@ threads (scheduler), and transferring capabilities (trusted authority). Message 
 format, buffering, and protocols live in userspace libraries on top."""
 
 [[claim]]
-id = "ipc-routing-settled-delivery-open"
-statement = "IPC routing is settled: events are the sole primitive, routed by the supervision tree, with shared Space objects for bulk data. The delivery semantics (synchronous vs. asynchronous) remain an open design question."
-status = "working"
-confidence = "medium"
-scope = ["kernel", "ipc"]
+id = "events-carry-resources"
+statement = "Events can carry resource handles (Time, Space, routing capabilities). Sync/async is not a kernel distinction — it emerges from whether the sender includes its Time handle. A sender that donates Time cannot run (effectively blocked). A sender that keeps Time continues (effectively async). The kernel just transfers resources; the behavior is emergent."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "architecture", "ipc"]
 date = "2026-04-05"
 rationale = """
-The routing model is resolved: events carry a single predefined type \
-and a payload. The kernel evaluates routing rules and delivers directly. \
-Shared Space objects handle bulk data with events as coordination signals. \
-No separate IPC subsystem exists. \
+The kernel has one operation: emit an event, optionally including \
+resource handles. If the sender includes its Time handle, the sender \
+has no Time and cannot be scheduled — it is effectively blocked until \
+the Time is returned in a reply. If the sender keeps its Time, it \
+continues running — effectively async. The kernel does not distinguish \
+these cases. It routes the event, transfers any included resources, and \
+schedules whatever has Time. \
 \
-What remains open: does emitting an event block the sender until the \
-receiver processes it (synchronous, like seL4 rendezvous), or does the \
-sender continue immediately (asynchronous, like Zircon channels)? \
-Async is simpler and more flexible but requires buffering and has no \
-natural backpressure. Sync provides backpressure and avoids buffering \
-but couples sender and receiver lifetimes. The choice affects the \
-programming model for every Object in the system."""
+Time donation for the supervision path (child → supervisor) works \
+naturally: the child includes its Time, the supervisor borrows it to \
+process the request, returns it in the reply. A sleeping supervisor \
+with no Time of its own can always process requests because callers \
+bring their own Time. Idle supervisors cost nothing. \
+\
+For fire-and-forget (notifications, signals): the sender omits Time. \
+The event is queued at the destination. The receiver processes on its \
+own Time when scheduled. The sender continues. \
+\
+This dissolves sync/async into the resource model. No special call/send \
+distinction. No time donation mechanism. No separate scheduling for \
+sync vs. async paths. Just: events carry resources, the scheduler runs \
+whatever has Time. The right behavior emerges from the right choice — \
+include Time when you need the result (sync), omit Time when you don't \
+(async). The wrong choice (omitting Time for a request you need) \
+deadlocks only the sender and its subtree, not the system. \
+\
+Principle: make the right way the easy way. An Object would have to go \
+out of its way to hurt itself."""
 
 [[claim]]
 id = "kernel-is-leaf-node"
@@ -535,6 +551,40 @@ everything else. \
 This eliminates the need for the kernel to categorize event types as \
 "inherent" vs. "singleton" or "supervision" vs. "service." One routing \
 mechanism, one default, zero type interpretation."""
+
+[[claim]]
+id = "object-visibility"
+statement = "An Object knows only its direct children. It cannot see, name, or address its parent, siblings, grandchildren, or any other Object. It emits events into the tree and receives events from the tree — the routing is invisible to it."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "architecture"]
+date = "2026-04-05"
+rationale = """
+An Object's world is: emit events (destination unknown), receive events \
+(source unknown), and if it has children, send to specific children by \
+identity. That's it. The tree above, beside, and below (past one level) \
+is invisible. \
+\
+The Object doesn't know who its supervisor is. It infers something exists \
+above it because resource requests are fulfilled and events arrive, but \
+it cannot name or address its supervisor. Emitting an event is not \
+"sending to parent" — it's putting an event into the tree. Where it goes \
+is determined by routing rules the Object cannot see. \
+\
+This is the strictest possible encapsulation: each Object is a black box \
+that knows only its immediate subordinates. Consequences: an Object \
+cannot bypass its supervisor, cannot reach into another subtree, cannot \
+even discover the tree's shape. Any communication with distant Objects \
+happens through the routing system, mediated by ancestors the Object \
+doesn't know exist. \
+\
+Reply-to tokens from event exchanges don't break this: the Object can \
+address "the thing that responded to my earlier event" but doesn't know \
+who or where it is. An opaque reference, not an identity. \
+\
+This property falls out from the supervision tree and kernel routing, \
+but is recorded explicitly because it defines the programming model and \
+is easy to accidentally violate."""
 
 [[claim]]
 id = "boot-is-normal-supervision"
