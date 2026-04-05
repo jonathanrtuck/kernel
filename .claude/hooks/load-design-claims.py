@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """SessionStart hook: loads kernel design claims into the conversation context.
 
-Reads design/claims.toml and formats them identically to the remote Company OS
-claims hook, so both org-level and project-level claims appear in the same style.
+Reads design/claims.toml and formats them for context.
 """
 
 import sys
@@ -44,7 +43,7 @@ def main():
     ))
 
     lines = [
-        "KERNEL DESIGN CLAIMS (local Company OS) — loaded automatically at session start:",
+        "KERNEL DESIGN CLAIMS — loaded automatically at session start:",
         "",
     ]
 
