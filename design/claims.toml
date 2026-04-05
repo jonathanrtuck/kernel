@@ -198,18 +198,25 @@ threads (scheduler), and transferring capabilities (trusted authority). Message 
 format, buffering, and protocols live in userspace libraries on top."""
 
 [[claim]]
-id = "ipc-mechanism-deferred"
-statement = "The specific IPC mechanism design is deferred until memory objects and threading are settled"
-status = "signal"
-confidence = "high"
+id = "ipc-routing-settled-delivery-open"
+statement = "IPC routing is settled: events are the sole primitive, routed by the supervision tree, with shared Space objects for bulk data. The delivery semantics (synchronous vs. asynchronous) remain an open design question."
+status = "working"
+confidence = "medium"
 scope = ["kernel", "ipc"]
-date = "2026-04-04"
+date = "2026-04-05"
 rationale = """
-IPC design depends on the memory object model (shared memory regions) and \
-threading model (synchronous rendezvous, notification). Three composable \
-primitives are identified — shared memory for bulk data, synchronous message \
-passing for request/reply, async notification for signaling — but specific \
-design requires the foundation to be in place first."""
+The routing model is resolved: events carry a single predefined type \
+and a payload. The kernel evaluates routing rules and delivers directly. \
+Shared Space objects handle bulk data with events as coordination signals. \
+No separate IPC subsystem exists. \
+\
+What remains open: does emitting an event block the sender until the \
+receiver processes it (synchronous, like seL4 rendezvous), or does the \
+sender continue immediately (asynchronous, like Zircon channels)? \
+Async is simpler and more flexible but requires buffering and has no \
+natural backpressure. Sync provides backpressure and avoids buffering \
+but couples sender and receiver lifetimes. The choice affects the \
+programming model for every Object in the system."""
 
 [[claim]]
 id = "kernel-is-leaf-node"
@@ -349,51 +356,211 @@ the event enters the tree (supervisor for faults, delegated handler for \
 interrupts), not how it propagates."""
 
 [[claim]]
-id = "interrupt-delegation"
-statement = "Interrupt authority flows down the supervision tree via delegation. The root Object initially receives all hardware interrupts. It delegates specific interrupts to children, who may delegate further. The kernel caches delegation targets for direct delivery — the tree is the source of truth, direct delivery is an optimization."
+id = "kernel-routes-events"
+statement = "The kernel evaluates routing rules and delivers events directly to the destination Object. Supervisors parcel out routing capabilities to children at any time; the kernel enforces them. Intermediate supervisors are not woken unless they have registered interest (observe or consume)."
 status = "signal"
 confidence = "high"
 scope = ["kernel", "architecture"]
 date = "2026-04-05"
 rationale = """
-At boot, the root Object is the only Object — all interrupts go to it. \
-As it creates children (device drivers), it delegates specific interrupts \
-down the tree. Each delegation is an authority grant: "you may handle \
-this interrupt." The kernel records the delegation chain and delivers \
-directly to the final handler for performance, but the tree structure is \
-the authoritative routing table. \
+The alternative — supervisors actively routing events by receiving and \
+forwarding — requires each intermediate supervisor to sit in a receive \
+loop, which is polling. Since supervisors already declared their routing \
+rules when they parceled out capabilities, waking them at delivery time \
+to re-answer routing questions they already answered is unnecessary work. \
 \
-When a handler Object dies, the delegation is unwound — the interrupt \
-bubbles back up to the delegator (the handler's supervisor), which can \
-re-delegate to a restarted driver or handle it directly. No separate \
-interrupt registration mechanism is needed; delegation through the tree \
-is the mechanism. \
+Instead, the kernel maintains the routing structure directly. When an \
+event is emitted, the kernel walks the routing rules in kernel memory — \
+no context switches for intermediaries. Only the destination Object is \
+woken. The routing walk is cheap (rule table lookups in kernel memory, \
+a few per tree level). \
 \
-This parallels how all systems ultimately work (a driver registers for \
-an IRQ), but makes the authority chain explicit and ties interrupt \
-lifecycle to the supervision tree rather than maintaining a separate \
-IRQ-to-handler table."""
+Events take the shortest path through the tree. Parent to child is \
+direct. Child to parent is one hop (the child's event bubbles to its \
+immediate supervisor). Cross-subtree events walk up to the common \
+ancestor's routing rules and back down. \
+\
+When a child dies, its routing capabilities return to its supervisor. \
+The supervisor can reassign them (to a restarted replacement or a \
+different child). Events that were routed to the dead child now reach \
+the supervisor instead — senders never see the failure. Recovery is \
+transparent, handled at the right level of the tree."""
 
 [[claim]]
-id = "tree-authorizes-ipc"
-statement = "The supervision tree authorizes IPC connections — requests walk up to the common ancestor and back down, with each supervisor able to allow, deny, redirect, or interpose. Once authorized, the kernel provides a direct channel. The tree governs connection establishment, not data transfer."
+id = "routes-are-authority"
+statement = "Routes are capabilities (authority over which event types an Object receives), not a fourth object type. The external object model stays at three types: Object, Space, Time. Routing authority is part of the governance system — supervisors assign routes to children, children cannot self-select."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "architecture"]
+date = "2026-04-05"
+rationale = """
+A Route grants the right to receive events of a specific type. This is \
+authority — governance over what reaches an Object — not a resource the \
+Object consumes for execution. An Object with Space and Time but no \
+Routes can still execute; it just runs in silence, receiving no external \
+events. \
+\
+Routes follow the same pattern as other authority: the parent imposes \
+them on children, they attenuate downward (a child can only receive \
+event types its parent receives), and children cannot self-select. This \
+prevents Objects from unilaterally claiming event types, which would \
+create routing ambiguity and security holes. \
+\
+Making Routes a fourth object type would elevate one capability above \
+others (create, destroy, map, bind). All of these are authority the \
+supervisor exercises over its subtree. Routes belong in the same \
+category: governance, not resources."""
+
+[[claim]]
+id = "event-types-predefined"
+statement = "Events carry a single type from a flat, predefined set. Event types are globally meaningful across all tree levels. The specific type vocabulary is an OS-level ABI decision; the kernel routes on type IDs without interpreting them."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "architecture"]
+date = "2026-04-05"
+rationale = """
+Single type per event: routing rules map event types to children. One \
+type means one unambiguous routing decision at each tree level. Multiple \
+types per event would require combining type matches across ancestors, \
+effectively recreating hierarchical addresses — unnecessary complexity. \
+\
+Predefined set: if Objects could define custom event types, they would \
+need implicit inter-Object protocols — prior agreement on what types \
+mean. This undermines the supervision model where the supervisor defines \
+the vocabulary for its children. Objects don't know about each other; \
+they emit events using types their supervisor assigned meaning to. \
+\
+Globally meaningful: the same type ID means the same thing at every \
+tree level. An event bubbles up and routes down using one type. Level- \
+scoped types would require type translation across levels, recreating \
+addressing. \
+\
+The actual type set (hardware interrupts, fault types, and OS-defined \
+application types like filesystem/network/display) is an OS convention, \
+not a kernel architecture decision. The kernel just routes on the ID."""
+
+[[claim]]
+id = "events-sole-communication"
+statement = "Events are the sole inter-Object communication primitive. There is no separate IPC subsystem. Small data is carried in the event payload. Bulk data uses shared Space objects with events for coordination signals."
 status = "signal"
 confidence = "high"
 scope = ["kernel", "architecture", "ipc"]
 date = "2026-04-05"
 rationale = """
-If Object X wants to communicate with distant cousin Object Y, the \
-authorization request walks up through X's supervisors to the common \
-ancestor, then down to Y's supervisors. Each intermediate supervisor can \
-allow, deny, redirect, or interpose on the connection — the tree is the \
-policy enforcement structure. This happens once per connection. \
+Events carry a type (for routing) and a payload (for the destination). \
+Small messages fit in the payload — a status code, a request descriptor, \
+a fault syndrome. No shared memory setup needed. \
 \
-Once authorized, the kernel creates a direct channel between X and Y. \
-Subsequent messages flow directly with no tree hops — this is the \
-performance-sensitive path and cannot afford intermediary forwarding. \
+For bulk data (file contents, audio buffers, video frames), the \
+supervisor maps a shared Space object into both communicating Objects. \
+Data is written to shared memory (zero-copy). An event signals "data \
+ready." The kernel's role in the data path is delivering the signal. \
 \
-The pattern is: authority is tree-shaped, data flow is a graph. Same \
-separation seen in DNS (hierarchy resolves names, packets go direct), \
-Genode (session requests route through parent chain, session data flows \
-directly), and interrupt delegation (authority down the tree, delivery \
-direct). The tree is always the authority structure, never the hot path."""
+This means the kernel has no message queues, no channels, no ports, no \
+IPC buffers. It has event delivery (routing rules + direct delivery) \
+and memory mapping (Space objects). IPC is an emergent pattern, not a \
+built-in subsystem. Fewer kernel concepts, smaller attack surface, \
+less mechanism to verify."""
+
+[[claim]]
+id = "tree-is-security-boundary"
+statement = "The supervision tree is the visibility and security boundary. Only ancestors on the routing path between sender and receiver can observe events. Cross-subtree observation is impossible — the tree topology is the access control."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "architecture"]
+date = "2026-04-05"
+rationale = """
+Events travel up from the emitter and down to the destination, following \
+routing rules. Only supervisors on this path can register observe or \
+consume rules. A supervisor in a different subtree is never on the path \
+and therefore never sees the event. No ACLs, no permission checks on \
+observation — the tree topology IS the access control. \
+\
+This means: Root can observe everything (ancestor of all). Supervisor A \
+can observe events in A's subtree. Object A1 sees only events delivered \
+to A1. A malicious Object in subtree C cannot observe events between A1 \
+and B2 because C is never on the routing path. \
+\
+Visibility attenuates downward, same as authority. A child never sees \
+more than its parent can. A parent always sees at least as much as its \
+children. The monotonic property holds for both authority and visibility."""
+
+[[claim]]
+id = "observe-consume-modes"
+statement = "Supervisors intercept events in two modes: observe (see the event, delivery continues to destination) and consume (become the destination, must re-emit for children to see it). Observe is for passive monitoring; consume is for active filtering or dispatch."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "architecture"]
+date = "2026-04-05"
+rationale = """
+Most interposition is passive — logging, monitoring, debugging. The \
+supervisor wants to see events without disrupting the delivery path. \
+Observe delivers the event to the supervisor AND continues to the \
+destination. No active routing by the supervisor, no latency impact. \
+\
+When a supervisor needs to actively filter, modify, or multiplex events \
+(e.g., dispatching to one of several children based on payload), it \
+registers as consumer. The event stops at the supervisor. The supervisor \
+inspects the payload and re-emits or sends to the appropriate child. \
+This is a deliberate opt-in to active routing for that event type. \
+\
+Both modes are declared as routing rules at setup time, not per-event \
+decisions. The kernel knows the full delivery plan before any event \
+arrives. Parallels DOM event model: addEventListener without \
+stopPropagation is observe; with stopPropagation is consume."""
+
+[[claim]]
+id = "default-to-supervisor"
+statement = "Events with no matching routing rule are delivered to the emitter's immediate supervisor. The kernel is type-agnostic — it evaluates routing rules and follows the default when none match. Supervision concerns (faults, resource requests, lifecycle) work because they are naturally unrouted."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "architecture"]
+date = "2026-04-05"
+rationale = """
+The kernel has one routing algorithm: walk routing rules, deliver to the \
+match, fall back to the immediate supervisor if no match exists. This \
+means the kernel never interprets event types — it does not distinguish \
+"supervision" events from "service" events. The difference is emergent: \
+supervision events (faults, resource requests) have no routing rules, so \
+they always fall through to the supervisor. Service events (filesystem, \
+network) have explicit routing rules, so they reach their destination. \
+\
+A supervisor that wants to delegate a supervision concern can: just add \
+a routing rule. Route "fault" to a debugger child, route "space-request" \
+to a memory manager child. The default-to-supervisor behavior is \
+overridden by the explicit route. When the route is removed, the default \
+resumes. No special mechanism for delegation — same routing rules as \
+everything else. \
+\
+This eliminates the need for the kernel to categorize event types as \
+"inherent" vs. "singleton" or "supervision" vs. "service." One routing \
+mechanism, one default, zero type interpretation."""
+
+[[claim]]
+id = "boot-is-normal-supervision"
+statement = "Boot is not a special protocol. The kernel creates the root Object with minimal resources and responds to its requests through the normal supervision interface. The root Object requests Space, Time, and routing capabilities incrementally as it builds the system."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "architecture"]
+date = "2026-04-05"
+rationale = """
+The kernel is the root Object's supervisor. Supervisors grant resources \
+to children on request. Therefore, the kernel grants resources to the \
+root Object on request — same interface, no special boot protocol. \
+\
+The kernel creates the root Object with enough to start: Space for its \
+code and stack, Time for one core. The root Object emits resource \
+requests (unrouted events, delivered to its supervisor — the kernel). \
+The kernel grants from its pool of physical resources. The root Object \
+builds the system incrementally, never holding all resources at once. \
+\
+Contrast with seL4, which dumps all capabilities via BootInfo at boot. \
+That requires the root task to be briefly omnipotent — a single point \
+of compromise holding everything. In our model, the root Object's \
+authority at any moment is only what it currently holds. The kernel \
+retains unallocated resources and grants on request. \
+\
+The kernel is the sole entity that creates resources from physical \
+hardware (RAM → Space, cores → Time, IRQs → routing capabilities). \
+Every other supervisor subdivides what it was given. The kernel is \
+the origin of all resources — the prime mover."""
