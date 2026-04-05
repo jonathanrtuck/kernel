@@ -72,7 +72,7 @@ hypervisor target/aarch64-unknown-none/debug/kernel --no-gpu --timeout 5
 cd host && cargo test
 ```
 
-Use `hypervisor` (installed at `~/.local/bin/hypervisor`, source at `~/Sites/hypervisor/`) for all kernel testing. QEMU is a fallback only. Key flags:
+Use `hypervisor` (installed at `~/.local/bin/hypervisor`, [source](https://github.com/jonathanrtuck/hypervisor)) for all kernel testing. QEMU is a fallback only. Key flags:
 
 - `--no-gpu` — serial-only mode (no Metal window)
 - `--timeout SECS` — exit after N seconds (for automated runs)
@@ -83,7 +83,7 @@ The prebuilt `core` for `aarch64-unknown-none` comes from the nightly toolchain 
 
 ## Kernel Change Protocol (MANDATORY)
 
-**Every change to the kernel MUST follow this protocol.** The kernel is the foundation; a bug here corrupts everything above.
+**Every change to the kernel MUST follow this protocol.**
 
 ### Unsafe code and inline assembly
 
@@ -96,7 +96,7 @@ The prebuilt `core` for `aarch64-unknown-none` comes from the nightly toolchain 
 ### Anomaly tracking
 
 - Any unexplained kernel behavior (spurious wakeups, unexpected fault codes, timing anomalies) MUST be documented with `Status: open-bug`.
-- Workarounds (retry loops, defensive checks) are acceptable as defense-in-depth but do NOT close the bug. The root cause investigation continues.
+- Workarounds (retry loops, defensive checks) _may_ be acceptable as defense-in-depth but do NOT close the bug. The root cause investigation continues.
 
 ## Rust
 
@@ -111,11 +111,10 @@ Every `.rs` file follows this order:
 1. **Module doc comment** (`//!`)
 2. **Imports** (`use` statements, grouped by rustfmt)
 3. **Constants and statics**
-4. **Types in dependency order, each co-located with its `impl` blocks** — define a type, then immediately its `impl` block(s), before the next type. Within `impl` blocks: constructors first (`new`, `from_*`), then public methods, then private methods.
-5. **Free functions**
-6. **Tests** (`#[cfg(test)]` module)
-
-**Co-located, not types-first.** Do NOT group all type definitions at the top with all `impl` blocks below. Each type lives next to its implementation. Types appear in dependency order: if type B uses type A, define A first.
+4. **Types**
+5. **Implementations** — constructors first (`new`, `from_*`), then private methods, then public methods
+6. **Free functions**
+7. **Tests** (`#[cfg(test)]` module)
 
 ## Design
 
