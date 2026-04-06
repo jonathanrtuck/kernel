@@ -58,8 +58,12 @@ _start:
     bic     x0, x0, #(1 << 10)
     msr     cptr_el2, x0
 
-    // Return to .Lel1 at EL1h.
-    mov     x0, #0b0101
+    // Return to .Lel1 at EL1h with interrupts masked.
+    // DAIF = 0b1111 (bits [9:6]) masks all async exceptions until the
+    // kernel installs VBAR_EL1 and SP_EL1. Without this, any pending
+    // IRQ/FIQ/SError between the eret and exception::init() would vector
+    // through an uninitialized table with a zero stack pointer.
+    mov     x0, #(0b1111 << 6 | 0b0101)
     msr     spsr_el2, x0
     adr     x0, .Lel1
     msr     elr_el2, x0

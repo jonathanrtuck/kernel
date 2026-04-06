@@ -86,12 +86,18 @@ pub fn scan_blob(blob: &[u8]) -> Option<BootInfo> {
 
     let off_struct = read_be_u32(blob, 8) as usize;
     let off_strings = read_be_u32(blob, 12) as usize;
+    let size_struct = read_be_u32(blob, 36) as usize; // v17+ header field
 
     if off_struct >= totalsize || off_strings >= totalsize {
         return None;
     }
 
-    let structs = blob.get(off_struct..totalsize)?;
+    let struct_end = off_struct.checked_add(size_struct)?;
+    if struct_end > totalsize {
+        return None;
+    }
+
+    let structs = blob.get(off_struct..struct_end)?;
     let strings = blob.get(off_strings..totalsize)?;
 
     let mut info = BootInfo {
@@ -112,6 +118,7 @@ pub fn scan_blob(blob: &[u8]) -> Option<BootInfo> {
 
     let mut depth: usize = 0;
     let mut offset: usize = 0;
+    let mut seen_end = false;
 
     loop {
         if offset + 4 > structs.len() {
@@ -191,12 +198,17 @@ pub fn scan_blob(blob: &[u8]) -> Option<BootInfo> {
                 offset = align4(offset + len);
             }
             FDT_NOP => {}
-            FDT_END => break,
-            _ => break,
+            FDT_END => {
+                seen_end = true;
+                break;
+            }
+            _ => return None, // Unknown token — corrupted struct block.
         }
     }
 
-    if info.ram_size == 0 {
+    // Reject if the struct block was truncated (no FDT_END seen) or if
+    // no memory node was found.
+    if !seen_end || info.ram_size == 0 {
         return None;
     }
 
@@ -538,6 +550,34 @@ mod tests {
         let info = scan_blob(&blob).expect("should find real memory node");
         assert_eq!(info.ram_base, 0x4000_0000);
         assert_eq!(info.ram_size, 0x1000_0000);
+    }
+
+    #[test]
+    fn reject_truncated_struct_block() {
+        let mut blob = build_test_dtb(0x4000_0000, 256 * 1024 * 1024, 4);
+        // Shrink size_dt_struct (header offset 36) so FDT_END falls outside
+        // the declared struct block. The parser must reject this even though
+        // the memory node was parsed successfully before truncation.
+        let current_size = u32::from_be_bytes([blob[36], blob[37], blob[38], blob[39]]);
+        let truncated = (current_size / 2).to_be_bytes();
+        blob[36..40].copy_from_slice(&truncated);
+        assert!(
+            scan_blob(&blob).is_none(),
+            "truncated struct block must be rejected"
+        );
+    }
+
+    #[test]
+    fn reject_unknown_token() {
+        let mut blob = build_test_dtb(0x4000_0000, 256 * 1024 * 1024, 4);
+        // Overwrite the first struct token (FDT_BEGIN_NODE for root) with an
+        // invalid token value. Header offset 16 = off_mem_rsvmap, the rsvmap
+        // is 16 bytes, so the struct block starts at header + 16 + 16 = 56 + rsvmap.
+        // Actually, use the header's off_dt_struct to find it precisely.
+        let off_struct = u32::from_be_bytes([blob[8], blob[9], blob[10], blob[11]]) as usize;
+        // Write an invalid token (0xFF) at the start of the struct block.
+        blob[off_struct..off_struct + 4].copy_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+        assert!(scan_blob(&blob).is_none(), "unknown token must be rejected");
     }
 
     #[test]
