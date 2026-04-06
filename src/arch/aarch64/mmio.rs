@@ -17,7 +17,6 @@ pub fn read32(addr: usize) -> u32 {
     );
 
     let val: u32;
-
     // SAFETY: LDR w from an MMIO address. Inline asm guarantees a plain
     // `ldr` without writeback or pair modes (HVF-compatible). The address
     // is passed as an input register, so LLVM cannot fold it into a
@@ -30,7 +29,6 @@ pub fn read32(addr: usize) -> u32 {
             options(nostack),
         );
     }
-
     val
 }
 
