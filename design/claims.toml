@@ -215,9 +215,10 @@ schedules whatever has Time. \
 \
 Time donation for the supervision path (child → supervisor) works \
 naturally: the child includes its Time, the supervisor borrows it to \
-process the request, returns it in the reply. A sleeping supervisor \
-with no Time of its own can always process requests because callers \
-bring their own Time. Idle supervisors cost nothing. \
+process the request, returns it in the reply. Supervisors do not need \
+Time proportional to their children's workload — callers bring their \
+own Time for request processing. Supervisors do need a baseline Time \
+allocation for autonomous work (see supervisor-needs-time). \
 \
 For fire-and-forget (notifications, signals): the sender omits Time. \
 The event is queued at the destination. The receiver processes on its \
@@ -614,3 +615,57 @@ The kernel is the sole entity that creates resources from physical \
 hardware (RAM → Space, cores → Time, IRQs → routing capabilities). \
 Every other supervisor subdivides what it was given. The kernel is \
 the origin of all resources — the prime mover."""
+
+[[claim]]
+id = "resource-inheritance-on-destruction"
+statement = "When an Object is destroyed, its bound resources (Time, Space) return to its supervisor. Resources do not disappear — they flow up the ownership tree. The supervisor inherits the resources and may reuse them (e.g., to restart a replacement child)."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "architecture"]
+date = "2026-04-05"
+rationale = """
+This follows directly from the unified ownership tree: the supervisor \
+owns the resources it granted to its children. When a child is \
+destroyed, its resources return to the owner. Time does not vanish — \
+it flows back up. This solves the 'supervisor needs time to clean up \
+after dead child' problem that seL4 MCS passive servers struggle with: \
+the dead child's Time becomes the supervisor's Time, which the \
+supervisor uses for cleanup, restart decisions, and re-provisioning. \
+\
+Space objects follow the same path: unmapped from the destroyed child, \
+returned to the supervisor's resource pool. The supervisor can remap \
+them into a replacement child or reclaim the backing memory. \
+\
+Recursive destruction means an entire subtree's resources flow to the \
+nearest surviving ancestor. This is natural garbage collection — the \
+tree structure determines resource flow, no reference counting or \
+mark-sweep needed."""
+
+[[claim]]
+id = "supervisor-needs-time"
+statement = "Every active supervisor needs a baseline Time allocation for autonomous work — receiving async events, monitoring children, cleanup, and lifecycle management. Callers donate additional Time for request processing. Supervisor cost scales with responsibility, not with client load."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "architecture"]
+date = "2026-04-05"
+rationale = """
+A supervisor that handles only synchronous requests from children could \
+in theory run entirely on donated Time. But real supervisors also need \
+to: (1) receive asynchronous events (interrupts, timer expiries, \
+notifications from peers) that arrive without donated Time, (2) perform \
+cleanup and restart when children die — the dead child's Time returns \
+to the supervisor (per resource-inheritance-on-destruction) but the \
+supervisor must be schedulable to receive it, (3) run periodic health \
+checks or monitoring. \
+\
+Every production system that tried 'callers bring their own time' \
+needed this escape hatch. Erlang supervisors are always their own \
+process with CPU time. seL4 MCS passive servers cannot receive async \
+notifications without their own scheduling context. \
+\
+The corrected model: a supervisor's baseline Time covers autonomous \
+work. Donated Time from callers covers request processing on their \
+behalf. The supervisor does not need Time proportional to the number \
+of clients — a supervisor serving 1000 clients needs the same baseline \
+as one serving 10. Client requests bring their own fuel. What 'costs \
+nothing' is the scaling, not the existence."""
