@@ -1,16 +1,13 @@
 //! Microkernel.
 //!
-//! This is the kernel entry crate. It owns the boot path, panic handler, and
-//! top-level module wiring. Subsystem logic lives in child modules.
+//! This is the kernel entry point. Subsystem logic lives in the library
+//! modules declared by `lib.rs`.
 
 #![no_std]
 #![no_main]
 
-mod arch;
-mod config;
-mod print;
-
 use core::panic::PanicInfo;
+use kernel::arch;
 
 /// Kernel entry point, called from boot assembly after stack and BSS are set up.
 ///
@@ -25,7 +22,7 @@ extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
     arch::interrupts::init();
     arch::timer::init();
 
-    println!("alive");
+    kernel::println!("alive");
 
     loop {
         arch::halt();
@@ -36,9 +33,9 @@ extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
 fn panic(info: &PanicInfo) -> ! {
     arch::disable_interrupts();
 
-    println!();
-    println!("panic: {info}");
-    println!();
+    kernel::println!();
+    kernel::println!("panic: {info}");
+    kernel::println!();
 
     arch::dump_panic_registers();
     arch::signal_panic();

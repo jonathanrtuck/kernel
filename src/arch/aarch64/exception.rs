@@ -16,7 +16,8 @@ use super::sysreg;
 /// Saved CPU state at the point of an exception.
 ///
 /// Created by the assembly vector entry, passed to [`exception_handler`] as a
-/// stack pointer. 288 bytes, 16-byte aligned.
+/// stack pointer. 816 bytes, 16-byte aligned. Includes full FP/SIMD state
+/// so that interrupts cannot corrupt the interrupted code's float registers.
 #[repr(C)]
 pub struct TrapFrame {
     /// General-purpose registers x0–x30.
@@ -29,9 +30,16 @@ pub struct TrapFrame {
     pub esr: u64,
     /// Fault Address Register — address that caused a data/instruction abort.
     pub far: u64,
-    /// Padding for 16-byte alignment. The assembly stores the source ID here
-    /// temporarily, but it is passed to Rust via the `source` parameter.
+    /// Padding for 16-byte alignment of FP register block. The assembly stores
+    /// the source ID here temporarily, but it is passed to Rust via the
+    /// `source` parameter.
     _pad: u64,
+    /// FP/SIMD registers q0–q31 (128-bit each).
+    pub fp_regs: [u128; 32],
+    /// Floating-point control register.
+    pub fpcr: u64,
+    /// Floating-point status register.
+    pub fpsr: u64,
 }
 
 // Offsets must match exception.S — the assembly uses hard-coded immediates for
@@ -39,11 +47,14 @@ pub struct TrapFrame {
 // compile time rather than producing silent context corruption at runtime.
 const _: () = {
     assert!(core::mem::offset_of!(TrapFrame, gprs) == 0);
-    assert!(core::mem::offset_of!(TrapFrame, elr) == 248); // stp x30,elr,[sp,#240]
-    assert!(core::mem::offset_of!(TrapFrame, spsr) == 256); // stp spsr,esr,[sp,#256]
+    assert!(core::mem::offset_of!(TrapFrame, elr) == 248);
+    assert!(core::mem::offset_of!(TrapFrame, spsr) == 256);
     assert!(core::mem::offset_of!(TrapFrame, esr) == 264);
-    assert!(core::mem::offset_of!(TrapFrame, far) == 272); // str far,[sp,#272]
-    assert!(core::mem::size_of::<TrapFrame>() == 288); // sub sp, sp, #288
+    assert!(core::mem::offset_of!(TrapFrame, far) == 272);
+    assert!(core::mem::offset_of!(TrapFrame, fp_regs) == 288);
+    assert!(core::mem::offset_of!(TrapFrame, fpcr) == 800);
+    assert!(core::mem::offset_of!(TrapFrame, fpsr) == 808);
+    assert!(core::mem::size_of::<TrapFrame>() == 816); // sub sp, sp, #816
 };
 
 // ---------------------------------------------------------------------------

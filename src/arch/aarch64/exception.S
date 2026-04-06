@@ -7,7 +7,7 @@
 // in the TrapFrame's pad slot, and branches to a common handler that saves
 // the remaining context and calls into Rust.
 //
-// TrapFrame layout (288 bytes = 36 x u64, 16-byte aligned):
+// TrapFrame layout (816 bytes, 16-byte aligned):
 //
 //   Offset  Field
 //   0       x0
@@ -20,6 +20,31 @@
 //   264     esr_el1
 //   272     far_el1
 //   280     (source ID, reused as pad for alignment)
+//   288     q0  (128-bit FP/SIMD)
+//   304     q1
+//   ...
+//   768     q30
+//   784     q31
+//   800     fpcr
+//   808     fpsr
+//
+// Optimization note: FP/SIMD state is saved/restored eagerly on every
+// exception. This is simple and correct but costs ~100 cycles per entry/exit.
+// When this becomes a bottleneck, switch to lazy save: disable FP access via
+// CPACR_EL1, trap on first FP use, and save/restore only when the interrupted
+// context actually used FP registers.
+//
+// Register state checklist (audit whenever exception entry/exit changes):
+//   [x] GPRs x0-x30
+//   [x] ELR_EL1 (return address)
+//   [x] SPSR_EL1 (saved PSTATE)
+//   [x] ESR_EL1 (exception syndrome — saved for diagnostics, not restored)
+//   [x] FAR_EL1 (fault address — saved for diagnostics, not restored)
+//   [x] FP/SIMD q0-q31 (128-bit NEON/VFP registers)
+//   [x] FPCR (floating-point control register)
+//   [x] FPSR (floating-point status register)
+//   [ ] SVE state (not applicable — SVE not enabled)
+//   [ ] SP_EL0 (only needed when handling exceptions from EL0)
 
 // ---------------------------------------------------------------------------
 // Vector entry macro — inlined at each of the 16 vector positions.
@@ -30,7 +55,7 @@
 // ---------------------------------------------------------------------------
 .macro VECTOR_ENTRY source
 .align 7
-    sub     sp, sp, #288
+    sub     sp, sp, #816
     stp     x0, x1, [sp, #16 * 0]
     mov     x0, #\source
     str     x0, [sp, #280]
@@ -73,7 +98,8 @@ __vectors:
 // Common exception handler — shared by all 16 vector entries.
 //
 // On entry: frame allocated, x0-x1 saved, source ID at [sp+280].
-// Saves remaining GPRs + system registers, calls Rust, restores, returns.
+// Saves remaining GPRs + system registers + FP/SIMD, calls Rust, restores
+// everything, and returns via eret.
 // ---------------------------------------------------------------------------
 __exception_common:
     // Save x2-x29 (x0-x1 already saved by vector entry).
@@ -105,10 +131,58 @@ __exception_common:
     mrs     x9, far_el1
     str     x9, [sp, #272]
 
+    // Save FP/SIMD registers q0-q31 (128-bit each).
+    stp     q0, q1, [sp, #288]
+    stp     q2, q3, [sp, #320]
+    stp     q4, q5, [sp, #352]
+    stp     q6, q7, [sp, #384]
+    stp     q8, q9, [sp, #416]
+    stp     q10, q11, [sp, #448]
+    stp     q12, q13, [sp, #480]
+    stp     q14, q15, [sp, #512]
+    stp     q16, q17, [sp, #544]
+    stp     q18, q19, [sp, #576]
+    stp     q20, q21, [sp, #608]
+    stp     q22, q23, [sp, #640]
+    stp     q24, q25, [sp, #672]
+    stp     q26, q27, [sp, #704]
+    stp     q28, q29, [sp, #736]
+    stp     q30, q31, [sp, #768]
+
+    // Save FPCR and FPSR.
+    mrs     x9, fpcr
+    str     x9, [sp, #800]
+    mrs     x9, fpsr
+    str     x9, [sp, #808]
+
     // Call Rust: exception_handler(frame: &mut TrapFrame, source: u64)
     mov     x0, sp
     ldr     x1, [sp, #280]
     bl      exception_handler
+
+    // Restore FPCR and FPSR.
+    ldr     x9, [sp, #800]
+    msr     fpcr, x9
+    ldr     x9, [sp, #808]
+    msr     fpsr, x9
+
+    // Restore FP/SIMD registers q0-q31.
+    ldp     q0, q1, [sp, #288]
+    ldp     q2, q3, [sp, #320]
+    ldp     q4, q5, [sp, #352]
+    ldp     q6, q7, [sp, #384]
+    ldp     q8, q9, [sp, #416]
+    ldp     q10, q11, [sp, #448]
+    ldp     q12, q13, [sp, #480]
+    ldp     q14, q15, [sp, #512]
+    ldp     q16, q17, [sp, #544]
+    ldp     q18, q19, [sp, #576]
+    ldp     q20, q21, [sp, #608]
+    ldp     q22, q23, [sp, #640]
+    ldp     q24, q25, [sp, #672]
+    ldp     q26, q27, [sp, #704]
+    ldp     q28, q29, [sp, #736]
+    ldp     q30, q31, [sp, #768]
 
     // Restore ELR_EL1 and SPSR_EL1 (using x9 as scratch — not yet restored).
     ldr     x9, [sp, #248]
@@ -135,5 +209,5 @@ __exception_common:
     ldr     x30, [sp, #240]
 
     // Deallocate frame and return from exception.
-    add     sp, sp, #288
+    add     sp, sp, #816
     eret

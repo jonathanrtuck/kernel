@@ -2,7 +2,6 @@
 
 core::arch::global_asm!(include_str!("boot.S"));
 
-mod dtb;
 pub mod entropy;
 pub mod exception;
 pub mod gic;
@@ -13,17 +12,6 @@ pub mod platform;
 pub mod serial;
 mod sysreg;
 pub mod timer;
-
-/// Halt the CPU until an event or interrupt arrives.
-#[inline(always)]
-pub fn halt() {
-    // SAFETY: `wfe` is a hint instruction with no side effects beyond pausing
-    // the core until the next event (interrupt, SEV from another core, etc.).
-    // It does not modify memory or registers.
-    unsafe {
-        core::arch::asm!("wfe", options(nomem, nostack));
-    }
-}
 
 /// Mask all maskable interrupts.
 ///
@@ -53,6 +41,17 @@ pub fn dump_panic_registers() {
     crate::println!("  ELR:  0x{elr:016x}");
     crate::println!("  SPSR: 0x{spsr:016x}");
     crate::println!("  ESR:  0x{esr:016x}");
+}
+
+/// Halt the CPU until an event or interrupt arrives.
+#[inline(always)]
+pub fn halt() {
+    // SAFETY: `wfe` is a hint instruction with no side effects beyond pausing
+    // the core until the next event (interrupt, SEV from another core, etc.).
+    // It does not modify memory or registers.
+    unsafe {
+        core::arch::asm!("wfe", options(nomem, nostack));
+    }
 }
 
 /// Signal a fatal crash to the hypervisor via the pvpanic device.

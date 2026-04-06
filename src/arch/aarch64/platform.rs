@@ -52,10 +52,22 @@ pub fn ram_size() -> usize {
 /// these values. Falls back to compiled defaults if the DTB is absent
 /// or malformed.
 pub fn init(dtb_ptr: usize) {
-    match super::dtb::scan(dtb_ptr) {
+    match crate::firmware::dtb::scan(dtb_ptr) {
         Some(info) => {
             if info.ram_base != 0 {
-                RAM_BASE_VAL.store(info.ram_base, Ordering::Relaxed);
+                // The kernel binary is position-dependent (linked at
+                // KERNEL_BASE). The MMU identity map assumes RAM starts at
+                // the compiled default. A mismatch means the DTB describes
+                // a different platform than the one we were compiled for —
+                // the MMU tables would not cover the kernel, and enabling
+                // the MMU would fault immediately.
+                let expected = RAM_BASE_VAL.load(Ordering::Relaxed);
+                if info.ram_base != expected {
+                    panic!(
+                        "dtb ram_base {:#x} != expected {:#x}",
+                        info.ram_base, expected,
+                    );
+                }
             }
             if info.ram_size != 0 {
                 RAM_SIZE_VAL.store(info.ram_size, Ordering::Relaxed);
@@ -63,6 +75,7 @@ pub fn init(dtb_ptr: usize) {
             if info.core_count != 0 {
                 CORE_COUNT.store(info.core_count, Ordering::Relaxed);
             }
+
             crate::println!(
                 "dtb: ram {:#x}+{:#x}, {} core(s)",
                 info.ram_base,

@@ -52,12 +52,17 @@ This is a long-running exploration project with no deadline. Sessions may be day
 ## Repository Layout
 
 ```text
-src/        — kernel source (no_std, aarch64-unknown-none)
-host/       — host-side tests (independent crate, native target)
-design/     — claims.toml (decisions SSOT), philosophy, derivations
+src/
+  lib.rs        — module root (shared by bin and test builds)
+  main.rs       — kernel entry point (bare-metal only)
+  arch/         — architecture-specific code (aarch64)
+  firmware/     — firmware interfaces (DTB, future ACPI/UEFI)
+  config.rs     — kernel configuration constants
+  print.rs      — println! macro
+design/         — claims.toml (decisions SSOT), philosophy, derivations
 ```
 
-The root Cargo.toml IS the kernel crate. `host/` is an independent Cargo project (not a workspace member) that runs on the host.
+The root Cargo.toml has both a `[lib]` and a `[[bin]]` target pointing into `src/`. Tests live as `#[cfg(test)]` modules inside source files. Bare-metal-only code is gated with `#[cfg(target_os = "none")]`.
 
 ## Build Commands
 
@@ -68,8 +73,8 @@ cargo build
 # Run the kernel (native Apple Hypervisor.framework — preferred)
 hypervisor target/aarch64-unknown-none/debug/kernel --no-gpu --timeout 5
 
-# Run host-side tests
-cd host && cargo test
+# Run tests on the host
+cargo test --target aarch64-apple-darwin
 ```
 
 Use `hypervisor` (installed at `~/.local/bin/hypervisor`, [source](https://github.com/jonathanrtuck/hypervisor)) for all kernel testing. QEMU is a fallback only. Key flags:

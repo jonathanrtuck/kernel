@@ -8,25 +8,26 @@ A [Rust](<https://en.wikipedia.org/wiki/Rust_(programming_language)>) [microkern
 - [Philosophy](design/philosophy.md) · Two root principles and their consequences. The general thinking framework that produces decisions.
 - [Landscape](design/landscape.md) · Survey of how 18+ real kernels and academic systems resolved each major design decision. Organized by decision point. Lists known approaches, tradeoffs, and novelty opportunities.
 
-## build
+## code
 
 ```sh
+# build - targets aarch64-unknown-none
 cargo build -r
-```
 
-- requires [Rust nightly](https://rustup.rs/)
-- targets [`aarch64-unknown-none`](https://doc.rust-lang.org/beta/rustc/platform-support/aarch64-unknown-none.html)
-
-## run
-
-```sh
+# run
 cargo run -r
+
+# test - runs on host
+cargo test --target aarch64-apple-darwin
 ```
 
-- requires [hypervisor](https://github.com/jonathanrtuck/hypervisor)
+**Requires:**
 
-### or in [QEMU](https://www.qemu.org/download/#macos)
+- [Rust nightly](https://rustup.rs/)
+- [hypervisor](https://github.com/jonathanrtuck/hypervisor)
+  - or [QEMU](https://www.qemu.org/download/#macos):
 
 ```sh
+# run in qemu
 qemu-system-aarch64 -M virt -cpu cortex-a72 -m 256M -nographic -kernel target/aarch64-unknown-none/release/kernel
 ```

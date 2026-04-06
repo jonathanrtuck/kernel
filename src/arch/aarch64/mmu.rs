@@ -27,7 +27,7 @@ use core::cell::UnsafeCell;
 core::arch::global_asm!(include_str!("mmu.S"));
 
 // ---------------------------------------------------------------------------
-// Descriptor constants (sync with host/tests/mmu.rs)
+// Descriptor constants
 // ---------------------------------------------------------------------------
 
 const VALID: u64 = 1 << 0;
