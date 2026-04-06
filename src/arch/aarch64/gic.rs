@@ -143,6 +143,7 @@ fn init_redistributor(redist_base: usize) {
         core::hint::spin_loop();
         timeout -= 1;
         if timeout == 0 {
+            crate::println!("gic: redistributor wake timeout");
             break;
         }
     }

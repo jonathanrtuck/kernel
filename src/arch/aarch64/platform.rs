@@ -30,6 +30,8 @@ pub const UART_BASE: usize = 0x0900_0000;
 // Runtime-discovered values (from DTB, with compiled defaults)
 // ---------------------------------------------------------------------------
 
+// Ordering::Relaxed is correct while only core 0 boots. When secondary
+// cores are unparked, these need at minimum Release/Acquire.
 static CORE_COUNT: AtomicUsize = AtomicUsize::new(1);
 static RAM_BASE_VAL: AtomicUsize = AtomicUsize::new(0x4000_0000);
 static RAM_SIZE_VAL: AtomicUsize = AtomicUsize::new(256 * 1024 * 1024);

@@ -154,7 +154,8 @@ pub fn init() {
     // Normal cacheable, RW, no execute.
     let ram_rw = ATTR_NORMAL | AP_RW_EL1 | PXN | UXN;
     let ram_start_idx = l2_index(platform::ram_base()) + 1;
-    let ram_end_idx = l2_index(platform::ram_base() + platform::ram_size() - 1);
+    let ram_end_idx =
+        l2_index(platform::ram_base() + platform::ram_size() - 1).min(ENTRIES_PER_TABLE - 1);
     for idx in ram_start_idx..=ram_end_idx {
         l2[idx] = l2_block(idx * L2_BLOCK_SIZE, ram_rw);
     }

@@ -46,6 +46,8 @@ fn putc(c: u8) {
         }
     }
 
+    // Write even if the FIFO is full after timeout — losing a character
+    // is better than hanging the kernel (this is often a panic dump path).
     mmio::write32(uart0_dr(), c as u32);
 }
 
