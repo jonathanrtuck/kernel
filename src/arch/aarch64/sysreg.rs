@@ -162,7 +162,7 @@ pub fn tlbi_vmalle1is() {
 }
 
 // ---------------------------------------------------------------------------
-// Identification registers (immutable, nomem safe)
+// Immutable registers (read-only at EL1, nomem safe)
 // ---------------------------------------------------------------------------
 
 sysreg_read_const!(mpidr_el1, "mpidr_el1");

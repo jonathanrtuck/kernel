@@ -41,8 +41,11 @@ pub fn disable_interrupts() {
 /// panic message has the precise source location.
 pub fn dump_panic_registers() {
     let lr: u64;
-    // SAFETY: Reading x30 (link register) for crash diagnostics.
-    unsafe { core::arch::asm!("mov {lr}, x30", lr = out(reg) lr, options(nomem, nostack)) };
+    // SAFETY: Copies the link register (x30) into a general-purpose register.
+    // Pure register-to-register move — no memory or system side effects. No
+    // `nomem` because the project policy restricts it to an explicit approved
+    // list (immutable `mrs`, hint instructions).
+    unsafe { core::arch::asm!("mov {lr}, x30", lr = out(reg) lr, options(nostack)) };
     let elr = sysreg::elr_el1();
     let spsr = sysreg::spsr_el1();
     let esr = sysreg::esr_el1();
