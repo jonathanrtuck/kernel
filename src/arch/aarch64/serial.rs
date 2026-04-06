@@ -5,23 +5,24 @@
 //! address. After the MMU is enabled, the caller must ensure the UART PA is
 //! mapped.
 //!
-//! All output goes through [`Uart`]'s [`core::fmt::Write`] implementation.
+//! All output goes through [`Writer`]'s [`core::fmt::Write`] implementation.
 
 use super::mmio;
 
+use super::platform;
+
 const TX_TIMEOUT: u32 = 1_000_000;
 const TXFF: u32 = 1 << 5;
-const UART0_PA: usize = 0x0900_0000;
 
 /// PL011 UART output. Use with [`core::fmt::Write`]:
 ///
 /// ```ignore
 /// use core::fmt::Write;
-/// writeln!(serial::Uart, "hello {}", 42).ok();
+/// writeln!(serial::Writer, "hello {}", 42).ok();
 /// ```
-pub struct Uart;
+pub struct Writer;
 
-impl core::fmt::Write for Uart {
+impl core::fmt::Write for Writer {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         for byte in s.bytes() {
             if byte == b'\n' {
@@ -50,10 +51,10 @@ fn putc(c: u8) {
 
 #[inline(always)]
 fn uart0_dr() -> usize {
-    UART0_PA
+    platform::UART_BASE
 }
 
 #[inline(always)]
 fn uart0_fr() -> usize {
-    UART0_PA + 0x18
+    platform::UART_BASE + 0x18
 }

@@ -10,7 +10,7 @@ macro_rules! print {
     ($($arg:tt)*) => {{
         use core::fmt::Write;
 
-        let _ = write!($crate::arch::serial::Uart, $($arg)*);
+        let _ = write!($crate::arch::serial::Writer, $($arg)*);
     }};
 }
 
@@ -21,6 +21,6 @@ macro_rules! println {
     ($($arg:tt)*) => {{
         use core::fmt::Write;
 
-        let _ = writeln!($crate::arch::serial::Uart, $($arg)*);
+        let _ = writeln!($crate::arch::serial::Writer, $($arg)*);
     }};
 }

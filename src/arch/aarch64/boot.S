@@ -11,6 +11,11 @@
 .section .text.boot, "ax"
 .global _start
 _start:
+    // Save the DTB pointer (passed in x0 by firmware/hypervisor) before
+    // any register use. x19 is callee-saved and survives the entire boot
+    // sequence including the EL2→EL1 ERET.
+    mov     x19, x0
+
     // Park secondary cores — only core 0 boots.
     mrs     x0, mpidr_el1
     and     x0, x0, #0xFF
@@ -74,7 +79,8 @@ _start:
     msr     cpacr_el1, x0
     isb
 
-    // Jump to Rust.
+    // Jump to Rust with DTB pointer as first argument.
+    mov     x0, x19
     bl      kernel_main
     b       .Lpark
 

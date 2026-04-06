@@ -33,6 +33,22 @@ pub fn read32(addr: usize) -> u32 {
 }
 
 #[inline(always)]
+pub fn write8(addr: usize, val: u8) {
+    // SAFETY: STRB to an MMIO address. Inline asm guarantees a plain
+    // `strb` without writeback (HVF-compatible). The address is passed as
+    // an input register, so LLVM cannot fold it into a pre/post-index
+    // addressing mode. Caller must ensure `addr` is valid.
+    unsafe {
+        core::arch::asm!(
+            "strb {val:w}, [{addr}]",
+            addr = in(reg) addr,
+            val = in(reg) val as u32,
+            options(nostack),
+        );
+    }
+}
+
+#[inline(always)]
 pub fn write32(addr: usize, val: u32) {
     debug_assert!(
         addr.is_multiple_of(4),

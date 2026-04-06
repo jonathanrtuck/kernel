@@ -1,47 +1,47 @@
 /*
- * Minimal kernel linker script for QEMU virt (aarch64).
+ * Kernel linker script for QEMU virt (aarch64), 16 KiB granule.
  *
  * Physical memory starts at 0x4000_0000. The kernel loads at 0x4008_0000
  * (512 KiB in, leaving room for DTB at RAM base).
  *
- * Everything runs at physical addresses for now. Upper-VA mapping, KASLR,
- * and W^X section permissions come later when the MMU setup lands.
+ * Section boundaries are 16 KiB-aligned so each region can have distinct
+ * page table permissions: text (RX), rodata (RO), data/bss/stack (RW).
  */
 
 ENTRY(_start)
 
-PHYS_BASE = 0x40080000;
+PHYS_BASE = 0x40080000; /* platform.rs sync: KERNEL_BASE */
 
 SECTIONS
 {
     . = PHYS_BASE;
 
-    /* Boot code — entered first, must be at the load address. */
+    /* Executable code: boot trampoline + kernel text (RX). */
+    __text_start = .;
     .text.boot : {
         KEEP(*(.text.boot))
     }
-
-    /* Kernel code. */
-    . = ALIGN(16);
-    __text_start = .;
     .text : {
         *(.text .text.*)
     }
     __text_end = .;
 
-    /* Read-only data. */
-    . = ALIGN(16);
+    /* Read-only data (RO, no execute). */
+    . = ALIGN(16384);
+    __rodata_start = .;
     .rodata : {
         *(.rodata .rodata.*)
     }
+    __rodata_end = .;
 
-    /* Read-write data. */
-    . = ALIGN(16);
+    /* Read-write data (RW, no execute). */
+    . = ALIGN(16384);
+    __data_start = .;
     .data : {
         *(.data .data.*)
     }
 
-    /* Zero-initialized data. */
+    /* Zero-initialized data (same RW permissions as .data). */
     . = ALIGN(16);
     __bss_start = .;
     .bss : {
@@ -54,7 +54,7 @@ SECTIONS
     . = ALIGN(16);
     .bss.stack (NOLOAD) : {
         __stack_bottom = .;
-        . = . + 0x10000;
+        . = . + 0x10000; /* config.rs sync: KERNEL_STACK_SIZE */
         __stack_top = .;
     }
 
@@ -64,6 +64,6 @@ SECTIONS
         *(.comment .note.*)
     }
 
-    . = ALIGN(16);
+    . = ALIGN(16384);
     __kernel_end = .;
 }
