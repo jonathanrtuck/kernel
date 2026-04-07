@@ -7,7 +7,7 @@
 #![no_main]
 
 use core::panic::PanicInfo;
-use kernel::arch;
+use kernel::{arch, println};
 
 /// Kernel entry point, called from boot assembly after stack and BSS are set up.
 ///
@@ -22,7 +22,7 @@ extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
     arch::interrupts::init();
     arch::timer::init();
 
-    kernel::println!("alive");
+    println!("alive");
 
     loop {
         arch::halt();
@@ -33,9 +33,9 @@ extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
 fn panic(info: &PanicInfo) -> ! {
     arch::disable_interrupts();
 
-    kernel::println!();
-    kernel::println!("panic: {info}");
-    kernel::println!();
+    println!();
+    println!("panic: {info}");
+    println!();
 
     arch::dump_panic_registers();
     arch::signal_panic();

@@ -5,9 +5,8 @@
 //! from the physical counter — slower but sufficient for KASLR seeds and
 //! early-boot randomness.
 
-use core::sync::atomic::{AtomicBool, Ordering};
-
 use super::sysreg;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 static HAS_RNDR: AtomicBool = AtomicBool::new(false);
 
