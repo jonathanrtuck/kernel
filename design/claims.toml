@@ -669,3 +669,196 @@ behalf. The supervisor does not need Time proportional to the number \
 of clients — a supervisor serving 1000 clients needs the same baseline \
 as one serving 10. Client requests bring their own fuel. What 'costs \
 nothing' is the scaling, not the existence."""
+
+[[claim]]
+id = "tickless-one-shot-timer"
+statement = "The kernel uses one-shot timers programmed to the nearest deadline — no periodic tick. The hardware timer fires for preemption and timeouts, nothing else."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "cpu"]
+date = "2026-04-06"
+rationale = """
+A periodic tick is a polling pattern: wake up at fixed intervals to check \
+whether anything needs attention. This wastes power on idle devices (the \
+target is phones, tablets, laptops), adds interrupt overhead proportional \
+to tick frequency rather than workload, and quantizes time into fixed \
+slices that are always wrong — too coarse for low-latency work, too fine \
+for idle efficiency.
+
+The kernel already knows exactly when it needs the timer to fire: when \
+the current Object's Time budget expires (preemption), or when the next \
+timeout completes (sleep, event deadline). Programming the hardware timer \
+to that exact moment is strictly better — zero wakeups when idle, \
+microsecond precision when busy.
+
+The ARM generic timer's CNTV_CVAL_EL0 supports absolute deadline \
+programming natively. The sorted deadline queue replaces the tick \
+counter: insert deadlines from the scheduler and timeout system, always \
+program the timer to the minimum.
+
+Every modern kernel has converged here: seL4 (one-shot, deadline-based), \
+Linux (NO_HZ_FULL), QNX (tickless since 6.3.2), Zircon (deadline + timer \
+slack). The v0.1 periodic tick at 100 Hz was bringup scaffolding to prove \
+the timer/GIC/exception path works end-to-end."""
+
+[[claim]]
+id = "time-object-shape"
+statement = "A Time object carries two values: allocation (a) and margin (m), both in nanoseconds-per-second. Allocation is the Object's claim on CPU capacity. Margin controls the flexibility range: the guaranteed floor is a-m, the ceiling is a+m. Both values are in the same unit on the same dimension — a±m is a literal arithmetic range."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "cpu"]
+date = "2026-04-07"
+rationale = """
+Derived from first principles during Time design exploration (2026-04-07). \
+\
+Single-value models were exhausted and proven insufficient: \
+- Weight alone (relative share) is meaningless without a denominator the \
+  Object cannot know. \
+- Budget alone (consumable nanoseconds) lacks temporal dimension — doesn't \
+  express urgency or period. \
+- A fixed-pool weight fraction gives a knowable percentage but cannot express \
+  frequency or latency. \
+\
+The fundamental asymmetry between Space and Time drives the two-value design: \
+Space is a stock (bytes, static, persists whether used or not). Time is a \
+flow (nanoseconds per second, passes whether used or not). A stock needs one \
+number (amount). A flow needs at minimum two (a rate, or equivalently an \
+amount and an interval). \
+\
+The two values serve distinct roles: \
+- Allocation (a): the Object's total claim on CPU capacity, used for \
+  conservation accounting and as the scheduler's primary input. \
+- Margin (m): how much of that claim the Object is willing to trade from \
+  its guaranteed floor for scheduling flexibility. m=0 means fully rigid \
+  (floor = ceiling = a, exact allocation guaranteed). m=a means fully \
+  flexible (floor = 0, ceiling = 2a, no guarantee but maximum surplus \
+  absorption). \
+\
+Both values are nanoseconds-per-second on the same dimension. a±m is the \
+literal range [floor, ceiling]. This is not a metaphor — the floor and \
+ceiling are physical CPU time bounds. The margin is not an abstract weight \
+in a different dimension; it is real nanoseconds moved between the \
+guaranteed pool and the surplus pool."""
+
+[[claim]]
+id = "time-conservation"
+statement = "Time allocation (a) is a conserved quantity. The kernel creates Time from physical CPU capacity and gives it to the root Object. Supervisors subdivide their allocation among children — children's allocations must sum to at most the parent's allocation. Time cannot be created by Objects, only subdivided and moved. Floors (a-m) cannot be overcommitted because no orthogonal dimension exists to absorb the deficit."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "cpu"]
+date = "2026-04-07"
+rationale = """
+Space overcommit works by borrowing from time: demand paging says 'I don't \
+have the physical page now, wait, I'll fetch it.' The Object sleeps during \
+the wait — the overcommit is transparent because time is effectively \
+unbounded going forward. \
+\
+Time has no equivalent escape valve. Space (more cores) is fixed. Future \
+time cannot retroactively supply missed CPU cycles — a missed millisecond \
+is gone. There is no orthogonal unbounded dimension to absorb the deficit. \
+Therefore Time floors (guaranteed allocations) must always be satisfiable: \
+children's floors must sum to at most the parent's floor, at every level. \
+Since floor = a - m and allocation a is conserved, this holds as long as \
+m does not distort the accounting (enforced by m ≤ a per Time object). \
+\
+The kernel is the sole source of Time, creating it from physical CPU \
+capacity discovered at boot (analogous to creating Space from physical \
+RAM). The kernel may inflate or deflate total Time in response to hardware \
+changes (core power states, asymmetric core capacity), but Objects in the \
+tree can only subdivide what they hold — never create. This prevents the \
+inflationary arms race that would make weight values meaningless."""
+
+[[claim]]
+id = "time-is-rate-not-budget"
+statement = "Time is a rate (nanoseconds per second of CPU capacity), not a consumable budget. Time objects do not deplete as an Object runs. Donation transfers the rate, not a shrinking pool. Budget exhaustion as a failure mode does not exist."
+status = "signal"
+confidence = "medium"
+scope = ["kernel", "cpu"]
+date = "2026-04-07"
+rationale = """
+The budget/period model (seL4 MCS, SCHED_DEADLINE) treats Time as a \
+consumable bucket: N nanoseconds per period, depleted by running, \
+replenished on period boundaries. This model creates an entire class of \
+problems: budget merging when preempted multiple times per period \
+(replenishment slot fragmentation), budget exhaustion mid-processing on \
+donated time (RFC-14), passive servers unable to receive async events \
+without their own budget, and complex sporadic-server bookkeeping. \
+\
+Treating Time as a rate eliminates all of these. A Time object (a, m) \
+represents a standing claim on CPU capacity — the Object runs at this \
+rate perpetually, not until a bucket drains. Donation transfers the rate: \
+the receiver's effective scheduling weight increases by the donated a, \
+and the donor's drops to zero (unschedulable). On reply, the rate returns. \
+No replenishment tracking. No budget merging. No exhaustion. \
+\
+Timeouts on donated Time are a separate concern handled by the kernel's \
+one-shot timer mechanism (claim tickless-one-shot-timer), not by Time \
+objects running dry. \
+\
+RISK: No production system has used non-depleting Time. Every system that \
+started with rate semantics ended up with budget tracking internally. The \
+scheduler will need per-Object consumption counters — the question is \
+whether this internal bookkeeping recreates budget-depletion problems at \
+the scheduler level. Non-depletion also removes a defense-in-depth layer \
+(budget exhaustion as a backstop for runaway tasks) and eliminates the \
+natural timeout on sync donation (explicit timeouts via the timer mechanism \
+are required instead). The supervision event infrastructure should be \
+designed to carry Time-usage advisory events if monitoring proves \
+necessary, so that adding observability does not require new fault paths. \
+This claim has medium confidence because it is the most novel and \
+least-validated property of the Time design."""
+
+[[claim]]
+id = "time-splitting"
+statement = "A Time object (a, m) can be split into two Time objects (a₁, m₁) and (a₂, m₂) where a₁ + a₂ = a and m₁ + m₂ = m, with m_i ≤ a_i for each piece. Splitting is how supervisors carve Time for children. Floors and ceilings are conserved across splits."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "cpu"]
+date = "2026-04-07"
+rationale = """
+Supervisors create children by subdividing their own resources — this is \
+the same mechanism for Space and Time. A supervisor with Time (a, m) \
+splits it into pieces, binding one to each child and retaining a piece \
+for its own baseline needs (claim supervisor-needs-time). \
+\
+Conserving both a and m across the split automatically conserves floors \
+and ceilings: sum of floors = sum(a_i - m_i) = a - m = original floor, \
+and sum of ceilings = sum(a_i + m_i) = a + m = original ceiling. \
+\
+The constraint m_i ≤ a_i on each piece prevents floor distortion from \
+clamping: if m_i > a_i, the floor max(0, a_i - m_i) clamps to 0 instead \
+of going negative, which would silently increase the total floor beyond \
+the original — violating conservation. Keeping m_i ≤ a_i ensures every \
+piece has a non-negative floor without clamping, and the accounting stays \
+exact. \
+\
+Splitting is also the mechanism underlying partial Time donation: an \
+Object with Time (a, m) can split off a piece, donate that piece via an \
+event (becoming partially reduced but still schedulable), and retain the \
+rest. Full donation (the entire handle) is the degenerate case."""
+
+[[claim]]
+id = "time-surplus-distribution"
+statement = "When Objects' guaranteed floors sum to less than available CPU capacity, the remaining cycles (surplus) are distributed by a work-conserving scheduler to runnable Objects that have not reached their ceiling. The specific scheduling algorithm and surplus distribution ratios are implementation choices, not part of the Time interface."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "cpu"]
+date = "2026-04-07"
+rationale = """
+The Time object defines what the kernel must guarantee (floor) and what \
+it must cap (ceiling). Between these bounds, the scheduler has freedom to \
+distribute CPU time using whatever algorithm best serves the target \
+workload (EEVDF, BVT, behavioral inference, or future alternatives). \
+\
+This separation is deliberate: Time's shape (a, m) is an interface \
+commitment that is hard to change. The scheduling algorithm is a leaf \
+node behind that interface that can evolve. EEVDF's weight+slice model, \
+Genode's BVT with warp, and LAVD's behavioral inference all operate \
+within floor/ceiling constraints — any could be used without changing \
+the Time object. \
+\
+When all runnable Objects have reached their ceilings and surplus remains, \
+the CPU may idle. On personal interactive devices (the target hardware), \
+idle CPU is not waste — it enables low-power states, extending battery \
+life. The tickless one-shot timer (claim tickless-one-shot-timer) ensures \
+zero interrupt overhead during idle periods."""
