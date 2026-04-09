@@ -1,4 +1,4 @@
-# Kernel Design Claims
+# Kernel Design Claims - **Deprecated**
 #
 # Single source of truth for design decisions and their rationale.
 #
@@ -88,8 +88,14 @@ constrain what happens (MMU faults on invalid access, kernel rejects unauthorize
 syscalls). Capabilities are the kernel's bookkeeping for deciding whether to \
 grant requests. They govern who gets space, who gets time, and who receives \
 events. This framing prevents treating authority as a program-level resource \
-on par with space and time. The specific mechanism (handles, capability tables, \
-etc.) is a downstream design choice about how the kernel implements governance."""
+on par with space and time. \
+\
+The implementation: authority is encoded in the kernel's existing operational \
+data structures — page tables (Space permissions), scheduler state (Time \
+allocation), routing rules (event delivery), and the supervision tree (lifecycle \
+and resource control). No separate capability objects, handle tables, bearer \
+tokens, or ledger. The tree IS the capability space. See downstream claims: \
+capability-encoded-in-tree, space-permission-vocabulary, reply-paths-kernel-internal."""
 
 [[claim]]
 id = "dynamic-resource-bindings"
@@ -862,3 +868,413 @@ the CPU may idle. On personal interactive devices (the target hardware), \
 idle CPU is not waste — it enables low-power states, extending battery \
 life. The tickless one-shot timer (claim tickless-one-shot-timer) ensures \
 zero interrupt overhead during idle periods."""
+
+[[claim]]
+id = "capability-encoded-in-tree"
+statement = "Authority is encoded in the supervision tree's existing data structures — page tables for Space permissions, scheduler state for Time allocation, routing rules for event delivery. There are no separate capability objects, handle tables, or bearer tokens. The tree IS the capability space."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "architecture"]
+date = "2026-04-08"
+rationale = """
+Resolves the downstream mechanism choice left open by authority-is-os-governance. \
+\
+The kernel already maintains page tables (which Space is mapped where, with what \
+permissions), scheduler state (which Object has what Time), routing rules (which \
+events go where), and the supervision tree (who supervises whom). These data \
+structures already encode all authority information. A separate capability table or \
+token system would be redundant indirection — a parallel bookkeeping system that \
+must stay in sync with the primary one. \
+\
+Bearer tokens ("cash money" model) were explored and rejected: the kernel is the \
+sole enforcer at every access point (MMU for memory, scheduler for CPU, event \
+router for communication). Since the bouncer is already at every door, the bouncer \
+keeps the guest list rather than checking tickets. Tokens for memory access \
+specifically would turn every load/store into a syscall (~1000x slower than \
+MMU-mapped access). \
+\
+The recurring pattern: authority on the kernel's side of the boundary, local \
+references on the Object's side (virtual addresses for Space, implicit for Time, \
+event indices for replies). Each reference is meaningless outside the Object's \
+kernel-managed context — there is nothing to forge, copy, or leak. \
+\
+Closest prior art: Genode's component tree (sessions as implicit capabilities), \
+EROS constructors (structure IS the capability space). Contrast with seL4 \
+(explicit CNode objects), Zircon (handle tables), which maintain capability \
+structures separate from the operational data."""
+
+[[claim]]
+id = "space-permission-vocabulary"
+statement = "Space permissions are Read, Write, and Execute — three bits per mapping, enforced by the MMU hardware. Time has no permissions (authority is the allocation amount). Routes have no separate permissions (the route definition IS the permission)."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "memory", "cpu"]
+date = "2026-04-08"
+rationale = """
+Space permissions map directly to ARM64 MMU page table entry bits: AP[2:1] \
+for read/write at EL0, PXN/UXN for execute permission. The hardware checks \
+these on every load, store, and instruction fetch — zero kernel overhead per \
+access. Permissions attach to the mapping, not the Space object (per \
+memory-object-abstraction): the same Space can be R+W in one Object and R \
+in another. \
+\
+Time has no meaningful permission decomposition. An Object with Time can run, \
+split it (if a supervisor), and donate it in events. The authority over Time \
+is entirely in how much you were given — the (a, m) shape already controls \
+everything. Adding "can split" or "can donate" permissions would restrict \
+operations that are either implicit in being a supervisor or fundamental to \
+the event model. \
+\
+Routes: the route definition (event type + observe/consume mode) IS the \
+permission. No additional rights vocabulary needed — "child X receives event \
+type T in observe mode" is the complete authority specification. \
+\
+This yields a notably small permission vocabulary compared to Zircon (15+ \
+right types) or Capsicum (60+ rights). The small vocabulary is not a gap — \
+it reflects well-shaped abstractions where each resource type has natural, \
+orthogonal controls rather than a generic rights bitmask bolted on."""
+
+[[claim]]
+id = "events-emitted-not-addressed"
+statement = "Events are emitted, never addressed. An Object puts an event into the routing system without knowing or naming the recipient. Routing rules (set up by supervisors) determine the destination. The sender's view: 'I emitted an event and maybe got a response.' The receiver's view: 'An event arrived.' Neither side knows the other."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "architecture", "ipc"]
+date = "2026-04-08"
+rationale = """
+Extends object-visibility. If Objects cannot see, name, or address other \
+Objects (except direct children), then events cannot carry a destination \
+address. The sender emits an event with a type; the kernel's routing \
+infrastructure determines where it goes. This is dispatch, not messaging. \
+\
+Like DOM dispatchEvent or Redux dispatch: the emitter fires an event into \
+the system, the infrastructure routes it, the emitter doesn't control or \
+know the destination. Contrast with Zircon channel_write (explicitly names \
+a channel handle) or seL4 Call (explicitly names an endpoint capability). \
+\
+This preserves: anonymity (neither side knows the other), tree-as-security- \
+boundary (all routing goes through the tree), and supervision authority \
+(supervisors control routing, Objects cannot self-select destinations). \
+\
+Parent-to-child communication is NOT events — it is a separate mechanism \
+(supervision operations) because the parent necessarily knows its children \
+(it created them). See two-communication-modes."""
+
+[[claim]]
+id = "reply-paths-kernel-internal"
+statement = "Event replies use a kernel-internal reply path, never exposed to the Object as a value. The Object calls replyTo(event, response) — the kernel routes the response back to the original sender. The reply path cannot be inspected, copied, or forwarded. It is validated per-Object: only the actual recipient of an event can reply to it."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "architecture", "ipc"]
+date = "2026-04-08"
+rationale = """
+The alternative — exposing reply handles as values Objects can see and \
+manipulate — creates the same problem as bearer tokens: any value in an \
+Object's memory can be copied to shared Space, read by another Object, \
+and used to impersonate the original recipient. This would create \
+communication channels that bypass the supervision tree, violating \
+tree-is-security-boundary. \
+\
+Instead, the kernel tracks reply paths internally: "event #7 was delivered \
+to Object B, reply routes to Object A." When B calls replyTo(7, response), \
+the kernel validates that event #7 was indeed delivered to B, then routes \
+the response to A. The event index (7) is per-Object — B's event #7 and \
+C's event #7 are unrelated, like file descriptors in different processes. \
+Copying the integer to another Object via shared Space is meaningless. \
+\
+Reply paths are one-use. For ongoing conversation, each reply carries a \
+fresh reply path from the responder. Either side can end the conversation \
+by not replying. No persistent channels, no cleanup, no handle lifecycle. \
+\
+This is the governance-not-tokens principle applied to replies: the routing \
+authority lives in the kernel's data structures, not in anything the Object \
+possesses. Same pattern as page tables (Space authority), scheduler state \
+(Time authority), and routing rules (event delivery authority)."""
+
+[[claim]]
+id = "two-communication-modes"
+statement = "The kernel provides two communication modes: events (emitted, anonymous, type-routed, for peer communication) and supervision operations (parent-to-specific-child, kernel-mediated, for resource management and lifecycle). Events and supervision operations are distinct mechanisms serving distinct relationships."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "architecture", "ipc"]
+date = "2026-04-08"
+rationale = """
+Two relationships exist in the supervision tree, and each needs its own \
+communication pattern: \
+\
+(1) Peers — Objects that don't know each other, connected by routing rules. \
+Events serve this relationship: emitted without destination, type-routed, \
+anonymous. Neither side knows the other. The routing infrastructure (set up \
+by supervisors) connects them. \
+\
+(2) Parent and child — Objects in a known hierarchical relationship, \
+connected by creation. Supervision operations serve this relationship: the \
+parent tells the kernel to do things to/for a specific child (map Space, \
+assign Time, set routing rules, destroy). The parent names the child by \
+kernel-assigned ID. \
+\
+Merging these into one mechanism would require either: events that can be \
+addressed (violating events-emitted-not-addressed and tree-is-security- \
+boundary), or supervision operations that are anonymous (making resource \
+management impossible — you must name the child you're configuring). \
+\
+The split mirrors React's distinction: props flow parent→child (direct, \
+parent knows the child), while context and events flow through the tree \
+(indirect, producer doesn't know consumers). Both are needed; neither \
+subsumes the other."""
+
+[[claim]]
+id = "event-resource-slots"
+statement = "An event carries at most one optional Time slot and one optional Space slot, plus a payload. Time is fungible (combine before sending if needed). One Space slot covers the common case; complex sharing (multiple regions, different permissions) uses multiple events at setup time."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "architecture", "ipc"]
+date = "2026-04-07"
+rationale = """
+Time is fungible — any nanosecond-per-second is identical to any other. If \
+an Object holds multiple Time fragments, it combines them before sending. \
+One slot suffices because there is no reason to send distinguishable Time \
+pieces in a single event. \
+\
+Space is NOT fungible — each Space object has identity, backing type, and \
+sharing state. A single Space slot still covers the common case: sharing one \
+region for a data buffer, transferring one allocation to a child, donating \
+one page of results. Complex sharing (multiple regions with different \
+permissions between two Objects) is a setup-time concern: the supervisor \
+sends multiple events, each carrying one Space with its own permissions. \
+Once shared regions are established, ongoing communication uses the payload \
+(small data) or writes to already-shared Space (bulk data) with events as \
+signals. \
+\
+More slots would widen the event structure for a rare case. Fewer slots \
+(zero) would require a separate resource-transfer mechanism alongside \
+events, violating events-sole-communication. One of each hits the sweet \
+spot: the common case is one syscall, the complex case is N syscalls."""
+
+[[claim]]
+id = "sender-identity-via-badge"
+statement = "The sender's identity is conveyed by a badge — an integer set by the supervisor on the routing rule, not by the sender. The sender cannot choose or forge its own badge. The receiver sees the badge but not the sender's identity or tree position."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "architecture", "ipc"]
+date = "2026-04-07"
+rationale = """
+Events are anonymous — the sender doesn't know the receiver and the receiver \
+doesn't know the sender (events-emitted-not-addressed). But receivers often \
+need to distinguish between different clients: a file server handling requests \
+from multiple Objects needs to know which session each request belongs to. \
+\
+The badge solves this without breaking anonymity. The supervisor assigns a \
+badge value when it creates a routing rule: "events of type T from child A \
+carry badge 42." The kernel attaches the badge at delivery. The receiver sees \
+badge 42 and can associate it with a session, but learns nothing about the \
+sender's identity or location in the tree. \
+\
+Critically, the sender cannot set its own badge — only the supervisor can \
+(via the routing rule). This prevents impersonation: Object A cannot claim \
+to be Object B by forging B's badge. The supervisor, which created both A \
+and B, is the sole authority on badge assignment. \
+\
+seL4 uses the same mechanism: badges are minted onto endpoint capabilities \
+by the authority that created them. Zircon achieves similar sender \
+disambiguation through separate channel handles per client."""
+
+[[claim]]
+id = "time-is-fungible"
+statement = "Time is fungible — any nanosecond-per-second of CPU capacity is identical to any other. Two Time objects with the same (a, m) are interchangeable. Space is NOT fungible — each Space object has identity, backing type, sharing state, and is distinguishable from any other Space of the same size."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "cpu", "memory"]
+date = "2026-04-07"
+rationale = """
+Time fungibility follows from Time being a rate claim on a uniform resource \
+(CPU cycles). A nanosecond-per-second from one Time object is physically \
+identical to a nanosecond-per-second from another — they schedule the same \
+CPU, produce the same computation. Two Time objects can be combined (summing \
+a and m) or split without loss of identity, because there is no identity to \
+lose. This is why one optional Time slot per event suffices (combine before \
+sending) and why Time handles don't need to be tracked individually. \
+\
+Space non-fungibility follows from Space having properties beyond size: \
+backing type (anonymous RAM, device MMIO, file-backed), sharing state \
+(mapped into which Objects, with what permissions), contents (the actual \
+bytes stored). Two 4KB Space objects are not interchangeable — they contain \
+different data, may be backed differently, and may be shared with different \
+Objects. This is why Space objects need individual identity and why \
+transferring Space is structurally different from transferring Time. \
+\
+This asymmetry (fungible Time, non-fungible Space) drives several design \
+decisions: Time splitting is pure arithmetic, Space splitting produces \
+distinguishable children. Time donation is reversible (return the same rate), \
+Space sharing creates persistent mappings that must be explicitly managed."""
+
+[[claim]]
+id = "space-named-by-virtual-address"
+statement = "An Object refers to Space by its virtual address — the address where the Space is mapped in the Object's address space. The page table IS the naming mechanism. No separate handle table or ID system exists for Space. If you manage it, it's in your address space."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "memory"]
+date = "2026-04-08"
+rationale = """
+Space that is mapped into an Object's address space already has a natural \
+name: the virtual address range. Using virtual addresses as names avoids \
+introducing a parallel naming system (handles, IDs) that would need to \
+stay in sync with the page tables the kernel already maintains. \
+\
+Supervisors map managed Space into their own address space. A supervisor \
+overseeing children's memory maps that memory into itself — this provides \
+both a name (the VA) and direct access (for initialization, inspection, \
+fault handling, debugging). When the supervisor shares Space with a child, \
+it tells the kernel "map the Space at my VA 0x5000 into child C at some \
+address, with read-only permissions." The kernel resolves the supervisor's \
+VA to the underlying Space object via the page table and creates the \
+child's mapping. \
+\
+For runtime allocations (child requests more Space), the kernel picks the \
+VA in the child's address space and reports it in the response event. The \
+child doesn't choose addresses for its own runtime allocations — the \
+kernel optimizes placement (alignment, fragmentation avoidance, ASLR). \
+For initial setup (loading a program), the supervisor specifies VAs based \
+on program requirements (ELF headers or loader decisions). \
+\
+The 48-bit ARM64 virtual address space (256TB) is large enough that a \
+supervisor mapping all managed Space into itself is not a practical \
+constraint on personal devices."""
+
+[[claim]]
+id = "space-permission-attenuation"
+statement = "When Space is shared or transferred via events, permissions can only decrease or stay equal — never increase. The sender specifies the recipient's permissions, which must be a subset of the sender's own. The kernel enforces this monotonicity at event delivery."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "memory", "ipc"]
+date = "2026-04-08"
+rationale = """
+Monotonic attenuation is the only safe direction for permission delegation. \
+If a recipient could escalate permissions (receive read-only, upgrade to \
+read-write), the entire permission model collapses — any Object could gain \
+arbitrary access by requesting escalation. \
+\
+The sender attenuates at send time: "share my Space (which I hold as r+w) \
+with the recipient as read-only." The event's Space slot carries the \
+permission annotation. The kernel validates at delivery: are the requested \
+recipient permissions ≤ the sender's permissions? If yes, the kernel \
+creates the recipient's mapping with the attenuated permissions. If no, \
+the event is rejected. \
+\
+With direct kernel delivery (kernel-routes-events), there are no \
+intermediate hops that need to attenuate. The sender specifies permissions \
+once, the kernel enforces once, the recipient gets a mapping. Supervisors \
+on the routing path who observe the event can see the Space transfer \
+happening but cannot modify the permissions in flight — observation is \
+passive (observe-consume-modes). A supervisor that needs to enforce \
+additional permission policy should consume the event and re-emit with \
+its own permission decisions. \
+\
+This is the same monotonicity property that CHERI enforces in hardware \
+(CSetBounds narrows, CAndPerm clears bits, no instruction exists to \
+widen). The principle is identical; the enforcement layer differs \
+(kernel at event delivery vs. hardware at pointer derivation)."""
+
+[[claim]]
+id = "events-immutable-in-flight"
+statement = "Events are immutable in flight. No entity — including observing supervisors — can alter an event's type, payload, resource slots, or permissions during delivery. Observers receive a copy asynchronously. A supervisor that needs to transform an event must switch from observe to consume mode and emit a new event to the original destination."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "architecture", "ipc"]
+date = "2026-04-08"
+rationale = """
+Follows directly from the observe/consume distinction (observe-consume-modes) \
+and the attenuation model (space-permission-attenuation). \
+\
+Observe mode is defined as passive: "see the event, delivery continues to \
+destination." If observers could mutate the event, the receiver would get a \
+different event than the sender emitted — breaking the sender's semantic \
+contract with the eventual consumer. The event that arrives must be the event \
+that was sent; observation is read-only. \
+\
+Observers receive their copy asynchronously — on their own Time, without \
+blocking the delivery path. This preserves the hot-path performance: the \
+kernel delivers the event directly to the destination (kernel-routes-events) \
+and notifies observers separately. An observer that takes a long time to \
+process does not delay the receiver. \
+\
+The upgrade path for transformation is explicit: switch the routing rule from \
+observe to consume. A consuming supervisor becomes the destination, receives \
+the event, and may emit a new event (with different payload, attenuated \
+permissions, or to a different child) as a fresh act of emission. This new \
+event is subject to all normal rules (attenuation monotonicity, routing). \
+The original event is consumed — it ceases to exist. The new event is a \
+distinct event with its own identity. \
+\
+This eliminates an entire class of bugs: no event can be silently modified \
+by an intermediate layer. If the receiver gets the event, it is exactly what \
+the sender emitted. If it doesn't get the event, a consumer intercepted it \
+(and the sender can be informed via the absence of a reply)."""
+
+[[claim]]
+id = "supervision-indivisible"
+statement = "Supervision is indivisible. A child has exactly one supervisor with full authority over its lifecycle, resources, and routing. There is no partial delegation of supervision powers. Other Objects that need to act on a child do so by requesting action from the child's supervisor via events — the supervisor mediates and applies policy."
+status = "signal"
+confidence = "medium"
+scope = ["kernel", "architecture"]
+date = "2026-04-08"
+rationale = """
+Partial delegation (splitting supervision authority across multiple Objects) \
+was explored and found to have no user-facing scenario that the existing \
+design cannot already handle. Every candidate use case — device management, \
+memory pools, debugging — resolves to: send a request event to the child's \
+supervisor, which already has full context and applies policy. \
+\
+Partial delegation would require a permission vocabulary for supervision \
+operations (can_map_space, can_set_routes, can_destroy, etc.) and would \
+create distributed authority: who arbitrates when the Space-delegatee and \
+the Time-delegatee make conflicting decisions? The supervisor's mediation \
+is not overhead — it is where safety lives. \
+\
+Migration (moving a child to a different supervisor) does not require a \
+kernel primitive. The pattern is: the current supervisor sends the child's \
+state (Space, Time, payload metadata) to the new supervisor via an event, \
+destroys the old child, and the new supervisor creates a fresh child from \
+the received state. The kernel sees normal operations: destroy, event, \
+create. Migration is an emergent userspace pattern, not a mechanism. \
+\
+This pattern works cleanly for leaf Objects. For Objects with deep subtrees, \
+reconstructing the entire subtree is complex — effectively a distributed \
+checkpoint. No user-facing scenario has been identified that requires \
+subtree migration, but the possibility has not been fully explored. \
+\
+Medium confidence because: (1) subtree migration may prove necessary for \
+scenarios not yet considered, and (2) the event-mediated approach adds one \
+hop of latency per operation, which may matter for high-frequency \
+supervision interactions not yet identified."""
+
+[[claim]]
+id = "program-loading-is-userspace"
+statement = "Program loading (ELF parsing, address layout decisions, dynamic linking) is a userspace library or service, not a kernel concern. The kernel provides generic primitives — create Space, map at address with permissions — and is unaware of executable formats."
+status = "signal"
+confidence = "high"
+scope = ["kernel", "architecture"]
+date = "2026-04-08"
+rationale = """
+ELF parsing is complex, format-specific, and changes over time (new segment \
+types, new relocation formats, new ABI conventions). It belongs in a leaf \
+node — a userspace library or service — behind the kernel's simple mapping \
+interface. \
+\
+The kernel's interface for setting up a child's address space is generic: \
+map(space, child, address, permissions). Where the address comes from is \
+not the kernel's concern — it could be read from ELF program headers by a \
+loader library, chosen by the kernel for ASLR, or specified by the child \
+itself for runtime allocations. The kernel validates that the mapping is \
+legal (address is available, supervisor has authority over the Space and \
+child) and sets up the page table. \
+\
+Supervisors that launch programs USE a loader library; they don't BECOME \
+loaders. A supervisor that never launches programs (a resource manager, a \
+router) doesn't need the library at all. The loading complexity exists \
+exactly once (in the library), serves all supervisors, and can be replaced \
+if the executable format changes — no kernel modification needed. \
+\
+This follows push-complexity-to-leaves: the format-specific complexity is \
+in a leaf node, the kernel interface absorbs the variation, and the \
+executable format can evolve independently of the kernel."""

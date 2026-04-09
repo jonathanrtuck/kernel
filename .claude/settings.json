@@ -17,7 +17,7 @@
       {
         "hooks": [
           {
-            "command": "python3 .claude/hooks/load-design-claims.py",
+            "command": "python3 .claude/hooks/load-design-context.py",
             "timeout": 5,
             "type": "command"
           }
