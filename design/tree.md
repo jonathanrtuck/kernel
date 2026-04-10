@@ -147,17 +147,27 @@ with a narrow interface is unresolved.
 
 ### Open questions
 
-- **Communication.** How do isolated Contexts interact? The kernel
-  created the wall — what does the door look like? Deliberately not
-  carrying forward the previous event/routing model. To be derived.
+- **Communication — partially explored.** The kernel delivers messages
+  to Contexts. Faults, interrupts, and IPC are all instances of the
+  same mechanism: a message with source, type/metadata, and payload.
+  The concrete message shape is not yet defined. The delivery mechanism
+  (how a Context receives) is a Level 2 concern. See
+  `design/journal/002-communication-flows.md`.
 
-- **Third allocator/manager?** Space and Time have allocator/manager
-  pairs. Does Communication have a parallel structure (route/capability
-  allocator)? Or is authority distributed across existing managers?
+- **Communication as component or flow?** Is message delivery a
+  separate component (leaf node), or behavior woven into the exception
+  handling path? The allocator/manager pattern doesn't have a natural
+  parallel here — messages are transient, not a conserved resource.
 
-- **Unrecoverable faults and device interrupts.** Both need to cross
-  the kernel | userspace boundary — a Context broke, or a device needs
-  attention. Connected to the Communication question.
+- **Who receives fault messages?** When a Context faults
+  unrecoverably, the kernel has information to deliver. To whom? This
+  is an open design question — not assuming any particular structure.
+
+- **Space manager | Scheduler boundary.** Still unresolved.
+  Entanglement at context switch and blocking faults. Message delivery
+  adds another interaction point: delivering a message touches the
+  Scheduler (recipient needs CPU) and possibly Space manager (payload
+  mapping).
 
 - **One-shot timer.** Inside the Scheduler. Constraint at this level,
   or one level deeper?
