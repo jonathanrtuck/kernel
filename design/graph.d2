@@ -1,0 +1,95 @@
+userspace: {
+  shape: person
+}
+
+kernel: {
+  shape: rectangle
+
+  syscall: {
+    shape: class
+  }
+
+  space-allocator: {
+    label: Space allocator
+
+    interface: {
+      shape: class
+    }
+  }
+
+  time-allocator: {
+    label: Time allocator
+
+    interface: {
+      shape: class
+    }
+  }
+
+  reactor: {
+    shape: oval
+  }
+
+  space-manager: {
+    label: Space manager
+
+    interface: {
+      shape: class
+
+      resolve_fault()
+      map()
+      unmap()
+      create_space()
+      destroy_space()
+      share()
+    }
+  }
+
+  scheduler: {
+    label: Scheduler
+
+    interface: {
+      shape: class
+
+      pick()
+    }
+  }
+
+  contexts: {
+    label: Contexts
+    style.multiple: true
+
+    model: {
+      shape: class
+
+      register state
+      TTBR
+      runnable / blocked
+      fault handler cap
+      pending message
+    }
+  }
+
+  space-manager -> space-allocator.interface
+  scheduler -> time-allocator.interface
+  reactor -> space-manager.interface
+  reactor -> scheduler.interface
+  reactor -> contexts: writes
+  scheduler -> contexts: reads
+  space-manager -> contexts: writes TTBR
+  syscall -> reactor
+}
+
+hardware: {
+  shape: parallelogram
+
+  memory
+  cores: {
+    style.multiple: true
+  }
+}
+
+userspace -> kernel.syscall
+kernel -> userspace: fault delivery, boot protocol
+kernel.space-allocator -> hardware.memory
+kernel.time-allocator -> hardware.cores
+hardware -> kernel.reactor: exceptions

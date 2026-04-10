@@ -103,7 +103,12 @@ corner.
 
 ## Level 1 — Inside the Kernel
 
-Journal: `design/journal/001-level1-exploration.md`
+Journal: `design/journal/001-level1-exploration.md`,
+`design/journal/002-communication-flows.md`,
+`design/journal/003-component-boundaries.md`,
+`design/journal/004-context-relationships.md`
+
+Research: `design/research/context-relationships.md`
 
 ### Three irreducible responsibilities
 
@@ -120,54 +125,128 @@ exists but don't dictate its internal structure.
 
 - **Contexts are the data, not a component.** A Context (execution
   context) is the central entity: register set, address space, CPU
-  time allocation, communication routing. The kernel's components are
+  time allocation, pending messages. The kernel's components are
   defined by which aspect of Context state they manage.
 
-### Components identified
+- **Three output types.** Every kernel invocation produces some
+  combination of: (1) update kernel state, (2) deliver a message to
+  a Context, (3) choose which Context to resume.
 
-- **Space allocator** — tracks physical pages (free/used). Leaf node.
+- **All information delivery is one mechanism.** Faults, interrupts,
+  IPC, and syscall return values are all instances of the same thing:
+  the kernel making data available to a Context. A message has source,
+  type/metadata, and payload. Messages are small (register-sized);
+  bulk data transfer uses shared memory. See journal 002.
 
-- **Time allocator** — tracks CPU capacity and its subdivision among
-  Contexts. The core abstraction (multi-core → total ns/s) is the
-  hardware-facing side of this component. Leaf node.
+### Component map
 
-- **Space manager** — programs page tables, manages per-Context address
-  spaces and permissions. Uses the Space allocator.
+```text
+              hardware exceptions
+                     |
+                     v
+                 [ Reactor ]
+                /     |     \
+               v      v      v
+    [ Space manager ] | [ Scheduler ]
+                      |
+               Context model
+          (shared data structure)
+```
 
-- **Scheduler** — decides which Context runs, programs the timer,
-  triggers context switches. Uses the Time allocator. Scheduling
-  algorithm is a swappable leaf node inside it.
+- **Reactor** — the spine. The exception handler that decodes events,
+  resolves names (for IPC), updates the Context model, and delegates
+  to the Space manager and Scheduler. Most exception types are short,
+  straight-line code paths through the reactor.
 
-### Space manager | Scheduler
+- **Space manager** — manages per-Context address spaces, programs
+  page tables. Leaf node behind the reactor. Interface: resolve faults,
+  map/unmap regions, create/destroy address spaces, share memory
+  between Contexts. Physical page allocation is internal (Level 2).
 
-Separable state (address space vs. CPU time), substantial independent
-work. But they converge at context switch (one operation touching both)
-and interact on blocking faults. Whether they are one component or two
-with a narrow interface is unresolved.
+- **Scheduler** — `pick()` → which Context to resume. Programs the
+  timer for preemption. Reads the Context model anonymously —
+  property-based selection, not identity-aware. The naming scheme
+  is entirely the reactor's concern; the scheduler is decoupled from
+  it. Leaf node behind the reactor. Time allocation is internal
+  (Level 2). Scheduling algorithm is a swappable leaf node inside it.
 
-### Open questions
+- **Context model** — the shared data structure through which
+  components communicate. The reactor writes to it; the scheduler
+  reads it; the Space manager writes TTBR values into it. The schema
+  of the Context record defines the interfaces. This is closer to a
+  blackboard architecture than a call graph.
 
-- **Communication — partially explored.** The kernel delivers messages
-  to Contexts. Faults, interrupts, and IPC are all instances of the
-  same mechanism: a message with source, type/metadata, and payload.
-  The concrete message shape is not yet defined. The delivery mechanism
-  (how a Context receives) is a Level 2 concern. See
-  `design/journal/002-communication-flows.md`.
+### Resolved questions
 
-- **Communication as component or flow?** Is message delivery a
-  separate component (leaf node), or behavior woven into the exception
-  handling path? The allocator/manager pattern doesn't have a natural
-  parallel here — messages are transient, not a conserved resource.
+- **Communication is not a separate component.** It is the reactor
+  updating the Context model (pending message state, payload in
+  registers) and calling `pick()`. Messaging and scheduling are
+  structurally the same activity: pick a Context, update some state.
+  See journal 003.
 
-- **Who receives fault messages?** When a Context faults
-  unrecoverably, the kernel has information to deliver. To whom? This
-  is an open design question — not assuming any particular structure.
+- **Space manager and Scheduler are separate.** Separable state
+  (address space vs. CPU time), substantial independent complexity,
+  interfaces meaningfully simpler than their implementations. They
+  communicate through the Context model (e.g., Space manager writes
+  TTBR, Scheduler reads it at context switch). See journal 003.
 
-- **Space manager | Scheduler boundary.** Still unresolved.
-  Entanglement at context switch and blocking faults. Message delivery
-  adds another interaction point: delivering a message touches the
-  Scheduler (recipient needs CPU) and possibly Space manager (payload
-  mapping).
+- **Allocators are Level 2.** Space allocator is internal to the
+  Space manager (its only client). Time allocator is internal to the
+  Scheduler (its only client). Both are real components with real
+  logic, but invisible at Level 1. See journal 003.
 
-- **One-shot timer.** Inside the Scheduler. Constraint at this level,
-  or one level deeper?
+- **Naming is capability-based.** Capabilities bundle designation
+  with authority — holding a capability IS the name AND the
+  permission. No global namespace in the kernel. The reactor
+  resolves capabilities, not names. See journal 004.
+
+- **Context relationships: allow shape, don't enforce it.** The
+  kernel does not impose a relationship structure (no required tree,
+  no hierarchy). The capability graph IS the relationship graph.
+  The kernel provides mechanism for structure (fault handler
+  capabilities, communication capabilities) and makes it natural to
+  build structure (creating a Context requires providing a fault
+  handler capability), but doesn't constrain the topology. A tree,
+  a flat pool, a DAG — all valid wirings. See journal 004.
+
+- **Fault routing via capability chains.** Each Context has a fault
+  handler capability. The kernel follows the chain: if a handler
+  faults, deliver to its handler. Terminal case: no handler means
+  the Context dies. This is strictly more general than a tree —
+  any escalation topology is expressible. Kernel provides mechanism;
+  userspace provides wiring. See journal 004.
+
+- **Resource accounting is contingent.** Space is finite and
+  conserved. Time is a flow. Each Context has some Space (must —
+  instructions live somewhere) and receives some Time (the scheduler
+  directs it). Per-Context limits, budgets, and accounting are
+  design choices, not axioms. They solve specific problems (denial
+  of service, fairness, QoS) and must be justified before entering
+  the model. See journal 004.
+
+### Context model schema (derived minimum)
+
+Only fields derived from the design — no contingent additions:
+
+- **Register state** — saved/restored at context switch
+- **TTBR** — address space root (written by Space manager)
+- **Runnable / blocked** — minimum scheduling input
+- **Fault handler capability** — who receives this Context's faults
+- **Pending message state** — source, type, payload (in registers)
+
+Additional fields (priority, time budget, memory limit) are
+contingent and enter only when justified by specific design problems.
+
+### Open questions (now Level 2)
+
+- **Capability representation.** How are capabilities stored and
+  resolved? Per-Context table, CNode graph, or simpler?
+- **Message shape.** Concrete register layout for the message
+  primitive (source, type, payload). How many registers?
+- **Scheduling algorithm.** What properties beyond runnable/blocked?
+  This determines whether additional fields enter the Context model.
+- **Space manager internals.** Page table format, allocator design.
+- **SMP.** Multiple concurrent reactors, Context model
+  synchronization.
+- **Whether limits/budgets/accounting are needed.** If so, at what
+  granularity and who controls them.
