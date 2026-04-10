@@ -9,22 +9,6 @@ kernel: {
     shape: class
   }
 
-  space-allocator: {
-    label: Space allocator
-
-    interface: {
-      shape: class
-    }
-  }
-
-  time-allocator: {
-    label: Time allocator
-
-    interface: {
-      shape: class
-    }
-  }
-
   reactor: {
     shape: oval
   }
@@ -42,15 +26,33 @@ kernel: {
       destroy_space()
       share()
     }
+
+    allocator: {
+      label: allocator
+
+      interface: {
+        shape: class
+        request()
+        release()
+      }
+    }
   }
 
   scheduler: {
-    label: Scheduler
+    label: Time manager (Scheduler)
 
     interface: {
       shape: class
 
       pick()
+    }
+
+    allocator: {
+      label: allocator
+
+      interface: {
+        shape: class
+      }
     }
   }
 
@@ -69,14 +71,11 @@ kernel: {
     }
   }
 
-  space-manager -> space-allocator.interface
-  scheduler -> time-allocator.interface
   reactor -> space-manager.interface
   reactor -> scheduler.interface
   reactor -> contexts: writes
   scheduler -> contexts: reads
   space-manager -> contexts: writes TTBR
-  syscall -> reactor
 }
 
 hardware: {
@@ -88,8 +87,8 @@ hardware: {
   }
 }
 
-userspace -> kernel.syscall
-kernel -> userspace: fault delivery, boot protocol
-kernel.space-allocator -> hardware.memory
-kernel.time-allocator -> hardware.cores
-hardware -> kernel.reactor: exceptions
+userspace -> kernel.syscall: invokes
+kernel -> userspace: fault delivery
+hardware -> kernel.reactor: all exceptions (incl. SVC)
+kernel.space-manager.allocator -> hardware.memory
+kernel.scheduler.allocator -> hardware.cores

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """SessionStart hook: loads kernel design context into the conversation.
 
-Reads design/tree.md (the design tree — source of truth for decisions)
-and design/philosophy.md (principles and process).
+Reads design/spec.md (settled decisions — source of truth) and
+design/philosophy.md (principles and process).
 """
 
 from pathlib import Path
@@ -25,8 +25,8 @@ def main():
 
     lines = ["KERNEL DESIGN CONTEXT — loaded automatically at session start:", ""]
 
-    # Design tree first — it's the working state
-    lines.extend(load_file(root / "tree.md", "Design Tree (design/tree.md)"))
+    # Spec first — it's the working state
+    lines.extend(load_file(root / "spec.md", "Design Spec (design/spec.md)"))
 
     # Philosophy second — principles and process
     lines.extend(load_file(root / "philosophy.md", "Philosophy (design/philosophy.md)"))

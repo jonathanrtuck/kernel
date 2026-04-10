@@ -1,8 +1,9 @@
 # kernel
 
 ARM64 microkernel, built from first principles. The design is documented
-in `design/tree.md` (level-by-level decomposition) and `design/journal/`
-(exploration notes). See `design/philosophy.md` for the thinking framework.
+in `design/spec.md` (settled decisions), `design/graph.d2` (structural
+map), and `design/journal/` (exploration history). See
+`design/philosophy.md` for the thinking framework.
 
 ## Working Mode
 
@@ -100,8 +101,10 @@ src/
   print.rs      — println! macro
 design/
   philosophy.md — thinking framework (read first)
-  tree.md       — level-by-level decomposition (design SSOT)
+  spec.md       — settled decisions and rationale (design SSOT)
+  graph.d2      — structural map (components, interfaces, edges)
   journal/      — exploration notes and rejected alternatives
+  research/     — prior art studies for upcoming decisions
   landscape.md  — survey of 18+ real kernel designs by decision point
   claims.toml   — legacy (pre-restart decisions, not current SSOT)
 ```
@@ -189,12 +192,15 @@ Every `.rs` file follows this order:
 - `design/philosophy.md` — **Read first.** Two root principles and
   their consequences. The general thinking framework that produces
   decisions.
-- `design/tree.md` — **Design SSOT.** Level-by-level decomposition
-  of the system. Each level defines interfaces between black boxes.
-  Settled decisions live here. Open questions are listed per level.
+- `design/spec.md` — **Design SSOT.** Settled decisions with brief
+  rationale, organized by concern. Open questions listed at the end.
+- `design/graph.d2` — **Structural map.** Components, interfaces,
+  and edges in D2 format. Render with `d2 --layout elk graph.d2`.
 - `design/journal/` — **Exploration record.** Numbered entries
   capturing reasoning, rejected alternatives, and discoveries.
-  Referenced from tree.md where relevant.
+  Referenced from spec.md where relevant.
+- `design/research/` — **Prior art.** Deep research documents
+  prepared before major design decisions.
 - `design/landscape.md` — **Reference.** Survey of how 18+ real
   kernels resolved each major design decision. Consult when facing
   a design fork to see known approaches and tradeoffs.
