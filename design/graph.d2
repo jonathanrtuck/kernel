@@ -32,6 +32,7 @@ kernel: {
 
       interface: {
         shape: class
+
         request()
         release()
       }
@@ -87,8 +88,8 @@ hardware: {
   }
 }
 
-userspace -> kernel.syscall: invokes
 kernel -> userspace: fault delivery
+userspace -> kernel.syscall: invokes
 hardware -> kernel.reactor: all exceptions (incl. SVC)
 kernel.space-manager.allocator -> hardware.memory
 kernel.scheduler.allocator -> hardware.cores
