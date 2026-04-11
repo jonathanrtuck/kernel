@@ -3,14 +3,60 @@ userspace: {
 }
 
 kernel: {
-  shape: rectangle
+  core-manager: {
+    label: Core manager
+    style.multiple: true
 
-  syscall: {
-    shape: class
+    syscall: {
+      shape: class
+    }
+
+    time-manager: {
+      label: Time manager
+
+      interface: {
+        shape: class
+
+        pick()
+      }
+    }
+
+    contexts: {
+      label: Contexts
+      style.multiple: true
+    }
+
+    ipi: {
+      label: IPI
+      shape: class
+    }
+
+    time-manager -> contexts: reads
   }
 
-  reactor: {
-    shape: oval
+  contexts: {
+    label: Contexts (shared)
+    style.multiple: true
+
+    model: {
+      shape: class
+
+      register state
+      TTBR
+      runnable / blocked
+      current_core
+      fault handler cap
+      pending message
+      scheduling hints
+    }
+  }
+
+  capabilities: {
+    label: Capabilities
+
+    model: {
+      shape: class
+    }
   }
 
   space-manager: {
@@ -39,57 +85,28 @@ kernel: {
     }
   }
 
-  scheduler: {
-    label: Time manager (Scheduler)
-
-    interface: {
-      shape: class
-
-      pick()
-    }
-
-    allocator: {
-      label: allocator
-
-      interface: {
-        shape: class
-      }
-    }
+  core-manager -> core-manager.ipi: sends
+  core-manager -> contexts.model: reads/writes
+  core-manager -> capabilities: resolves
+  core-manager -> space-manager.interface: on fault
+  core-manager.time-manager -> contexts.model: reads
+  space-manager -> contexts.model: writes TTBR
+  core-manager.contexts -> contexts: indexes into {
+    style.stroke-dash: 3
   }
-
-  contexts: {
-    label: Contexts
-    style.multiple: true
-
-    model: {
-      shape: class
-
-      register state
-      TTBR
-      runnable / blocked
-      fault handler cap
-      pending message
-    }
-  }
-
-  reactor -> space-manager.interface
-  reactor -> scheduler.interface
-  reactor -> contexts: writes
-  scheduler -> contexts: reads
-  space-manager -> contexts: writes TTBR
 }
 
 hardware: {
   shape: parallelogram
 
   memory
-  cores: {
+  core: {
     style.multiple: true
   }
 }
 
-kernel -> userspace: fault delivery
-userspace -> kernel.syscall: invokes
-hardware -> kernel.reactor: all exceptions (incl. SVC)
-kernel.space-manager.allocator -> hardware.memory
-kernel.scheduler.allocator -> hardware.cores
+kernel -> userspace: fault delivery, messages
+userspace -> kernel.core-manager.syscall: invokes
+hardware.core -> kernel.core-manager: all exceptions (incl. SGI)
+kernel.space-manager.allocator -> hardware.memory: manages
+kernel.core-manager.time-manager -> hardware.core: programs timer
