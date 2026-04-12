@@ -35,7 +35,7 @@ kernel: {
   }
 
   contexts: {
-    label: Contexts (shared)
+    label: Contexts
     style.multiple: true
 
     model: {
@@ -108,5 +108,5 @@ hardware: {
 kernel -> userspace: fault delivery, messages
 userspace -> kernel.core-manager.syscall: invokes
 hardware.core -> kernel.core-manager: all exceptions (incl. SGI)
-kernel.space-manager.allocator -> hardware.memory: manages
+kernel.space-manager.allocator -> hardware.memory
 kernel.core-manager.time-manager -> hardware.core: programs timer

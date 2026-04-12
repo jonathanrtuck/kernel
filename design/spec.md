@@ -196,8 +196,9 @@ are not inherent and must be justified before entering the model. (Journal 004.)
 
 ## Open questions
 
-- **Capability representation.** How are capabilities stored and resolved?
-  Per-Context table, CNode graph, or simpler?
+- **Capability representation.** Per-Context opaque handle tables (tentatively
+  accepted, journal 006). Open sub-questions: internal data structure, object
+  types, rights model, badges, revocation scope.
 - **Message shape.** Concrete register layout for the message primitive. How
   many registers?
 - **Scheduling algorithm.** What properties beyond runnable/blocked? Determines
@@ -219,8 +220,10 @@ are not inherent and must be justified before entering the model. (Journal 004.)
   identification, messaging/scheduling convergence
 - `004-context-relationships.md` — naming, relationships, fault routing,
   first-principles resource accounting
-- `005-smp.md` — multicore exploration, hybrid model, per-core schedulers,
-  IPI coordination
+- `005-smp.md` — multicore exploration, hybrid model, per-core schedulers, IPI
+  coordination
+- `006-capability-representation.md` — capability semantics, per-Context handle
+  tables, clone/attenuate decomposition, object lifecycle
 
 ## Research
 
