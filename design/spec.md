@@ -199,8 +199,8 @@ are not inherent and must be justified before entering the model. (Journal 004.)
 - **Capability representation.** Per-Context opaque handle tables, three object
   types: Memory, Time, Endpoint (journals 006, 007). Open sub-questions:
   internal data structure, rights model, badges, revocation scope.
-- **Message shape.** Concrete register layout for the message primitive. How
-  many registers?
+- **Message shape.** 4 slots × 8 bytes = 32 bytes, cap_mask bitmask for
+  capability transfers (journal 010). Open: reply routing, fault resume.
 - **Scheduling algorithm.** EDF with CBS tentatively accepted (journal 008).
   Timing declarations: periodic (d, p) or responsive (d, l). Implementation
   details and multi-core admission are open.
@@ -229,6 +229,10 @@ are not inherent and must be justified before entering the model. (Journal 004.)
   queued endpoints, Context model sketch
 - `008-time-shape.md` — Time = fraction, timing declarations (periodic vs.
   responsive), EDF admission control, no priority integers
+- `009-memory-and-endpoint-shapes.md` — Memory = bytes (page size hidden),
+  Endpoint = bounded queue (many:many, topology via capabilities)
+- `010-message-shape.md` — 4-slot payload, cap_mask encoding, badge, payload
+  size derivation from hardware ceiling + requirements
 
 ## Research
 
