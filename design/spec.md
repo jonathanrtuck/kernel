@@ -196,13 +196,14 @@ are not inherent and must be justified before entering the model. (Journal 004.)
 
 ## Open questions
 
-- **Capability representation.** Per-Context opaque handle tables (tentatively
-  accepted, journal 006). Open sub-questions: internal data structure, object
-  types, rights model, badges, revocation scope.
+- **Capability representation.** Per-Context opaque handle tables, three object
+  types: Memory, Time, Endpoint (journals 006, 007). Open sub-questions:
+  internal data structure, rights model, badges, revocation scope.
 - **Message shape.** Concrete register layout for the message primitive. How
   many registers?
-- **Scheduling algorithm.** What properties beyond runnable/blocked? Determines
-  whether additional fields enter the Context model.
+- **Scheduling algorithm.** EDF with CBS tentatively accepted (journal 008).
+  Timing declarations: periodic (d, p) or responsive (d, l). Implementation
+  details and multi-core admission are open.
 - **Space manager internals.** Page table format, allocator design.
 - **SMP.** Multiple concurrent reactors, Context model synchronization.
 - **Whether limits/budgets/accounting are needed.** If so, at what granularity
@@ -224,6 +225,10 @@ are not inherent and must be justified before entering the model. (Journal 004.)
   coordination
 - `006-capability-representation.md` — capability semantics, per-Context handle
   tables, clone/attenuate decomposition, object lifecycle
+- `007-context-model-and-endpoints.md` — scheduler picks Time not Context,
+  queued endpoints, Context model sketch
+- `008-time-shape.md` — Time = fraction, timing declarations (periodic vs.
+  responsive), EDF admission control, no priority integers
 
 ## Research
 
