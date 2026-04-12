@@ -1,4 +1,4 @@
-# Level 1 Exploration — 2026-04-09
+# Component Exploration — 2026-04-09
 
 First exploration of the kernel's internal structure after the design process
 restart.

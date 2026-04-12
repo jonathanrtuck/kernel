@@ -213,8 +213,8 @@ are not inherent and must be justified before entering the model. (Journal 004.)
 
 ## Journal index
 
-- `001-level1-exploration.md` — initial component identification from hardware
-  interfaces
+- `001-component-exploration.md` — initial component identification from
+  hardware interfaces
 - `002-communication-flows.md` — flows-first methodology, message unification,
   kernel as leaf node
 - `003-component-boundaries.md` — boundary stress-testing, reactor
