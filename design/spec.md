@@ -190,6 +190,27 @@ uses shared memory mapped by the Space manager. The message primitive is
 source + type/metadata + payload. 4 slots x 8 bytes = 32 bytes, with cap_mask
 bitmask for capability transfers. (Journals 002, 010.)
 
+### Badges
+
+**Minter-assigned, receiver-identifying, per-cap.** A badge is a field on each
+capability — `Capability: (object_ref, rights, badge)` — set by the minter at
+clone time, immutable after, attached by the kernel to every message sent
+through that cap. The sender cannot read, choose, or modify it. (Journals 010,
+012.)
+
+- **On the referrer, not the referent.** Different caps to the same Endpoint
+  carry different badges. That's what makes a single Endpoint carry
+  distinguishable senders.
+- **For identification, not merely distinguishing.** Badges key into receiver
+  state (per-client tables, per-child fault state, role dispatch). The receiver
+  controls the key space by minting their own caps — the typical policy, though
+  the kernel enforces only mechanism.
+- **Trust model.** Unforgeable at the IPC layer, but badge _meaning_ is whatever
+  the minting chain declared. A receiver trusts the minter's semantic choices.
+- **Fault path.** The Context model stores a badge alongside `fault_handler`
+  (set by whoever installs the handler), used when the kernel synthesizes fault
+  messages — since there is no sender cap to read.
+
 ### Reply routing
 
 **Reply cap in the message.** Both IPC reply and fault resume use the same
@@ -236,10 +257,13 @@ are not inherent and must be justified before entering the model. (Journal 004.)
 
 - **Capability representation.** Per-Context opaque handle tables, three object
   types: Memory, Time, Endpoint (journals 006, 007). Open sub-questions:
-  internal data structure, rights model, badges, revocation scope.
-- **Badge assignment.** Minter-assigned (whoever clones the capability sets the
-  badge) vs. kernel-auto. Leaning minter-assigned. Connected to control Endpoint
-  — the handler needs badges to distinguish which Context faulted.
+  internal data structure, rights model, revocation scope.
+- **Badge value shape.** Size (likely 64-bit), null/default value, collision
+  behavior, rebadging rules. Mechanism and assignment are settled (journal 012);
+  these are details deferrable to implementation.
+- **Fault handler field shape.** Context model stores a badge alongside
+  `fault_handler` — whether as `(endpoint_ref, badge)` pair or two sibling
+  fields is cosmetic. Resolve on next Context model pass.
 - **Control Endpoint opcodes.** Resume and kill are clear. Full opcode set for
   Context lifecycle management is open.
 - **Scheduling algorithm.** EDF with CBS tentatively accepted (journal 008).
@@ -276,6 +300,8 @@ are not inherent and must be justified before entering the model. (Journal 004.)
   size derivation from hardware ceiling + requirements
 - `011-reply-routing-and-fault-resume.md` — reply cap in message, per-Context
   control Endpoint for fault resume, sender-side unification of IPC and faults
+- `012-badge-assignment.md` — minter-assigned, receiver-identifying, per-cap;
+  distinguish vs. identify distinction; fault path Context model consequence
 
 ## Research
 
