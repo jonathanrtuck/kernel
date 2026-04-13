@@ -9,6 +9,12 @@ kernel: {
 
     syscall: {
       shape: class
+
+      send()
+      receive()
+      clone()
+      close()
+      destroy()
     }
 
     time-manager: {
@@ -18,6 +24,17 @@ kernel: {
         shape: class
 
         pick()
+        admit()
+        release()
+      }
+
+      allocator: {
+        interface: {
+          shape: class
+
+          request()
+          release()
+        }
       }
     }
 
@@ -41,22 +58,26 @@ kernel: {
     model: {
       shape: class
 
-      register state
-      TTBR
+      register_state
+      ttbr
       state: runnable | blocked | suspended
-      current_core
-      fault handler
-      control endpoint
-      pending message
-      scheduling hints
+      fault_handler: (endpoint_ref, badge)
+      control_endpoint
+      pending_message
     }
   }
 
   capabilities: {
-    label: Capabilities
+    space: {
+      label: Space
+    }
 
-    model: {
-      shape: class
+    time: {
+      label: Time
+    }
+
+    endpoint: {
+      label: Endpoint
     }
   }
 
@@ -75,8 +96,6 @@ kernel: {
     }
 
     allocator: {
-      label: allocator
-
       interface: {
         shape: class
 
@@ -92,6 +111,7 @@ kernel: {
   core-manager -> space-manager.interface: on fault
   core-manager.time-manager -> contexts.model: reads
   space-manager -> contexts.model: writes TTBR
+  contexts.model -> capabilities: holds
   core-manager.contexts -> contexts: indexes into {
     style.stroke-dash: 3
   }
