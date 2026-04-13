@@ -160,20 +160,88 @@ Interrupt: [interrupt_number, —, —, —]                      cap_mask: 0b00
 
 Minimal. The interrupt number is all the driver needs to begin processing.
 
+## Reply routing and fault resume
+
+These are the same structural question: "how do you respond to a specific
+message?" The answer to one determines the other.
+
+### The problem
+
+IPC reply: Client A sends to Server S. S processes the request. S needs to send
+a response back to A. How does S reach A?
+
+Fault resume: Context B faults. Kernel delivers fault to handler. Handler fixes
+the problem. Handler needs to tell the kernel "resume B." How?
+
+### Option A: explicit reply Endpoint
+
+Client transfers a send capability to its own Endpoint along with the request.
+Server replies by sending to that Endpoint. Uses existing mechanisms only. Costs
+one cap slot in the request (reducing data slots from 3 to 2).
+
+### Option B: one-shot reply capability
+
+Kernel auto-creates a reply capability on send. Server uses it once. No cap slot
+consumed. But adds a new kernel primitive (auto-created, one-shot, doesn't
+compose from existing mechanisms).
+
+### Option C: per-Context control Endpoint
+
+Explored for fault resume: the kernel creates a control Endpoint per Context at
+creation time. The creator receives a send capability to it. The handler sends
+"resume" to it. Extends to other control operations (kill, update timing).
+
+This resolves the journal 006 tension about Context-as-object-type: the control
+Endpoint IS the management interface for a Context, wrapped in an Endpoint. No
+new object type — capabilities point to an Endpoint (established type).
+
+For IPC reply: could the same pattern work? Each Context has a "reply" Endpoint
+that the kernel creates, and senders automatically know to reply there? Not
+settled — this needs more thought.
+
+### Option D: badge-based reply
+
+The server knows the client's badge (from the received message). A reply syscall
+takes the Endpoint + badge: `reply(endpoint_handle, badge, payload)`. The kernel
+delivers to the Context that sent with that badge. No capability transfer
+needed. Would also work for fault resume: `resume(fault_endpoint, badge)`.
+
+Frees a cap slot (no reply Endpoint needed). But introduces a new syscall
+pattern and couples reply routing to badges.
+
+### Status: not settled
+
+Leaning toward control Endpoints for fault resume (Option C) and either explicit
+reply Endpoints (Option A) or badge-based reply (Option D) for IPC. The decision
+affects the RPC request layout — whether it's 2 data + 2 caps or 3 data + 1 cap.
+
+## Userspace queue memory
+
+Explored an alternative: message queues living in the Context's own Space
+instead of kernel-managed memory. The Context allocates a Memory object, tells
+the kernel "use this for my queue." Kernel writes messages to those physical
+pages.
+
+Prior art: seL4 IPC buffer, Linux io_uring, Barrelfish UMP.
+
+Advantages: no kernel heap for queues, Context controls queue size from its own
+Space. Disadvantages: changes Endpoints to many:1 (per-receiver queue breaks
+worker pools), adds complexity.
+
+Middle ground: Endpoint still owns the queue semantically, but the creator
+provides the Memory for storage. Preserves many:many. Creator controls capacity.
+
+Key observation: **the semantics are unchanged either way.** send() and
+receive() work identically whether the queue is kernel-allocated or
+user-provided Memory. This is an implementation detail behind the Endpoint
+interface — deferrable to implementation time without affecting any other design
+decisions.
+
 ## Open questions
 
-- **Reply routing mechanism.** The RPC pattern uses explicit reply Endpoints
-  (Option A from the exploration). The client transfers a send capability to its
-  reply Endpoint. This uses existing mechanisms but costs one cap slot in every
-  request. Alternative: kernel-managed one-shot reply capabilities (Option B)
-  would free one slot but add a new kernel primitive. Leaning toward Option A
-  but not settled.
-
-- **Fault resume mechanism.** Same structural question as reply routing: how
-  does the fault handler tell the kernel to resume the faulting Context?
-  Options: a resume capability in the fault message (1 cap slot), or a
-  badge-based resume syscall (0 cap slots). Connected to the reply routing
-  decision — the answer likely applies to both.
+- **Reply routing / fault resume.** Four options explored (A-D). Not settled.
+  The answer determines the RPC request layout (2 or 3 data slots). Connected to
+  the control Endpoint idea for Context lifecycle management.
 
 - **Badge assignment.** The minter (whoever clones the capability) sets the
   badge. Typically the server. Kernel auto-assignment is an alternative but
@@ -183,6 +251,9 @@ Minimal. The interrupt number is all the driver needs to begin processing.
   interpret slot 0 as an opcode? Probably untyped — the kernel delivers bytes,
   the receiver interprets them. The type field distinguishes kernel messages
   from IPC. Within IPC, interpretation is the receiver's business.
+
+- **Endpoint queue backing.** Kernel-allocated vs. user-provided Memory.
+  Deferred — semantics are identical either way.
 
 ## Status
 
@@ -197,5 +268,9 @@ Minimal. The interrupt number is all the driver needs to begin processing.
 - Payload slots are a shared budget between data and capability transfers
 - The message interface (bytes) is arch-independent; the register mapping is
   arch-specific (ABI layer)
+- receive() is blocking, not polling — event-driven, consistent with philosophy
+- Endpoint queue storage is an implementation detail deferrable behind the
+  interface
 
-**Open:** reply routing, fault resume, badge assignment, slot interpretation.
+**Open:** reply routing / fault resume (highest priority), badge assignment,
+slot interpretation, queue backing.

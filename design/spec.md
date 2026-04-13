@@ -143,8 +143,14 @@ Derived minimum — only fields that follow from the design:
 
 - **Register state** — saved/restored at context switch
 - **TTBR** — address space root (written by Space manager)
-- **Runnable / blocked** — minimum scheduling input
-- **Fault handler capability** — who receives this Context's faults
+- **State** — runnable (schedulable), blocked (waiting on receive), or suspended
+  (involuntarily stopped by the kernel due to a fault). The blocked/suspended
+  distinction is the IPC/fault divergence. (Journal 011.)
+- **Fault handler** — direct Endpoint ref (kernel-internal, not a handle). Who
+  receives this Context's faults.
+- **Control Endpoint** — kernel-internal Endpoint, processed inline on send (no
+  queue). The interface for operations on this Context: resume, kill, and
+  potentially timing/handler updates. (Journal 011.)
 - **Pending message state** — source, type, payload (in registers)
 
 Additional fields (priority, time budget, memory limit) are contingent. They
@@ -181,8 +187,40 @@ provides wiring. (Journal 004.)
 
 **Small (register-sized).** All information delivery is one mechanism. Bulk data
 uses shared memory mapped by the Space manager. The message primitive is
-source + type/metadata + payload. Concrete register layout is an open question.
-(Journal 002.)
+source + type/metadata + payload. 4 slots x 8 bytes = 32 bytes, with cap_mask
+bitmask for capability transfers. (Journals 002, 010.)
+
+### Reply routing
+
+**Reply cap in the message.** Both IPC reply and fault resume use the same
+sender-side mechanism: the original message includes a send capability to a
+reply Endpoint in one of the payload cap slots. The sender responds by sending
+to that capability. (Journal 011.)
+
+- **IPC reply:** the client includes a send cap to its own reply Endpoint.
+- **Fault resume:** the kernel includes a send cap to the faulted Context's
+  control Endpoint.
+
+From the sender's perspective, both are identical: send() to the reply cap. The
+receiver side differs (a Context blocked on receive vs. the kernel managing a
+suspended Context), but that divergence is behind the Endpoint interface.
+
+### Control Endpoint
+
+**Per-Context, kernel-intercepted.** Each Context has a control Endpoint created
+at Context creation time. The creator receives a send capability to it. It
+serves as the lifecycle management interface: resume, kill, and potentially
+timing/handler updates. (Journal 011.)
+
+The control Endpoint is structurally an Endpoint — same capability
+representation, same send() syscall. But the kernel processes messages inline
+during the sender's send() (no queue), interprets the payload as opcodes, and
+checks Context state before acting. This prevents stale messages from
+auto-firing on future state changes.
+
+This resolves the Context-as-object-type tension from journal 006: a Context is
+managed through its control Endpoint, not through capabilities to a "Context"
+object type. Context remains emergent from Memory + Time + Endpoint.
 
 ### Resource accounting
 
@@ -199,8 +237,11 @@ are not inherent and must be justified before entering the model. (Journal 004.)
 - **Capability representation.** Per-Context opaque handle tables, three object
   types: Memory, Time, Endpoint (journals 006, 007). Open sub-questions:
   internal data structure, rights model, badges, revocation scope.
-- **Message shape.** 4 slots × 8 bytes = 32 bytes, cap_mask bitmask for
-  capability transfers (journal 010). Open: reply routing, fault resume.
+- **Badge assignment.** Minter-assigned (whoever clones the capability sets the
+  badge) vs. kernel-auto. Leaning minter-assigned. Connected to control Endpoint
+  — the handler needs badges to distinguish which Context faulted.
+- **Control Endpoint opcodes.** Resume and kill are clear. Full opcode set for
+  Context lifecycle management is open.
 - **Scheduling algorithm.** EDF with CBS tentatively accepted (journal 008).
   Timing declarations: periodic (d, p) or responsive (d, l). Implementation
   details and multi-core admission are open.
@@ -233,6 +274,8 @@ are not inherent and must be justified before entering the model. (Journal 004.)
   Endpoint = bounded queue (many:many, topology via capabilities)
 - `010-message-shape.md` — 4-slot payload, cap_mask encoding, badge, payload
   size derivation from hardware ceiling + requirements
+- `011-reply-routing-and-fault-resume.md` — reply cap in message, per-Context
+  control Endpoint for fault resume, sender-side unification of IPC and faults
 
 ## Research
 
