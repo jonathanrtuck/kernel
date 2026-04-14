@@ -75,7 +75,7 @@ create an escalation path without a tree:
 Each Context has a fault handler capability. The handler Context also has a
 fault handler capability. This creates a chain:
 
-```
+```text
 Context A faults
   → deliver to A's handler (Context B)
     → if B faults...
@@ -100,7 +100,7 @@ delivers exit signals. Structure is in the wiring, not the mechanism.
 
 Examined what the design actually derives vs. what we were importing.
 
-### What's derived:
+### What's derived
 
 - **Space is finite and conserved.** Physical pages exist, can be free or
   mapped. When they're all committed, the next request fails. Space is a must
@@ -109,7 +109,7 @@ Examined what the design actually derives vs. what we were importing.
   directs it. Time isn't stored or handed out.
 - **Each Context has some Space and receives some Time.** That's all.
 
-### What's contingent (not derived):
+### What's contingent (not derived)
 
 - **Limits** (maximum allowable per Context) — a design choice to prevent
   exhaustion. Not inherent.

@@ -256,19 +256,32 @@ are not inherent and must be justified before entering the model. (Journal 004.)
 ## Open questions
 
 - **Capability representation.** Per-Context opaque handle tables, three object
-  types: Memory, Time, Endpoint (journals 006, 007). Open sub-questions:
-  internal data structure, rights model, revocation scope.
-- **Badge value shape.** Size (likely 64-bit), null/default value, collision
-  behavior, rebadging rules. Mechanism and assignment are settled (journal 012);
-  these are details deferrable to implementation.
-- **Fault handler field shape.** Context model stores a badge alongside
-  `fault_handler` — whether as `(endpoint_ref, badge)` pair or two sibling
-  fields is cosmetic. Resolve on next Context model pass.
+  types: Memory, Time, Endpoint (journals 006, 007). Open sub-questions: rights
+  model, revocation scope.
+- **Context model storage.** Pending dedicated journal entry. The ratified
+  Context schema is a minimum (register_state, ttbr, state, fault_handler,
+  control_endpoint, pending_message). Additional fields required by the
+  capability and scheduling systems have been sketched in journals 008 and 011
+  but not ratified. Sub-questions:
+  - **Timing values.** A Context stores four values — `d, dt` plus one of
+    `(p, pt)` or `(l, lt)` — that the scheduler uses for admission and deadline
+    derivation. The names "periodic," "responsive," and "bulk" are user-level
+    categorizations over value ranges, not kernel modes. How the values are laid
+    out in memory (tagged union, both pairs with one empty, unified denominator)
+    is open.
+  - **Capability table.** The per-Context handle table — pointer form, entry
+    layout, inline vs. out-of-line storage.
+  - **Time handle.** The Context's active Time capability — whether located by
+    handle into its own table, by direct ref, or elsewhere.
+  - **Current core.** Per-Context core affinity and assignment bookkeeping.
+  - **Fault handler field shape.** `(endpoint_ref, badge)` pair vs. two sibling
+    fields — cosmetic but needs resolution.
+  - **Badge value shape.** Size (likely 64-bit), null/default value, collision
+    behavior, rebadging rules. Touches capability-entry layout.
 - **Control Endpoint opcodes.** Resume and kill are clear. Full opcode set for
   Context lifecycle management is open.
 - **Scheduling algorithm.** EDF with CBS tentatively accepted (journal 008).
-  Timing declarations: periodic (d, p) or responsive (d, l). Implementation
-  details and multi-core admission are open.
+  Implementation details and multi-core admission are open.
 - **Space manager internals.** Page table format, allocator design.
 - **SMP.** Multiple concurrent reactors, Context model synchronization.
 - **Whether limits/budgets/accounting are needed.** If so, at what granularity
