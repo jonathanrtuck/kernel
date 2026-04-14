@@ -15,6 +15,11 @@ kernel: {
       clone()
       close()
       destroy()
+      open_wormhole()
+      close_wormhole()
+      create_context()
+      kill()
+      resume()
     }
 
     time-manager: {
@@ -38,8 +43,8 @@ kernel: {
       }
     }
 
-    contexts: {
-      label: Contexts
+    frames: {
+      label: Frames
       style.multiple: true
     }
 
@@ -48,11 +53,11 @@ kernel: {
       shape: class
     }
 
-    time-manager -> contexts: reads
+    time-manager -> frames: reads
   }
 
-  contexts: {
-    label: Contexts
+  frames: {
+    label: Frames
     style.multiple: true
 
     model: {
@@ -61,8 +66,7 @@ kernel: {
       register_state
       ttbr
       state: runnable | blocked | suspended
-      fault_handler: (endpoint_ref, badge)
-      control_endpoint
+      fault_handler: (wormhole_ref, badge)
       pending_message
     }
   }
@@ -76,8 +80,12 @@ kernel: {
       label: Time
     }
 
-    endpoint: {
-      label: Endpoint
+    wormhole: {
+      label: Wormhole
+    }
+
+    frame: {
+      label: Frame
     }
   }
 
@@ -106,13 +114,13 @@ kernel: {
   }
 
   core-manager -> core-manager.ipi: sends
-  core-manager -> contexts.model: reads/writes
+  core-manager -> frames.model: reads/writes
   core-manager -> capabilities: resolves
   core-manager -> space-manager.interface: on fault
-  core-manager.time-manager -> contexts.model: reads
-  space-manager -> contexts.model: writes TTBR
-  contexts.model -> capabilities: holds
-  core-manager.contexts -> contexts: indexes into {
+  core-manager.time-manager -> frames.model: reads
+  space-manager -> frames.model: writes TTBR
+  frames.model -> capabilities: holds
+  core-manager.frames -> frames: indexes into {
     style.stroke-dash: 3
   }
 }

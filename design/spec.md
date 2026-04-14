@@ -146,11 +146,9 @@ Derived minimum — only fields that follow from the design:
 - **State** — runnable (schedulable), blocked (waiting on receive), or suspended
   (involuntarily stopped by the kernel due to a fault). The blocked/suspended
   distinction is the IPC/fault divergence. (Journal 011.)
-- **Fault handler** — direct Endpoint ref (kernel-internal, not a handle). Who
-  receives this Context's faults.
-- **Control Endpoint** — kernel-internal Endpoint, processed inline on send (no
-  queue). The interface for operations on this Context: resume, kill, and
-  potentially timing/handler updates. (Journal 011.)
+- **Fault handler** — (wormhole_ref, badge) pair (kernel-internal, not a
+  handle). Where the kernel delivers this Context's fault messages. (Journals
+  004, 013.)
 - **Pending message state** — source, type, payload (in registers)
 
 Additional fields (priority, time budget, memory limit) are contingent. They
@@ -198,8 +196,8 @@ clone time, immutable after, attached by the kernel to every message sent
 through that cap. The sender cannot read, choose, or modify it. (Journals 010,
 012.)
 
-- **On the referrer, not the referent.** Different caps to the same Endpoint
-  carry different badges. That's what makes a single Endpoint carry
+- **On the referrer, not the referent.** Different caps to the same Wormhole
+  carry different badges. That's what makes a single Wormhole carry
   distinguishable senders.
 - **For identification, not merely distinguishing.** Badges key into receiver
   state (per-client tables, per-child fault state, role dispatch). The receiver
@@ -213,35 +211,63 @@ through that cap. The sender cannot read, choose, or modify it. (Journals 010,
 
 ### Reply routing
 
-**Reply cap in the message.** Both IPC reply and fault resume use the same
-sender-side mechanism: the original message includes a send capability to a
-reply Endpoint in one of the payload cap slots. The sender responds by sending
-to that capability. (Journal 011.)
+**IPC reply: cap in the message.** The client includes a send capability to its
+own reply Wormhole in the request payload. The server responds by sending to
+that capability. (Journal 011.)
 
-- **IPC reply:** the client includes a send cap to its own reply Endpoint.
-- **Fault resume:** the kernel includes a send cap to the faulted Context's
-  control Endpoint.
+**Fault resume: context handle + syscall.** The kernel includes a context handle
+(with resume + kill rights) in the fault message. The handler calls
+`resume(context_handle)` or `kill(context_handle)`. Unlike IPC reply, fault
+resume is a direct kernel operation — the handler is telling the kernel to act,
+not sending a message to a peer. (Journal 013.)
 
-From the sender's perspective, both are identical: send() to the reply cap. The
-receiver side differs (a Context blocked on receive vs. the kernel managing a
-suspended Context), but that divergence is behind the Endpoint interface.
+### Object types
 
-### Control Endpoint
+**Four kernel object types.** (Journals 006, 009, 013.)
 
-**Per-Context, kernel-intercepted.** Each Context has a control Endpoint created
-at Context creation time. The creator receives a send capability to it. It
-serves as the lifecycle management interface: resume, kill, and potentially
-timing/handler updates. (Journal 011.)
+| Object type | Shape                   | Object-rights        | Key property           |
+| ----------- | ----------------------- | -------------------- | ---------------------- |
+| Space       | size in bytes           | read, write, execute | Page size hidden       |
+| Time        | fraction (% of core)    | —                    | Fungible, non-clonable |
+| Wormhole    | bounded queue + waiters | send, receive        | Many:many, FIFO        |
+| Context     | execution state         | resume, kill         | See open questions     |
 
-The control Endpoint is structurally an Endpoint — same capability
-representation, same send() syscall. But the kernel processes messages inline
-during the sender's send() (no queue), interprets the payload as opcodes, and
-checks Context state before acting. This prevents stale messages from
-auto-firing on future state changes.
+Context as a fourth object type reverses the journal 006 decision that "Context
+is not an object type." The reversal follows from lifecycle management requiring
+a direct noun: `resume()` and `kill()` are kernel operations on a specific
+Context, requiring a capability that designates and authorizes. (Journal 013.)
 
-This resolves the Context-as-object-type tension from journal 006: a Context is
-managed through its control Endpoint, not through capabilities to a "Context"
-object type. Context remains emergent from Memory + Time + Endpoint.
+### Object creation
+
+**Subdivision.** Objects are created by carving from existing resources. Space
+subdivides into Space. Time subdivides into Time. Wormholes are created by
+spending Space (cross-type: physical bytes change purpose). Context creation
+composes multiple resources (Space + Time + fault handler). (Journal 013.)
+
+**Resource escalation via fault chain.** When a Context needs more resources, it
+faults. The fault handler carves from its own resources or faults upward. The
+root Context's fault handler is the kernel itself — the one place the kernel
+makes resource policy decisions. (Journal 013.)
+
+### Syscall surface
+
+**Ten syscalls.** Two kinds of interaction: peer IPC (send/receive through
+Wormholes) and kernel operations (everything else). The distinction: send() is
+for peers, syscalls are for the kernel. They should not pretend to be each
+other. (Journal 013.)
+
+```text
+send(wormhole_handle, payload, cap_mask)              — peer IPC
+receive(wormhole_handle) → message                    — peer IPC (blocking)
+clone(handle, badge) → new_handle                     — capability management
+close(handle)                                         — capability management
+destroy(handle)                                       — capability management
+open_wormhole(space_handle, capacity) → wormhole_handle — object creation
+close_wormhole(wormhole_handle) → space_handle        — object destruction
+create_context(space, time, fault_handler, ...) → context_handle — creation
+kill(context_handle)                                  — lifecycle management
+resume(context_handle)                                — lifecycle management
+```
 
 ### Resource accounting
 
@@ -255,14 +281,27 @@ are not inherent and must be justified before entering the model. (Journal 004.)
 
 ## Open questions
 
-- **Capability representation.** Per-Context opaque handle tables, three object
-  types: Memory, Time, Endpoint (journals 006, 007). Open sub-questions: rights
-  model, revocation scope.
-- **Context model storage.** Pending dedicated journal entry. The ratified
-  Context schema is a minimum (register_state, ttbr, state, fault_handler,
-  control_endpoint, pending_message). Additional fields required by the
-  capability and scheduling systems have been sketched in journals 008 and 011
-  but not ratified. Sub-questions:
+- **Capability representation.** Per-Context opaque handle tables, four object
+  types: Space, Time, Wormhole, Context (journals 006, 009, 013). Open
+  sub-questions: rights model, revocation scope.
+- **Context handle / fault handler unification.** If context handles are
+  non-clonable (like Time), then exactly one entity holds the handle. That
+  entity could be defined as the fault handler — eliminating the fault_handler
+  field from the Context model. Attractive simplification, but the delivery
+  mechanism is unclear: the kernel needs a Wormhole to deliver fault messages,
+  not just a handle location. Deferred. (Journal 013.)
+- **Context handle clonability.** If non-clonable, reinforces handle = handler
+  unification. If clonable, multiple holders can independently kill/resume, but
+  fault routing becomes ambiguous. Tied to the unification question.
+- **Context rights model.** Resume and kill are settled. Inspect state? Modify
+  timing parameters? Change fault handler? Each new right is a potential new
+  syscall.
+- **create_context parameters.** Exact set of resources and configuration
+  required at creation time.
+- **Context model storage.** The ratified Context schema is a minimum
+  (register_state, ttbr, state, fault_handler, pending_message). Additional
+  fields required by the capability and scheduling systems have been sketched in
+  journals 008 and 011 but not ratified. Sub-questions:
   - **Timing values.** A Context stores four values — `d, dt` plus one of
     `(p, pt)` or `(l, lt)` — that the scheduler uses for admission and deadline
     derivation. The names "periodic," "responsive," and "bulk" are user-level
@@ -274,12 +313,14 @@ are not inherent and must be justified before entering the model. (Journal 004.)
   - **Time handle.** The Context's active Time capability — whether located by
     handle into its own table, by direct ref, or elsewhere.
   - **Current core.** Per-Context core affinity and assignment bookkeeping.
-  - **Fault handler field shape.** `(endpoint_ref, badge)` pair vs. two sibling
-    fields — cosmetic but needs resolution.
   - **Badge value shape.** Size (likely 64-bit), null/default value, collision
     behavior, rebadging rules. Touches capability-entry layout.
-- **Control Endpoint opcodes.** Resume and kill are clear. Full opcode set for
-  Context lifecycle management is open.
+- **Kernel fault handling policy.** What the kernel grants the root Context on
+  resource faults. Minimal policy (grant what's available) or something more
+  structured. (Journal 013.)
+- **Space subdivision semantics.** When Space is consumed by open_wormhole or
+  create_context, does the Space handle shrink or is it fully consumed?
+  close_wormhole reclamation target. (Journal 013.)
 - **Scheduling algorithm.** EDF with CBS tentatively accepted (journal 008).
   Implementation details and multi-core admission are open.
 - **Space manager internals.** Page table format, allocator design.
@@ -315,6 +356,9 @@ are not inherent and must be justified before entering the model. (Journal 004.)
   control Endpoint for fault resume, sender-side unification of IPC and faults
 - `012-badge-assignment.md` — minter-assigned, receiver-identifying, per-cap;
   distinguish vs. identify distinction; fault path Context model consequence
+- `013-object-creation-and-context-handles.md` — object creation via
+  subdivision, syscalls vs. send(), Context as fourth object type, control
+  Endpoint dissolved, Wormhole naming
 
 ## Research
 
