@@ -11,6 +11,16 @@
           }
         ],
         "matcher": "Edit|Write"
+      },
+      {
+        "hooks": [
+          {
+            "command": "node .brain/trigger.js",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit|Write"
       }
     ],
     "SessionStart": [

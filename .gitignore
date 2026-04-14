@@ -1,3 +1,6 @@
+.brain/.lock
+.brain/orchestrator.log
+.brain/state/
 .claude/settings.local.json
 .DS_Store
 .vscode/

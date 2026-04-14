@@ -1,0 +1,62 @@
+{
+  "agents": [
+    {
+      "definition": "agents/consistency.md",
+      "model": "sonnet",
+      "name": "consistency",
+      "output": "state/consistency.md",
+      "tools": [
+        "Read",
+        "Grep",
+        "Glob"
+      ],
+      "triggers": [
+        "design/spec.md",
+        "design/graph.d2"
+      ]
+    },
+    {
+      "definition": "agents/prior-art.md",
+      "model": "sonnet",
+      "name": "prior-art",
+      "output": "state/prior-art.md",
+      "tools": [
+        "Read",
+        "Grep",
+        "Glob"
+      ],
+      "triggers": [
+        ".brain/state/question.md"
+      ]
+    },
+    {
+      "definition": "agents/history.md",
+      "model": "sonnet",
+      "name": "history",
+      "output": "state/history.md",
+      "tools": [
+        "Read",
+        "Grep",
+        "Glob"
+      ],
+      "triggers": [
+        ".brain/state/question.md"
+      ]
+    },
+    {
+      "definition": "agents/consequences.md",
+      "model": "sonnet",
+      "name": "consequences",
+      "output": "state/consequences.md",
+      "tools": [
+        "Read",
+        "Grep",
+        "Glob"
+      ],
+      "triggers": [
+        ".brain/state/question.md",
+        "design/spec.md"
+      ]
+    }
+  ]
+}
