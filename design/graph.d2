@@ -1,14 +1,14 @@
 # Kernel structural map.
 #
-# This file is intentionally sparse. It was reset on 2026-04-15 alongside
-# spec.md to re-derive contingent decisions from first principles. Only the
-# axiomatic outer topology remains: the three actors (userspace, kernel,
-# hardware) and the edges that are forced by the axioms (exceptions enter the
-# kernel; the kernel delivers to userspace; userspace invokes the kernel
-# through a defined interface).
+# Populated from design/spec.md derivations D1-D3, observations O2-O3,
+# and Vocabulary (Space, Time, Frame). Every box and edge has a
+# corresponding spec.md entry; items labeled "TBD" await downstream
+# derivation.
 #
-# Internal kernel structure is intentionally absent. It will be populated as
-# the derivation identifies components and the interfaces between them.
+# Intentionally absent (pending derivation): capability/authority
+# mechanism, syscall surface, Frame schema, IPC shape,
+# per-physical-core concerns (power, thermal, shared cache/TLB).
+# See spec.md#Open questions.
 #
 # Render with: d2 --layout elk graph.d2
 
@@ -17,8 +17,37 @@ userspace: {
 }
 
 kernel: {
-  # Internals TBD. The derivation will populate this box as components are
-  # identified and stress-tested.
+  core-manager: {
+    label: Core manager
+    style.multiple: true
+    # Per logical core (spec.md#D1).
+    # Owns the per-core hot path: exception entry, state update,
+    # next-Frame selection, resumption.
+
+    time-manager: {
+      label: Time manager
+      # Per Core manager (spec.md#D2).
+      # Scheduling algorithm is a leaf-node, swappable per core.
+      # Carries algorithm-specific state; Frame carries only
+      # abstract scheduling properties.
+    }
+  }
+
+  space-manager: {
+    label: Space manager
+    # Single logical interface (spec.md#D3).
+    # Internal strategy (partitioning, NUMA-awareness, per-core
+    # caches, cross-node fallback) is a leaf-node concern below
+    # this layer and intentionally not represented here.
+  }
+
+  frame: {
+    label: Frame
+    style.multiple: true
+    # Vocabulary: coupled Space(s) + exactly one Time.
+    # Internal schema and kernel-side access structure TBD
+    # (spec.md#Open questions).
+  }
 }
 
 hardware: {
@@ -27,9 +56,24 @@ hardware: {
   memory
   core: {
     style.multiple: true
+    # Logical core. Per-physical-core concerns (power, thermal,
+    # shared L1/TLB on SMT) belong to components not yet derived.
   }
 }
 
-kernel -> userspace: fault delivery, messages
-userspace -> kernel: invokes (interface TBD)
-hardware.core -> kernel: all exceptions
+# Cross-core coordination (O2): IPIs are the only wake mechanism
+# because A4 means there is no kernel thread to poll.
+kernel.core-manager -> kernel.core-manager: IPI
+
+# Hardware -> kernel (A2, O3)
+hardware.core -> kernel.core-manager: exceptions (incl. SGI)
+
+# Kernel -> hardware
+kernel.core-manager.time-manager -> hardware.core: timer programming
+kernel.space-manager -> hardware.memory
+
+# External interface: the userspace-facing shape is still TBD.
+# userspace -> kernel is a kernel invocation producing some
+# combination of O1's three output types.
+userspace -> kernel.core-manager: invokes (syscall interface TBD)
+kernel -> userspace: fault delivery, messages (shape TBD)
