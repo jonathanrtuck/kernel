@@ -17,7 +17,8 @@
           {
             "command": "node .brain/trigger.js",
             "timeout": 5,
-            "type": "command"
+            "type": "command",
+            "disabled": true
           }
         ],
         "matcher": "Edit|Write"

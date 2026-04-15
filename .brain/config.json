@@ -1,6 +1,24 @@
 {
   "agents": [
     {
+      "definition": "agents/researcher.md",
+      "model": "sonnet",
+      "name": "researcher",
+      "output": "state/researcher.md",
+      "tools": [
+        "Read",
+        "Grep",
+        "Glob",
+        "WebSearch",
+        "WebFetch",
+        "Write"
+      ],
+      "timeout": 300000,
+      "triggers": [
+        ".brain/state/question.md"
+      ]
+    },
+    {
       "definition": "agents/consistency.md",
       "model": "sonnet",
       "name": "consistency",

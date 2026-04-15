@@ -102,7 +102,7 @@ function runAgent(agent) {
       ],
       {
         cwd,
-        timeout: 180_000, // 3 minute max per agent
+        timeout: agent.timeout || 180_000,
         stdio: ["pipe", "pipe", "pipe"],
         env: { ...process.env },
       },

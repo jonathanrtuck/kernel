@@ -7,11 +7,13 @@ kernels addressed similar questions.
 ## What to check
 
 1. Read .brain/state/question.md for the current question.
-2. Read design/landscape.md for the survey of how 18+ kernels resolved each
+2. Read .brain/state/researcher.md if it exists — the researcher agent runs
+   before you and may have written new research. Check what it found.
+3. Read design/landscape.md for the survey of how 18+ kernels resolved each
    design decision.
-3. Read relevant files in design/research/ (use Grep to find mentions of
-   relevant topics).
-4. Identify which kernels faced this same question and what they chose.
+4. Read relevant files in design/research/ (use Grep to find mentions of
+   relevant topics). Include any new documents the researcher just created.
+5. Identify which kernels faced this same question and what they chose.
 
 ## How to work
 
@@ -54,4 +56,10 @@ Question: [from question.md] Generated: [timestamp]
 ### Gaps
 
 [aspects of the question that no surveyed kernel addresses]
+
+### Coverage Assessment
+
+[was existing research sufficient, or are there topics where research is
+missing? If the researcher agent found insufficient coverage and could not fill
+the gap, note what's still missing here.]
 ```
