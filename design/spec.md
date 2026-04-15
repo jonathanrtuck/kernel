@@ -20,9 +20,9 @@ Labeled for reference from derivation entries' "Rests on" lines.
   Ownership maps to resource lifecycle. Traits map to architecture abstraction.
   Unsafe boundaries map to trust boundaries.
 
-- **A2 — ARM64 target.** Generic timer, GIC, EL0/EL1. The codebase is
-  structured for portability (`src/arch/`); architecture-specific details live
-  behind trait interfaces and do not shape the design.
+- **A2 — ARM64 target.** Generic timer, GIC, EL0/EL1. The codebase is structured
+  for portability (`src/arch/`); architecture-specific details live behind trait
+  interfaces and do not shape the design.
 
 - **A3 — The kernel is generic.** No assumptions about the OS or workload.
   Personal devices, servers, embedded — all viable. Workload-specific policy
@@ -42,17 +42,16 @@ entry is, and where to find the reasoning. Format:
 > **Name.** One-sentence statement of what was derived.
 >
 > - **Rests on:** the load-bearing predecessors — axiom labels (A1, A2, …),
->   prior derivation names, and any `design/research/` docs that directly
->   shaped the derivation. Only entries the reasoning *actually invokes*, not
->   every entry that might be related. Completeness is not the goal; honesty
->   is. If a predecessor moves, this entry must be revisited.
+>   prior derivation names, and any `design/research/` docs that directly shaped
+>   the derivation. Only entries the reasoning _actually invokes_, not every
+>   entry that might be related. Completeness is not the goal; honesty is. If a
+>   predecessor moves, this entry must be revisited.
 > - **Status:** `tentative` (accepted to enable downstream exploration, may
->   move), `settled` (reasoning reviewed, revisit only on explicit trigger),
->   or `settled — revisit when X` (settled now but with a named trigger to
->   reopen).
+>   move), `settled` (reasoning reviewed, revisit only on explicit trigger), or
+>   `settled — revisit when X` (settled now but with a named trigger to reopen).
 > - **Journal:** link to the numbered journal entry containing the full
->   reasoning. Spec entries state the *conclusion*; journals carry the
->   *argument*.
+>   reasoning. Spec entries state the _conclusion_; journals carry the
+>   _argument_.
 
 No confidence numbers. Numeric scores in this kind of work turn into vibes
 within a session and then start being treated as load-bearing. Qualitative
@@ -60,18 +59,17 @@ language above is the substitute.
 
 ### Relationship to philosophy
 
-`design/philosophy.md` is not in the axioms list and is not a predecessor
-listed under "Rests on." Axioms are *what we derive from*; philosophy
-provides *strategies for how to derive*. When a journal entry applies a
-philosophy principle to make a derivation move, it should name that
-principle ("applying 'push complexity to the leaves' here…") so the
-principle's role is visible without collapsing it into the dependency graph.
+`design/philosophy.md` is not in the axioms list and is not a predecessor listed
+under "Rests on." Axioms are _what we derive from_; philosophy provides
+_strategies for how to derive_. When a journal entry applies a philosophy
+principle to make a derivation move, it should name that principle ("applying
+'push complexity to the leaves' here…") so the principle's role is visible
+without collapsing it into the dependency graph.
 
 ### Template revisit
 
 This template itself is tentative. After 3-5 entries have landed under it,
-review whether the shape fits what actually needs to be captured. Adjust if
-not.
+review whether the shape fits what actually needs to be captured. Adjust if not.
 
 ---
 
