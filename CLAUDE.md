@@ -97,10 +97,13 @@ design/
   philosophy.md — thinking framework (read first)
   spec.md       — settled decisions and rationale (design SSOT)
   graph.d2      — structural map (components, interfaces, edges)
-  journal/      — exploration notes and rejected alternatives
-  research/     — prior art studies for upcoming decisions
+  journal/      — exploration notes and rejected alternatives (created as derivation proceeds)
+  research/     — prior art studies (descriptive, reusable): smp, syscall-landscape
   landscape.md  — survey of 18+ real kernel designs by decision point
-  claims.toml   — legacy (pre-restart decisions, not current SSOT)
+  archive/      — frozen artifacts from previous derivation chains (not current SSOT)
+.claude/
+  working-with-claude.md — meta-process synthesis for Claude collaboration on this project
+  hooks/, commands/, settings.json — Claude Code integration
 ```
 
 The root Cargo.toml has both a `[lib]` and a `[[bin]]` target pointing into
@@ -184,16 +187,22 @@ Every `.rs` file follows this order:
 - `design/philosophy.md` — **Read first.** Two root principles and their
   consequences. The general thinking framework that produces decisions.
 - `design/spec.md` — **Design SSOT.** Settled decisions with brief rationale,
-  organized by concern. Open questions listed at the end.
+  organized by concern. Open questions listed at the end. Currently sparse —
+  reset on 2026-04-15 to re-derive contingent decisions from first principles.
 - `design/graph.d2` — **Structural map.** Components, interfaces, and edges in
-  D2 format. Render with `d2 --layout elk graph.d2`.
+  D2 format. Render with `d2 --layout elk graph.d2`. Currently only the outer
+  topology (userspace, kernel, hardware); internals populated as derivation
+  proceeds.
 - `design/journal/` — **Exploration record.** Numbered entries capturing
   reasoning, rejected alternatives, and discoveries. Referenced from spec.md
-  where relevant.
+  where relevant. Created as derivation proceeds.
 - `design/research/` — **Prior art.** Deep research documents prepared before
-  major design decisions.
+  major design decisions. Descriptive only — no project-specific reasoning.
+  Currently `smp.md` and `syscall-landscape.md`.
 - `design/landscape.md` — **Reference.** Survey of how 18+ real kernels resolved
   each major design decision. Consult when facing a design fork to see known
   approaches and tradeoffs.
-- `design/claims.toml` — **Legacy.** Pre-restart design decisions (28 claims).
-  Not the current source of truth. Retained for reference only.
+- `design/archive/` — **Frozen.** Artifacts from previous derivation chains
+  (restart-1: spec, graph, journal, claims from the 2026-04-13 chain). Not
+  current SSOT. Consult only to check convergence or avoid re-discovering known
+  dead-ends — never auto-load into session context.

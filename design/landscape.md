@@ -1,9 +1,18 @@
 # Kernel Design Landscape
 
 A reference document surveying how real microkernels and academic systems have
-resolved the design decisions this kernel will face. Organized by decision
-point, not by system. For each decision: what are the known approaches, who
-chose what and why, what are the tradeoffs, and where might novelty lie.
+resolved the design decisions a new microkernel typically faces. Organized by
+decision point, not by system. For each decision: what are the known approaches,
+who chose what, what are the tradeoffs.
+
+**Depth and role.** This is a **survey-depth jumping-off point**, not a
+research-depth reference. Expect paragraph-per-system summaries across ~50
+subsections. Use this document to orient across the problem space and to
+identify which systems and papers to study further for a specific question. For
+research-depth on a specific derivation question, a targeted document under
+`design/research/` should be produced — either cold (before a decision is on the
+table) or at the moment the question becomes live. `design/research/ CLAUDE.md`
+defines the descriptive-only rule those documents must follow.
 
 **Systems referenced throughout:** seL4, L4 family (L4Ka::Pistachio, Fiasco.OC,
 NOVA), EROS/Coyotos/KeyKOS, Genode, QNX, Plan 9/Inferno, Barrelfish, Redox,
@@ -11,13 +20,15 @@ Minix 3, Zircon/Fuchsia, Mach/Hurd, Spring OS, Singularity/Midori, Composite OS,
 Hydra, Nemesis, CHERI/Morello, Capsicum.
 
 **How to read this document:** Each section is self-contained. Start with
-whichever area is relevant to the current design question. The
-[Novelty Opportunities](#novelty-opportunities) section at the end synthesizes
-cross-cutting ideas specific to this kernel's design.
+whichever area is relevant to the current design question. The annotated
+[References](#8-references) section points at specific papers to read for depth
+on each major theme.
 
-**Relationship to claims.toml:** This document is _input_ to design decisions,
-not _output_. When a decision is made, it goes in `claims.toml` with rationale.
-This document provides the landscape that informed the decision.
+**Relationship to spec.md:** This document is _input_ to design decisions, not
+_output_. Nothing here prescribes what this kernel should do — when a decision
+is made, it goes in `design/spec.md` with rationale (and a journal entry
+recording how it was derived). This document surveys the landscape that informed
+the decision.
 
 ---
 
@@ -30,8 +41,7 @@ This document provides the landscape that informed the decision.
 5. [Interrupt & Fault Handling](#5-interrupt--fault-handling)
 6. [Naming, Namespaces & Process Model](#6-naming-namespaces--process-model)
 7. [Boot Protocol & Early Initialization](#7-boot-protocol--early-initialization)
-8. [Novelty Opportunities](#8-novelty-opportunities)
-9. [References](#9-references)
+8. [References](#8-references)
 
 ---
 
@@ -252,10 +262,9 @@ with memory pressure signals and OOM reboot. **Nemesis**: guaranteed frames
 (immune from revocation) plus optimistic frames (revocable). **Genode**:
 quota-bounded RAM sessions.
 
-Three viable positions for this kernel: (1) no-overcommit with reservation
-accounting (QNX model), (2) overcommit with pressure signals (Zircon model), (3)
-per-object/per-session quotas (Genode/Nemesis model). See claim
-`overcommit-policy-open`.
+Three family positions appear across the surveyed systems: no-overcommit with
+reservation accounting (QNX), overcommit with pressure signals (Zircon),
+per-object/per-session quotas (Genode, Nemesis).
 
 ### 2.7 Page Size Exposure
 
@@ -264,22 +273,23 @@ per-object/per-session quotas (Genode/Nemesis model). See claim
 inherently granularity-exposing. Mach, QNX, Plan 9, Minix 3, Redox all expose
 `PAGE_SIZE`.
 
-**This kernel's decision to hide page size is genuinely novel.** No surveyed
-system fully hides it. The closest is Genode (which abstracts alignment behind
-dataspaces). ARM64 supports 4K, 16K, and 64K base pages, with contiguous PTE
-hints for larger mappings. Hiding page size requires the kernel to absorb
-alignment, tail-waste, and large-page promotion -- complexity every other system
-pushes to userspace. The payoff: an interface that survives page-size changes
-without ABI breaks.
+**Page size hiding appears nowhere in the surveyed systems.** The closest is
+Genode (which abstracts alignment behind dataspaces), but even there the
+granularity is observable. On ARM64 — which supports 4K, 16K, and 64K base pages
+with contiguous-PTE hints for larger mappings — full hiding would require the
+kernel to absorb alignment, tail-waste, and large-page promotion itself rather
+than pushing them to userspace. The interface-stability argument for hiding is
+that page-size changes would not break ABI; Linux has struggled with its exposed
+`PAGE_SIZE` across 4K/16K/64K migrations.
 
 ### 2.8 Cache Coloring and NUMA
 
 Most microkernels ignore physical topology. **Barrelfish** is the notable
-exception (designed for it). For ARM64 personal devices: cache line size
-differences between big/LITTLE cores (128-byte on big, 64-byte on LITTLE in some
-SoCs), cache coloring for deterministic performance, and memory controller
-interleaving are relevant. Apple Silicon's unified memory makes NUMA irrelevant
-but cache pressure still meaningful.
+exception (designed for it). On ARM64: cache line size differences between
+big/LITTLE cores (128-byte on big, 64-byte on LITTLE in some SoCs), cache
+coloring for deterministic performance, and memory controller interleaving are
+topology factors that may matter. Apple Silicon's unified memory makes NUMA
+distance uniform, but cache pressure and core-cluster partitioning remain.
 
 ---
 
@@ -318,8 +328,7 @@ memory is the data plane.
 
 Heiser's dictum: "IPC is a user-controlled context switch with benefits" -- it
 should never carry bulk data. seL4 messages are explicitly small (fits in
-registers). This aligns with claim `ipc-mechanism-deferred`'s three composable
-primitives.
+registers).
 
 ### 3.3 IPC Object Model
 
@@ -383,8 +392,7 @@ attempted kernel-to-userspace upcalls; NetBSD implemented then abandoned them.
 
 **Why convergence on kernel scheduling:** scheduling decisions are triggered by
 privileged events the kernel already handles. Pushing policy out requires
-upcalling on every event (costly) or batching (loses responsiveness). See claim
-`kernel-owns-scheduling-policy`.
+upcalling on every event (costly) or batching (loses responsiveness).
 
 ### 4.2 Scheduling Algorithm
 
@@ -412,8 +420,9 @@ to affinity-preserving balancing.
 **ARM big.LITTLE/DynamIQ** adds core asymmetry. **Linux EAS** (Energy Aware
 Scheduling, mainline since 5.0) uses an Energy Model mapping frequency/capacity
 to power. **macOS** uses QoS classes for P-core vs. E-core placement. **Android
-ADPF** adds app-level performance hints. For a personal device kernel,
-heterogeneous scheduling is not optional.
+ADPF** adds app-level performance hints. Heterogeneous scheduling has become a
+mandatory concern on any modern ARM64 target; ignoring it leaves cores stranded
+or mispriced.
 
 ### 4.4 Thread vs. Process as Schedulable Unit
 
@@ -422,9 +431,9 @@ separates TCBs from VSpaces and scheduling contexts. **QNX/Linux** bundle
 threads in processes. **Barrelfish** schedules dispatchers (user-level entities
 managing internal threads).
 
-This kernel's claim (`thread-is-schedulable-unit`) aligns with seL4/L4
-separation. The implementation question: scheduling parameters on the thread
-object vs. separate capability (seL4 MCS scheduling contexts).
+The implementation split that cuts across systems: scheduling parameters on the
+thread object (most systems) vs. as a separate first-class capability (seL4 MCS
+scheduling contexts).
 
 ### 4.5 Priority Inversion Handling
 
@@ -440,34 +449,46 @@ available but disabled on the offending mutex.
 
 ### 4.6 Real-Time Guarantees
 
-**For personal interactive devices, the relevant requirements are soft-RT:**
+The real-time spectrum runs from hard-RT (missed deadline = system failure;
+aerospace, safety-critical control) through firm-RT (missed deadline = dropped
+result; industrial) to soft-RT (missed deadline = degraded experience; audio,
+graphics, touch).
+
+**Representative soft-RT deadlines** on interactive devices:
 
 - Audio: 5-10ms round-trip (256 samples at 48kHz is ~5.3ms)
 - Touch input: under 50ms (Apple Pencil targets 8-16ms)
 - Display: 16.67ms at 60Hz, 8.33ms at 120Hz
 
-A deadline-based scheduler with capacity/period budgets is well-suited: audio
-threads get guaranteed budgets, compositor gets frame-aligned deadlines,
-everything else runs fair-share. Hard-RT verification is not needed.
+Systems approach this differently. **seL4 MCS** provides hard-RT via sporadic
+servers with formally bounded WCET. **QNX** targets firm-RT with 256
+fixed-priority levels and bounded interrupt latency. **Zircon** uses deadline
+profiles (capacity/period) layered above fair-share for soft-RT. **Linux
+SCHED_DEADLINE** applies CBS on EDF. The choice of RT target shapes which
+scheduling model fits.
 
 ### 4.7 Energy-Aware Scheduling
 
 **Linux EAS** evaluates energy cost of each placement decision using an Energy
 Model. **macOS** maps QoS classes to P-cores/E-cores. **Android ADPF** layers
-app-level performance hints.
+app-level performance hints. **seL4** and most traditional microkernels do not
+address energy at the kernel level — policy is pushed to userspace or absent.
 
-For a microkernel: threads carry a QoS/energy hint (latency-sensitive /
-throughput / efficiency), the kernel maps to hardware reality. The energy model
-is a kernel-internal leaf node behind a stable interface -- critical given ARM
-topologies change every generation.
+The observable split: systems that integrate energy into the scheduler (Linux
+EAS, macOS, Android) accept tight coupling between scheduler policy and a
+device-specific energy model; systems that ignore it (seL4, QNX, most L4
+derivatives) treat energy as out-of-scope or userspace-managed. ARM SoC
+topologies change every generation, so any kernel that owns the energy model
+accepts continuous churn in that component.
 
 ### 4.8 Interactive Responsiveness
 
-Three requirements: (1) input events preempt immediately, (2) compositor never
-misses frame deadlines, (3) background work doesn't starve interactive threads.
-**macOS QoS tiers** (userInteractive > userInitiated > utility > background).
-**EEVDF** inherently improves latency via virtual deadlines. **Zircon's**
-two-tier model (deadline + fair) handles all three directly.
+Three requirements commonly cited: (1) input events preempt immediately, (2) the
+compositor never misses frame deadlines, (3) background work doesn't starve
+interactive threads. **macOS QoS tiers** (userInteractive > userInitiated >
+utility > background) are the canonical user-facing model. **EEVDF** inherently
+improves latency via virtual deadlines. **Zircon** combines a deadline class for
+frame-bound work with a fair class for everything else.
 
 ---
 
@@ -541,7 +562,8 @@ PPIs/SGIs/LPIs per PE), CPU Interface (ICC\_\* system registers). System
 register interface reduces latency vs. GICv2 MMIO.
 
 **Affinity routing:** MPIDR-based hierarchical routing. `GICD_IROUTER` per SPI.
-Simpler on fixed-topology personal devices.
+Straightforward on fixed-topology systems; more involved with hotplug or dynamic
+core availability.
 
 **LPIs and ITS:** Message-signaled interrupts. Peripheral writes to ITS
 doorbell, ITS translates device ID + event ID to target. Configuration in memory
@@ -628,10 +650,6 @@ LRPC (Bershad, 1990): 3x improvement via thread migration. Composite OS: thread
 migration as primary IPC, one schedulable entity across domains. L4's "direct
 process switch" is a limited form.
 
-For a kernel where threads are already independent of address spaces, thread
-migration is a natural extension rather than a special case. See
-[Novelty: Thread Migration](#thread-migration-as-the-general-case).
-
 ### 6.6 Address Space Management
 
 **Userspace-managed + kernel primitives:** seL4 (allocate page table objects,
@@ -674,8 +692,9 @@ bootloader; passes it as VMO to userboot. **QNX:** IPL -> startup -> system page
 -> procnto. **L4Re:** positional boot modules via multiboot. **UEFI:**
 GetMemoryMap() then ExitBootServices(); rich discovery but leaves MMU enabled.
 
-For ARM64 personal devices, devicetree is the expected hardware description
-path.
+On ARM64, devicetree is the dominant hardware description format across both
+embedded and personal-device deployments. Server-class ARM64 platforms
+increasingly use ACPI.
 
 ### 7.2 Initial Process / Root Task
 
@@ -705,9 +724,8 @@ standard. **Spin tables:** secondary cores poll memory location, primary writes
 entry point. Simpler but wastes power. **ACPI parking protocol:** per-CPU
 mailbox pages (server platforms).
 
-Under Apple Hypervisor.framework, the VMM controls vCPU creation. PSCI-via-HVC
-emulation is the clean abstraction. Simplest path: start with single core, defer
-multicore.
+Under Apple Hypervisor.framework, the VMM controls vCPU creation and PSCI is
+emulated via HVC.
 
 ### 7.4 Memory Discovery and Initial Page Tables
 
@@ -716,9 +734,9 @@ boot-provided structure. **Initial page tables:** identity map (VA = PA) for
 MMU-enable trampoline in TTBR0, kernel mapping in TTBR1. After MMU on and kernel
 at high VA, identity map dropped.
 
-Under Hypervisor.framework: VMM controls guest physical space. Can write a
-minimal BootInfo struct to a known address, bypassing devicetree parsing
-entirely.
+Under Hypervisor.framework, the VMM controls guest physical space and can pass a
+custom boot structure to the guest rather than requiring the guest to parse
+firmware tables.
 
 ### 7.5 Driver Initialization
 
@@ -736,184 +754,158 @@ blob:** Zircon (kernel + ZBI container). **Kernel + initramfs + devicetree:**
 Linux. **Image Filesystem:** QNX (IFS -- browsable). **Checkpoint:**
 EROS/KeyKOS.
 
-ZBI-style (kernel + typed container) offers the best tradeoff for a new kernel:
-self-describing, kernel parses minimally, hands off to userspace.
+Across these, the tradeoff axis is how much the kernel must understand the
+container format. Single-ELF is simplest but least flexible. Typed containers
+(ZBI) are self-describing at the cost of a minimal parser in the kernel.
+Orthogonal-persistence (EROS/KeyKOS) sidesteps the boot-image question by
+reconstructing state from a snapshot.
 
 ---
 
-## 8. Novelty Opportunities
+## 8. References
 
-Cross-cutting ideas specific to this kernel's design -- memory objects with
-hidden page size, create-then-map, demand paging, capability-mediated access,
-threads independent of address spaces.
-
-### Hidden Page Size (genuinely novel)
-
-No surveyed system fully hides page size from userspace. Every existing
-microkernel exposes it as a constant, frame-size parameter, or alignment
-requirement. This kernel's hidden-page-size decision means the interface
-survives page-size changes (4K -> 16K -> 64K on ARM64) without ABI breaks --
-something Linux is currently struggling with. The kernel absorbs alignment,
-tail-waste, and large-page promotion as internal optimizations. Combined with
-demand paging, the kernel can choose commit granularity transparently (4K for
-cold objects, 2M for hot) without userspace knowledge.
-
-### Byte-Granularity Objects with Kernel-Managed Packing
-
-seL4 has fixed-size typed objects. Zircon VMOs are page-granular. EROS pages are
-4096 bytes. This kernel's slab-packing model (small objects share a physical
-page within one address space, promote to own pages when shared across) is
-novel. The closest analogy is Linux's slab allocator, but that's an in-kernel
-mechanism, not a userspace-visible object model.
-
-### Capability-Memory Object Unification
-
-Most systems keep capabilities and memory objects as separate abstractions with
-a mapping between them. This kernel could unify them: a memory object IS a
-capability target, the handle IS the capability, rights on the handle govern
-both syscall access and mapping permissions. This avoids duplicating permission
-checks and eliminates confused-deputy bugs where mapping permissions disagree
-with handle rights.
-
-### IPC Through the Memory Object Model
-
-If memory objects are the kernel's primary abstraction, IPC channels could _be_
-memory objects: a ring buffer mapped into two address spaces with
-kernel-provided notification. The "channel" is a pattern over existing objects +
-notifications, not a separate kernel type. Benefits: unified resource accounting
-(buffer size in memory budget), demand-paged message buffers, consistent
-capability model (authority over memory = authority to communicate). Similar to
-Barrelfish's UMP but as a kernel-blessed pattern.
-
-### Thread Migration as the General Case
-
-Most systems treat thread migration as an optimization hack. In this kernel,
-where threads are already independent of address spaces, migration is the
-natural case: a thread executing IPC simply changes which address space it runs
-in. Avoids server thread pool sizing, makes resource accounting trivial (one
-thread, one budget, across domains). Spring and Composite explored this, but
-neither started from thread-address-space independence as a first principle.
-
-### Capability-Mediated Energy Scheduling
-
-No existing system fully integrates energy-aware scheduling with capabilities. A
-scheduling interface carrying both temporal parameters (budget/period) and
-energy hints (latency-sensitive / throughput / efficiency) would let userspace
-express intent without dictating core placement. The kernel maps intent to
-hardware using an internal energy model -- a leaf node behind a stable
-interface.
-
-### GICv4 Direct Injection for Userspace Drivers
-
-GICv4's virtual interrupt injection (designed for hypervisors) could be
-repurposed: each userspace driver as a "vPE," device interrupts injected
-directly without kernel involvement when the driver is running. Doorbell
-interrupt for when it's not. Near-zero-overhead delivery for the common case.
-Constraint: LPI-only (MSI/MSI-X devices), need split model for legacy SPIs.
-
-### Revocation via Memory Object Lifecycle
-
-Since capabilities tie to memory objects, revocation follows object lifecycle:
-revoking = unmapping. When last handle closes, object destroyed, all mappings
-invalidated via MMU. Simpler than seL4's CDT traversal, more principled than
-Zircon's "just close it." EROS factory pattern informs "capability groups" where
-destroying a group revokes everything it contains.
-
-### Contract-Verified Channels via Rust's Type System
-
-Singularity's compile-time channel contracts required C#. Rust's ownership +
-type system could enforce similar contracts without a managed runtime: channel
-types parameterized by state machines, borrow checker ensures linear use. The
-kernel doesn't verify contracts (userspace concern), but the channel primitive
-can be contract-friendly.
-
-### QoS-as-First-Class-Object
-
-Userspace declares QoS contracts ("this thread needs 2ms every 16.67ms for frame
-rendering"). The kernel admits or rejects based on capacity. Both sides have a
-formal agreement. Prevents oversubscription; guarantees admitted contracts.
-Closer to Nemesis's QoS model but for personal devices where "applications" are
-GUI services.
-
----
-
-## 9. References
+An annotated reading list. Each entry names the paper and, in italics, what
+question it's the right source to consult. When survey-depth in the sections
+above isn't enough, follow these pointers rather than taking summaries as
+definitive.
 
 ### Foundational Papers
 
-- Dennis & Van Horn, "Programming Semantics for Multiprogrammed Computations"
-  (CACM 1966) -- introduced capabilities
-- Liedtke, "Improving IPC by Kernel Design" (SOSP 1993) -- 20x over Mach,
-  founded modern microkernel IPC
-- Liedtke, "On Micro-Kernel Construction" (SOSP 1995, ACM SIGOPS Hall of
-  Fame 2015) -- construction discipline
-- Bershad et al., "Lightweight Remote Procedure Call" (ACM TOCS 1990) -- thread
-  migration, LRPC
-- Hardy, "The Confused Deputies" (1988) -- capability argument against ACLs
+- **Dennis & Van Horn, "Programming Semantics for Multiprogrammed
+  Computations"** (CACM 1966). _Read for: the original definition of
+  capabilities and the "sphere of protection" (C-list). Where "designation and
+  authority are the same thing" first appears in print._
+- **Liedtke, "Improving IPC by Kernel Design"** (SOSP 1993). _Read for: the
+  origin of the L4 microkernel performance tradition. 20x over Mach by ruthless
+  attention to IPC path. No single optimization — a discipline._
+- **Liedtke, "On Micro-Kernel Construction"** (SOSP 1995, SIGOPS Hall of Fame
+  2015). _Read for: the minimality argument. "A concept is tolerated inside the
+  microkernel only if moving it outside would prevent the implementation of the
+  system's required functionality." The canonical statement of the microkernel
+  principle._
+- **Bershad et al., "Lightweight Remote Procedure Call"** (ACM TOCS 1990). _Read
+  for: thread migration as an IPC optimization, and the argument that most
+  cross-domain calls are cross-machine-unnecessary. Influenced Spring and
+  Composite._
+- **Hardy, "The Confused Deputies"** (1988). _Read for: the canonical
+  two-paragraph argument for why capabilities beat ACLs. The compiler billing
+  example drives home the confused-deputy problem._
 
 ### Formal Verification
 
-- Klein et al., "seL4: Formal Verification of an OS Kernel" (SOSP 2009) -- first
-  complete kernel proof
-- Shapiro & Weber, "Verifying the EROS Confinement Mechanism" (IEEE S&P 2000) --
-  capability confinement proof
+- **Klein et al., "seL4: Formal Verification of an OS Kernel"** (SOSP 2009).
+  _Read for: what it takes to prove functional correctness of a kernel. 7500
+  LOC, 200k LOC of proof script, multiple person-years. Defines the cost basis
+  of verification._
+- **Shapiro & Weber, "Verifying the EROS Confinement Mechanism"** (IEEE S&P
+  2000). _Read for: the only formal proof that a capability system confines.
+  Constructor certification without code analysis._
 
 ### Scheduling
 
-- Anderson et al., "Scheduler Activations" (SOSP 1991) -- kernel upcalls for
-  user-level scheduling
-- Waldspurger, "Lottery Scheduling" (OSDI 1994) -- proportional-share via
-  tickets
-- Stoica & Abdel-Wahab, "Earliest Eligible Virtual Deadline First" (1995) -- the
-  algorithm Linux adopted
-- Lyons et al., "Scheduling-Context Capabilities" (EuroSys 2018) -- seL4 MCS,
-  CPU time as capability
-- Lozi et al., "The Linux Scheduler: A Decade of Wasted Cores" (EuroSys 2016) --
-  CFS load balancing bugs
-- Kolivas, "Brain Fuck Scheduler" (2009) -- desktop-focused EEVDF variant
+- **Anderson et al., "Scheduler Activations"** (SOSP 1991). _Read for: the
+  canonical attempt at kernel-to-userspace scheduling delegation. NetBSD
+  implemented and abandoned it — read for why upcall-based models lose
+  responsiveness._
+- **Waldspurger, "Lottery Scheduling"** (OSDI 1994). _Read for: the foundational
+  proportional-share paper. Influenced all fair-share schedulers downstream; no
+  production deployment itself._
+- **Stoica & Abdel-Wahab, "Earliest Eligible Virtual Deadline First"** (1995).
+  _Read for: the algorithm Linux adopted in 6.6 to replace CFS. Virtual
+  deadlines for latency bounds without heuristics._
+- **Lyons et al., "Scheduling-Context Capabilities"** (EuroSys 2018). _Read for:
+  how to make CPU time a first-class capability. Solves the seL4 MCS budget
+  enforcement problem. Relevant wherever you want CPU time to be transferable
+  like any other authority._
+- **Lozi et al., "The Linux Scheduler: A Decade of Wasted Cores"** (EuroSys
+  2016). _Read for: the failure mode of a scheduler nobody understands
+  holistically. Four bugs in CFS that caused idle cores alongside overloaded
+  ones — cautionary._
+- **Kolivas, "Brain Fuck Scheduler"** (2009). _Read for: an outsider's critique
+  of Linux CFS and a desktop-focused alternative design. Useful framing even
+  though BFS itself never mainlined._
 
 ### Memory
 
-- Elphinstone & Heiser, "From L3 to seL4: 20 Years of L4 Microkernels"
-  (SOSP 2013) -- retrospective
-- Shapiro & Smith, "EROS: A Fast Capability System" (SOSP 1999) --
-  capability-based persistent memory
-- Hand, "Self-Paging in the Nemesis OS" (OSDI 1999) -- per-app memory QoS
+- **Elphinstone & Heiser, "From L3 to seL4: 20 Years of L4 Microkernels"** (SOSP
+  2013). _Read for: the retrospective on what L4 got right and wrong. The "20
+  years" paper is the single best orientation to microkernel evolution. Start
+  here when you need to understand why modern L4-family kernels look the way
+  they do._
+- **Shapiro & Smith, "EROS: A Fast Capability System"** (SOSP 1999). _Read for:
+  capability-based persistent memory. Why "everything is persistent by default"
+  changes the capability model fundamentally._
+- **Hand, "Self-Paging in the Nemesis OS"** (OSDI 1999). _Read for: the argument
+  that per-application physical memory frames prevent cross-application QoS
+  interference. The deepest answer to the Nemesis crosstalk problem on the
+  memory side._
 
 ### Architecture & IPC
 
-- Baumann et al., "The Multikernel" (SOSP 2009) -- Barrelfish, cores as
-  distributed system
-- Hunt & Larus, "Singularity: Rethinking the Software Stack" (2007) -- SIPs,
-  typed channels
-- Steinberg & Kauer, "NOVA" (EuroSys 2010) -- microhypervisor, semaphore-based
-  interrupts
-- Blackham et al., "Improving Interrupt Response Time" (EuroSys 2012) --
-  non-preemptible kernel latency
+- **Baumann et al., "The Multikernel"** (SOSP 2009). _Read for: the
+  treat-cores-as-nodes-in-a-distributed-system position. The strongest argument
+  against shared-everything kernel state on modern hardware._
+- **Hunt & Larus, "Singularity: Rethinking the Software Stack"** (2007). _Read
+  for: compile-time-verified channel contracts, SIPs (software isolated
+  processes), and what it costs to make isolation a language property rather
+  than a hardware one._
+- **Steinberg & Kauer, "NOVA"** (EuroSys 2010). _Read for: a microkernel
+  designed for virtualization. Semaphore-based interrupts and the
+  micro-hypervisor pattern._
+- **Blackham et al., "Improving Interrupt Response Time"** (EuroSys 2012). _Read
+  for: the measurement that a non-preemptible seL4 still achieves 10k-100k cycle
+  worst-case interrupt latency. When deciding whether kernel preemption is worth
+  the complexity._
 
 ### Capability Systems
 
-- Levy, _Capability-Based Computer Systems_ (1984) -- definitive first-gen
-  survey
-- Miller, "Robust Composition" (PhD thesis 2006) -- object-capability patterns
-- Miller, Yee & Shapiro, "Capability Myths Demolished" (2003) -- refuted common
-  objections
-- Watson et al., "CHERI: A Hybrid Capability-System Architecture" (IEEE
-  S&P 2015)
-- Watson et al., "CheriABI: Enforcing Valid Pointer Provenance" (ASPLOS 2019)
+- **Levy, _Capability-Based Computer Systems_** (1984). _Read for: the
+  definitive first-generation survey. Plessey System 250, CAP, Hydra, IBM
+  System/38. Everything before mainstream microkernels._
+- **Miller, "Robust Composition"** (PhD thesis 2006). _Read for: the
+  object-capability foundation. Membranes, caretakers, sealers/unsealers — the
+  patterns that compose capabilities into security architectures. Long, but the
+  definitive source._
+- **Miller, Yee & Shapiro, "Capability Myths Demolished"** (2003). _Read for:
+  the three-page refutation of "capabilities = ACLs," "capabilities can't
+  confine," and "capabilities can't be revoked." Cite this when someone claims
+  capabilities are insufficient._
+- **Watson et al., "CHERI: A Hybrid Capability-System Architecture"** (IEEE S&P
+  2015). _Read for: what capabilities look like when they're a hardware
+  primitive. 128-bit tagged pointers with bounds and permissions._
+- **Watson et al., "CheriABI: Enforcing Valid Pointer Provenance"** (ASPLOS
+  2019). _Read for: how CHERI integrates with a C ABI at scale. Lessons for any
+  capability system that wants to accommodate legacy code._
 
 ### Naming & Process Model
 
-- Pike et al., "Plan 9 from Bell Labs" and "The Use of Name Spaces in Plan 9"
-  (1995)
-- Nelson et al., "A Uniform Name Service for Spring's UNIX Environment"
-  (USENIX 1994)
-- Feske, "Genode OS Framework Foundations" (continuously updated)
-- Parmer, "The Case for Thread Migration" (OSPERT 2010)
+- **Pike et al., "Plan 9 from Bell Labs"** and **"The Use of Name Spaces in Plan
+  9"** (1995). _Read for: per-process namespaces via bind/mount, and the radical
+  choice to make everything a file at scale. The cleanest alternative to
+  capability-based naming._
+- **Nelson et al., "A Uniform Name Service for Spring's UNIX Environment"**
+  (USENIX 1994). _Read for: how Spring handled naming when object-based systems
+  met UNIX expectations._
+- **Feske, "Genode OS Framework Foundations"** (continuously updated). _Read
+  for: the parent-child recursive-delegation model. The practical answer to "how
+  do you actually build a microkernel system with hierarchical trust?"_
+- **Parmer, "The Case for Thread Migration"** (OSPERT 2010). _Read for:
+  Composite OS's argument that thread migration should be the primary IPC
+  primitive. Pairs with Bershad's LRPC paper._
 
 ### ARM64 Hardware
 
+_Primary sources for architecture questions. When uncertain about an instruction
+encoding, memory ordering semantic, or register layout, read the relevant
+section of the ARM ARM directly rather than a summary._
+
 - [ARM GICv3/v4 Architecture Specification](https://developer.arm.com/documentation/ihi0069/latest)
-- [ARM Generic Timer](https://developer.arm.com/documentation/102379/latest)
+  — _read for: interrupt routing, LPIs, ITS, direct virtual injection._
+- [ARM Generic Timer](https://developer.arm.com/documentation/102379/latest) —
+  _read for: one-shot timer programming, EL1/EL0 physical and virtual timers,
+  timer frequency discovery._
 - [ARM PSCI Specification](https://developer.arm.com/documentation/den0022/latest)
-- [ARM Exception Model](https://developer.arm.com/documentation/100933/latest)
+  — _read for: multicore bringup via HVC/SMC calls._
+- [ARM Exception Model](https://developer.arm.com/documentation/100933/latest) —
+  _read for: VBAR_EL1 vector layout, ESR_EL1 exception classification, SPSR_EL1
+  saved state semantics._

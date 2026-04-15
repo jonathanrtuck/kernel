@@ -1,128 +1,24 @@
+# Kernel structural map.
+#
+# This file is intentionally sparse. It was reset on 2026-04-15 alongside
+# spec.md to re-derive contingent decisions from first principles. Only the
+# axiomatic outer topology remains: the three actors (userspace, kernel,
+# hardware) and the edges that are forced by the axioms (exceptions enter the
+# kernel; the kernel delivers to userspace; userspace invokes the kernel
+# through a defined interface).
+#
+# Internal kernel structure is intentionally absent. It will be populated as
+# the derivation identifies components and the interfaces between them.
+#
+# Render with: d2 --layout elk graph.d2
+
 userspace: {
   shape: person
 }
 
 kernel: {
-  core-manager: {
-    label: Core manager
-    style.multiple: true
-
-    syscall: {
-      shape: class
-
-      send()
-      receive()
-      clone()
-      close()
-      destroy()
-      open_wormhole()
-      close_wormhole()
-      create_context()
-      kill()
-      resume()
-    }
-
-    time-manager: {
-      label: Time manager
-
-      interface: {
-        shape: class
-
-        pick()
-        admit()
-        release()
-      }
-
-      allocator: {
-        interface: {
-          shape: class
-
-          request()
-          release()
-        }
-      }
-    }
-
-    frames: {
-      label: Frames
-      style.multiple: true
-    }
-
-    ipi: {
-      label: IPI
-      shape: class
-    }
-
-    time-manager -> frames: reads
-  }
-
-  frames: {
-    label: Frames
-    style.multiple: true
-
-    model: {
-      shape: class
-
-      register_state
-      ttbr
-      state: runnable | blocked | suspended
-      fault_handler: (wormhole_ref, badge)
-      pending_message
-    }
-  }
-
-  capabilities: {
-    space: {
-      label: Space
-    }
-
-    time: {
-      label: Time
-    }
-
-    wormhole: {
-      label: Wormhole
-    }
-
-    frame: {
-      label: Frame
-    }
-  }
-
-  space-manager: {
-    label: Space manager
-
-    interface: {
-      shape: class
-
-      resolve_fault()
-      map()
-      unmap()
-      create_space()
-      destroy_space()
-      share()
-    }
-
-    allocator: {
-      interface: {
-        shape: class
-
-        request()
-        release()
-      }
-    }
-  }
-
-  core-manager -> core-manager.ipi: sends
-  core-manager -> frames.model: reads/writes
-  core-manager -> capabilities: resolves
-  core-manager -> space-manager.interface: on fault
-  core-manager.time-manager -> frames.model: reads
-  space-manager -> frames.model: writes TTBR
-  frames.model -> capabilities: holds
-  core-manager.frames -> frames: indexes into {
-    style.stroke-dash: 3
-  }
+  # Internals TBD. The derivation will populate this box as components are
+  # identified and stress-tested.
 }
 
 hardware: {
@@ -135,7 +31,5 @@ hardware: {
 }
 
 kernel -> userspace: fault delivery, messages
-userspace -> kernel.core-manager.syscall: invokes
-hardware.core -> kernel.core-manager: all exceptions (incl. SGI)
-kernel.space-manager.allocator -> hardware.memory
-kernel.core-manager.time-manager -> hardware.core: programs timer
+userspace -> kernel: invokes (interface TBD)
+hardware.core -> kernel: all exceptions

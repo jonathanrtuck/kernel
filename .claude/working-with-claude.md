@@ -1,13 +1,21 @@
 # Working with Claude: Strategies for Deep, Quality-Focused Collaboration
 
-Research document on how to get the highest-quality results from Claude,
+Meta-process document on how to get the highest-quality results from Claude,
 particularly for long-running, open-ended design and engineering projects. This
 synthesizes Anthropic's official guidance, peer-reviewed research, community
 practice, and Anthropic's own internal usage data.
 
-This document is different from other research documents in `design/research/`.
-It is not about a kernel design question. It is a meta-level reference for
-improving the collaboration itself.
+Moved to `.claude/` on 2026-04-15 — this is not a kernel design research
+document; it's a reference for improving the collaboration itself, and sits
+alongside the hooks, commands, and settings that embody these strategies.
+
+> **Note on sparse artifacts.** Some passages below describe the intended
+> protocol in terms of artifacts like `design/spec.md`, `design/journal/`, and
+> `design/graph.d2`. Those artifacts still exist and still play the roles
+> described, but they are currently sparse following the 2026-04-15 design
+> restart — spec.md holds only the axioms, graph.d2 holds only the outer
+> topology, and the journal is empty pending fresh derivation. The prior chain's
+> content is preserved under `design/archive/restart-1/`.
 
 ---
 
