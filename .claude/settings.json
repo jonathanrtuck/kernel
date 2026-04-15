@@ -16,9 +16,9 @@
         "hooks": [
           {
             "command": "node .brain/trigger.js",
+            "disabled": true,
             "timeout": 5,
-            "type": "command",
-            "disabled": true
+            "type": "command"
           }
         ],
         "matcher": "Edit|Write"

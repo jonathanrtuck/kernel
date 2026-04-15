@@ -5,6 +5,7 @@
       "model": "sonnet",
       "name": "researcher",
       "output": "state/researcher.md",
+      "timeout": 300000,
       "tools": [
         "Read",
         "Grep",
@@ -13,7 +14,6 @@
         "WebFetch",
         "Write"
       ],
-      "timeout": 300000,
       "triggers": [
         ".brain/state/question.md"
       ]
