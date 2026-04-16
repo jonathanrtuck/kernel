@@ -1,13 +1,13 @@
 # Kernel structural map.
 #
-# Populated from design/spec.md derivations D1-D6, observations O2-O3, and
-# Vocabulary (Space, Time, Frame). Every box and edge has a corresponding
+# Populated from design/spec.md derivations D1-D6, D8-D9, observations O2-O3,
+# and Vocabulary (Space, Time, Frame). Every box and edge has a corresponding
 # spec.md entry; items labeled "TBD" await downstream derivation.
 #
 # Intentionally absent (pending derivation): specific syscall surface, Frame
-# minimum schema, IPC mechanism (sync/async/hybrid), revocation model, memory
-# object model, fault delegation, Frame lifecycle, per-physical-core concerns
-# (power, thermal, shared cache/TLB).
+# minimum schema, IPC mechanism (sync/async/hybrid), revocation model, fault
+# delegation, Frame lifecycle, per-physical-core concerns (power, thermal,
+# shared cache/TLB).
 # See spec.md#Open questions.
 #
 # Render with: d2 --layout elk graph.d2
@@ -56,6 +56,17 @@ kernel: {
     interface: {
       shape: class
     }
+  }
+
+  memory-object: {
+    label: Memory object
+    style.multiple: true
+    # D9: variable-size, kernel-managed.
+    # Designated by capabilities. Exists independently of
+    # address space binding (two-step: create, then bind).
+    # Physical backing drawn from Frame's Space; which
+    # physical pages back the object is kernel-internal.
+    # Sharing: multiple Frames hold capabilities to same object.
   }
 
   frame: {
@@ -124,11 +135,13 @@ kernel.core-manager -> kernel.frame.capabilities: resolve (hot path)
 # D5: Core manager loads Frame's TTBR on context switch (hot path).
 kernel.core-manager -> kernel.frame.address-space: TTBR load (hot path)
 
-# Capabilities designate kernel objects (Space, Time, etc.).
+# Capabilities designate kernel objects (Space, Time, memory objects, etc.).
 # The capability table connects Frames to the resources they
 # are authorized to use.
-kernel.frame.capabilities -> kernel.space-manager: Space capabilities
-# D5: Space manager manages per-Frame address spaces.
+kernel.frame.capabilities -> kernel.memory-object: designate (D4, D9)
+# D9: Space manager allocates physical backing for memory objects.
+kernel.space-manager -> kernel.memory-object: physical backing
+# D9 + D5: Space manager maps memory objects into Frame address spaces.
 kernel.space-manager -> kernel.frame.address-space: map/unmap
 kernel.frame.capabilities -> kernel.core-manager.time-manager: Time capabilities
 

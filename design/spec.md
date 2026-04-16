@@ -68,7 +68,9 @@ under "Rests on"; it exists so later sections can be precise.
   is bounded as a quantity: at any instant, the system has a finite pool of
   memory from which Space claims are allocated. Space is not cumulative (a claim
   is a snapshot, not an accumulation) and not fungible once allocated (a
-  specific claim binds to specific addresses).
+  specific claim has object identity — it is not interchangeable with a
+  different claim of the same size). Which physical pages back a claim is a
+  kernel-internal concern.
 
 - **Time.** A claim to a portion of a specific logical core's scheduling time.
   Compute flows without a finite pool, but the _rate_ of scheduling time per
@@ -380,6 +382,45 @@ table size policy.
   model requires CDT and the absence of tree structure makes it impractical.
 - **Journal:** `journal/008-capability-table-structure.md`.
 
+### D9 — Variable-size kernel-managed memory objects
+
+The capability-designated memory resource is a variable-size, kernel-managed
+memory object. Frames hold capabilities to memory objects; the kernel allocates
+physical pages behind them and maps them into address spaces internally. Memory
+objects exist independently of any address space binding (two-step: create, then
+bind). Sharing is through capability transfer — multiple Frames holding
+capabilities to the same object. Physical backing is drawn from the Frame's
+Space; which physical pages back an object is a kernel-internal concern.
+
+The seL4 untyped-memory model (userspace manages physical allocation and
+constructs page tables) was rejected: A5 forecloses pushing memory management
+complexity into userspace, and D8's precedent (kernel-managed flat capability
+table) established the pattern of kernel-internal management with resource
+accounting charged to the Frame's Space. Page-granularity objects (one
+capability per hardware page) were rejected: they force page size exposure,
+violate D5's CHERI forward-compatibility note, and cause capability
+proliferation.
+
+Does NOT settle: page size exposure (byte-addressed vs. page-addressed
+interface), specific operations on memory objects (create, bind, COW/clone,
+resize), object-rights, fault delegation, precise Space-to-memory-object
+accounting relationship, or Frame-Space binding model.
+
+- **Rests on:** A5 (kernel absorbs complexity — same argument that rejected
+  CNode trees in D8 applies to memory management), D5 (MMU-backed virtual
+  memory; CHERI note requires objects-and-permissions interface, not
+  page-table-specific concepts), D4 (capability-designated; sharing through
+  capability transfer), D7 (memory operations are typed kernel syscalls, not
+  IPC), D8 (precedent: kernel-managed structure with typed-memory backing from
+  Frame's budget), D3 (Space manager is the single allocation interface; memory
+  object backing flows through it), `design/landscape.md` §2.1–2.3 (four
+  families surveyed; two-step create/map dominant).
+- **Status:** settled — revisit if A5 is revised (would re-open
+  userspace-managed models), if D5's CHERI note is dropped (would re-open
+  page-specific interfaces), or if the Frame-Space binding model reveals that
+  kernel-managed objects cannot express a required sharing pattern.
+- **Journal:** `journal/009-memory-object-model.md`.
+
 ### Entry template
 
 Each derivation entry names three things: what rests on what, how settled the
@@ -470,14 +511,12 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
 - **Interrupt model (device interrupts, not exceptions).** Who owns device
   interrupts? Per-core or routed? Kernel-handled or delegated to userspace
   drivers?
-- **Page size exposure.** D5 settles MMU-backed virtual memory. Open: expose
-  page granularity to userspace (proven, universal) or hide it behind
-  byte-addressed objects (archive's novel position, no precedent in surveyed
-  systems)? Determines the Space manager's external interface granularity.
-- **Memory object model.** D5 settles virtual memory; D4 settles capabilities.
-  Open: what is the capability-designated memory resource? seL4-style typed
-  frames, Zircon-style VMOs, or something new shaped by the Space vocabulary?
-  Determines create/map separation.
+- **Page size exposure.** D5 settles MMU-backed virtual memory; D9 settles
+  variable-size kernel-managed memory objects. Open: expose page granularity to
+  userspace (proven, universal) or hide it behind byte-addressed objects
+  (archive's novel position, no precedent in surveyed systems)? Determines the
+  memory object's interface granularity and the Space manager's external
+  interface.
 - **Fault delegation model.** D5 means page faults occur (MMU generates them on
   unmapped access). Open: kernel resolves faults internally, or forwards to
   userspace pager Frames? Interacts with A4 (reactive), A5 (complexity
@@ -490,7 +529,7 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   split decision.
 - **Specific syscall surface.** D7 settles two mechanism families but not the
   exact set. The archive's 10-syscall design is a data point. Depends on IPC
-  model, Frame lifecycle, and memory object model.
+  model, Frame lifecycle, and D9 (memory objects).
 - **Boot / bring-up model.** BSP-then-APs vs symmetric bring-up. Touches A2 but
   not derived.
 
@@ -524,6 +563,11 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   justification; A5 confirms CNode management is interface complexity;
   typed-memory backing for explicit accounting; table sharing deferred to
   Frame-Space binding.
+- `009-memory-object-model.md` — reasoning for D9: D8 precedent (kernel-managed,
+  typed-memory backing) extends to memory; A5 rejects seL4 userspace-managed
+  model; page-granularity rejected on D5 CHERI note; Space vocabulary provides
+  accounting; vocabulary corrected (object identity, not physical address
+  binding).
 
 ---
 
