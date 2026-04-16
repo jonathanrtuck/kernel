@@ -240,6 +240,22 @@ principle to make a derivation move, it should name that principle ("applying
 'push complexity to the leaves' here…") so the principle's role is visible
 without collapsing it into the dependency graph.
 
+### Disclaiming non-load-bearing axioms
+
+When an axiom feels relevant to a derivation but is not actually load-bearing —
+the reasoning doesn't pass through it, or the question it answers is settled
+elsewhere — disclaim it explicitly in the journal rather than omitting it
+silently. Pattern: _"A<n> is not load-bearing here. A<n> answers [X]; this entry
+answers [Y]. The work is done by [actual predecessors] alone."_
+
+Silent omission invites a future reader — including the designer returning after
+a gap — to reach for the axiom reflexively and either miscredit it or extend the
+derivation on the assumption that the axiom constrains something it does not.
+This is especially likely where axiom vocabulary overlaps with a philosophy
+principle: A5 "leaf node" vs. the fractal "push complexity to the leaves"
+principle share a word but differ in scope, and the overlap is where miscitation
+slips in.
+
 ### Template revisit
 
 This template itself is tentative. After 3-5 entries have landed under it,
