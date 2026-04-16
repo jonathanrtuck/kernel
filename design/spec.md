@@ -208,6 +208,34 @@ decisions recorded where the implementation is chosen.
   itself starts costing.
 - **Journal:** `journal/003-space-manager-interface.md`.
 
+### D4 — Capability-based authority
+
+A Frame proves it is allowed to perform an operation by presenting an
+unforgeable, per-Frame handle (capability) that designates the resource AND
+carries the permitted operations. The kernel resolves the handle, checks the
+rights, and proceeds or rejects. No identity lookup, no global namespace, no
+ambient privilege. Two independent derivation paths converge: (1) A5 forecloses
+any interface separating designation from authority (confused deputy); (2) D1
+forecloses per-resource authority data on the hot path (ACLs are shared mutable
+state). The archived chain reached the same conclusion from a third path.
+
+Does NOT settle: scope of capability mediation (everything vs. resources-only),
+capability table structure (kernel-managed vs. CNode-style), or revocation model
+(refcount, destroy, CDT, generation numbers). These are one level down.
+
+- **Rests on:** A5 (confused deputy forces authority-tracking complexity into
+  userspace — an A5 violation; capabilities are the only model where designation
+  = authority), D1 + O3 (hot-path authority checks must use per-core data;
+  per-Frame capability tables are per-core; per-resource ACLs are shared mutable
+  state), A4 (no background authority management; capability refcount fits
+  explicit-trigger model), A3 (no identity requirement — capabilities work
+  across all workloads without assuming an identity scheme),
+  `design/landscape.md` §1.2 (confused deputy: Hardy 1988, Miller's
+  formalization, "Capability Myths Demolished" 2003).
+- **Status:** settled — revisit only if A5 AND D1 are both revised
+  simultaneously (either alone leaves at least one derivation path intact).
+- **Journal:** `journal/004-capability-based-authority.md`.
+
 ### Entry template
 
 Each derivation entry names three things: what rests on what, how settled the
@@ -265,13 +293,11 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
 
 ## Open questions
 
-- **Context model / capability table access structure.** The archive committed
-  to one shared Context model and one shared capability table, read on the IPC
-  hot path. At large core counts, cache-coherence traffic on shared read-sets
-  becomes expensive. Whether to adopt a D3-style single-interface commitment
-  (one logical authority, topology-aware implementation as leaf) or some other
-  structure depends on the IPC hot-path access profile. Deferred pending
-  separate analysis.
+- **Capability table structure.** D4 settles capability-based authority; the
+  per-Frame capability table is the hot-path authority structure
+  (D1-compatible). Open: kernel-managed opaque handle table (Zircon) vs.
+  capability to a table object (seL4 CNode). Determines who controls the
+  authority-space structure and how table sizing/growth works.
 - **Time migration across cores.** When a Frame migrates to a less-loaded core,
   does its Time allocation transfer, or is it re-allocated on the destination?
   Affects D2's migration story.
@@ -281,9 +307,15 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
 - **Frame-Space cardinality formalization.** The Vocabulary section describes
   Frames as correlating "one or more Spaces." Whether one-to-many is a property
   of Frames or a separate decision with alternatives has not been derived.
-- **Trust / authority model.** Capability-based vs ACL vs ambient — not yet
-  derived. High-leverage: will shape Frame creation, Space transfer, Time
-  transfer, and the shape of every syscall.
+- **Scope of capability mediation.** D4 settles capabilities as the authority
+  model. Open: everything through capability invocation (seL4/EROS — universal
+  invoke, capability type determines operation) vs. resources through
+  capabilities with operations as direct syscalls (Zircon-style). Shapes syscall
+  surface and composability.
+- **Revocation model.** Close-only (refcount), authoritative destroy, derivation
+  tracking (seL4 CDT), or generation numbers. Each has different cost profiles
+  under D1 (hot/cold split) and O2 (cross-core IPIs). Interacts with capability
+  table structure.
 - **What unit runs in a Frame.** Thread, process, capability-holder, actor — a
   name and shape are needed before scheduling and isolation can be fully
   specified. Needs its own derivation.
@@ -308,6 +340,9 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   commitment with topology-aware implementation as leaf node; why the archive's
   "small cache-coherent SoC" framing was not load-bearing for the allocator
   decision.
+- `004-capability-based-authority.md` — reasoning for D4: two independent paths
+  (A5 + confused deputy; D1 + hot-path data organization) converge on
+  capabilities; ambient and pure ACLs foreclosed; archive convergence.
 
 ---
 

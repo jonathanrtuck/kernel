@@ -1,12 +1,12 @@
 # Kernel structural map.
 #
-# Populated from design/spec.md derivations D1-D3, observations O2-O3,
+# Populated from design/spec.md derivations D1-D4, observations O2-O3,
 # and Vocabulary (Space, Time, Frame). Every box and edge has a
 # corresponding spec.md entry; items labeled "TBD" await downstream
 # derivation.
 #
-# Intentionally absent (pending derivation): capability/authority
-# mechanism, syscall surface, Frame schema, IPC shape,
+# Intentionally absent (pending derivation): syscall surface,
+# Frame schema, IPC shape, capability table structure/revocation,
 # per-physical-core concerns (power, thermal, shared cache/TLB).
 # See spec.md#Open questions.
 #
@@ -62,8 +62,14 @@ kernel: {
     label: Frame
     style.multiple: true
     # Vocabulary: coupled Space(s) + exactly one Time.
-    # Internal schema and kernel-side access structure TBD
-    # (spec.md#Open questions).
+    # Internal schema TBD (spec.md#Open questions).
+
+    capabilities: {
+      label: Capability table
+      # Per-Frame, per-core accessible (D4 + D1).
+      # Each entry: (kernel object ref, rights mask).
+      # Table structure (flat/CNode/etc.) TBD.
+    }
   }
 }
 
@@ -89,8 +95,18 @@ hardware.core -> kernel.core-manager: exceptions (incl. SGI)
 kernel.core-manager.time-manager -> hardware.core: timer programming
 kernel.space-manager -> hardware.memory
 
+# D4: Core manager resolves capabilities from the running Frame's
+# table during syscall handling (hot path, per-core).
+kernel.core-manager -> kernel.frame.capabilities: resolve (hot path)
+
+# Capabilities designate kernel objects (Space, Time, etc.).
+# The capability table connects Frames to the resources they
+# are authorized to use.
+kernel.frame.capabilities -> kernel.space-manager: Space capabilities
+kernel.frame.capabilities -> kernel.core-manager.time-manager: Time capabilities
+
 # External interface: the userspace-facing shape is still TBD.
-# userspace -> kernel is a kernel invocation producing some
-# combination of O1's three output types.
-userspace -> kernel.core-manager: syscall
+# userspace -> kernel is a capability-mediated invocation producing
+# some combination of O1's three output types.
+userspace -> kernel.core-manager: syscall (capability-mediated, D4)
 kernel -> userspace: fault delivery, messages (shape TBD)
