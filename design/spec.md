@@ -267,6 +267,37 @@ avoid foreclosing CHERI as a future complementary enforcement layer.
   MMU remains the sole enforcement mechanism or becomes one of two.
 - **Journal:** `journal/005-memory-translation-model.md`.
 
+### D6 — A Frame is a single schedulable execution unit
+
+A Frame is a single schedulable execution unit: one register state, one program
+counter, one Time, one capability table, one address space binding. The kernel
+has no "process" concept — "process" is a userspace convention (a group of
+Frames sharing a Space). Multi-threaded execution in shared memory is multiple
+Frames sharing a Space, each with its own Time. Green threads and cooperative
+concurrency are internal to a Frame (userspace, invisible to kernel).
+
+The kernel provides no Frame-grouping mechanism. Grouping is neither essential
+complexity (D4 capabilities handle Frame lifecycle without the target's
+cooperation) nor workload-universal (A3 — not all workloads need groups).
+Userspace builds grouping policy from capabilities; the kernel provides the
+mechanism.
+
+Does NOT settle: Frame minimum schema (concrete fields need formal derivation),
+Frame-Space binding model (when/how binding occurs), Frame lifecycle operations
+(create, destroy, suspend, resume), whether Frames can share capability tables,
+or capability table structure.
+
+- **Rests on:** Frame vocabulary (one Time per Frame; SMT paragraph explicitly
+  models concurrency as multi-Frame), D2 (scheduler selects Frames — one-level
+  selection), D4 (per-Frame capability table; destroy capability works without
+  target cooperation), A3 (generic — no workload assumes or requires
+  kernel-level grouping), `design/landscape.md` §4.4, §6.1 (seL4 validates
+  no-kernel-process; all surveyed systems schedule thread-level entities).
+- **Status:** settled — revisit if a downstream derivation (capability table
+  structure, Frame lifecycle) reveals that the absence of kernel grouping forces
+  essential complexity into userspace that capabilities alone cannot cover.
+- **Journal:** `journal/006-frame-is-execution-unit.md`.
+
 ### Entry template
 
 Each derivation entry names three things: what rests on what, how settled the
@@ -349,9 +380,20 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   tracking (seL4 CDT), or generation numbers. Each has different cost profiles
   under D1 (hot/cold split) and O2 (cross-core IPIs). Interacts with capability
   table structure.
-- **What unit runs in a Frame.** Thread, process, capability-holder, actor — a
-  name and shape are needed before scheduling and isolation can be fully
-  specified. Needs its own derivation.
+- **Frame minimum schema.** D6 settles that a Frame is a single execution unit.
+  The concrete field set (register state, TTBR, capability table pointer, Time
+  binding, scheduling state, fault handler) needs formal derivation in the
+  current chain. Archive journal/004 derived a first-principles minimum.
+- **Frame-Space binding model.** D5 + D6: each Frame has an address space, and
+  Frames can share Spaces. Open: binding at creation only, or rebindable? How
+  does the kernel track which Frames share which Space (for TLB shootdown)?
+- **Frame lifecycle.** Create, destroy, suspend, resume. Whether Frame is a
+  capability-held object type (archive journal/013 said yes). Interacts with D4
+  and scope of capability mediation.
+- **Can Frames share capability tables?** D4 requires per-Frame tables, D6
+  settles per-execution-unit authority. Open: can the underlying table structure
+  be shared (like seL4 TCBs sharing a CSpace)? Determines multi-threading
+  ergonomics.
 - **Interrupt model (device interrupts, not exceptions).** Who owns device
   interrupts? Per-core or routed? Kernel-handled or delegated to userspace
   drivers?
@@ -389,6 +431,9 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   (A2 hardware requires MMU; A3+A5 require hardware isolation; philosophy) all
   converge on MMU-backed virtual memory; all alternatives foreclosed by axioms
   or hardware facts; CHERI forward-compatibility noted.
+- `006-frame-is-execution-unit.md` — reasoning for D6: vocabulary + D2 force
+  Frame = single schedulable entity; no kernel grouping because D4 capabilities
+  handle lifecycle and A3 makes grouping non-universal; seL4 validates approach.
 
 ---
 

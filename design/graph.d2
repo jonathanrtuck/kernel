@@ -1,14 +1,14 @@
 # Kernel structural map.
 #
-# Populated from design/spec.md derivations D1-D5, observations O2-O3,
+# Populated from design/spec.md derivations D1-D6, observations O2-O3,
 # and Vocabulary (Space, Time, Frame). Every box and edge has a
 # corresponding spec.md entry; items labeled "TBD" await downstream
 # derivation.
 #
 # Intentionally absent (pending derivation): syscall surface,
-# Frame schema, IPC shape, capability table structure/revocation,
-# memory object model, fault delegation, per-physical-core concerns
-# (power, thermal, shared cache/TLB).
+# Frame minimum schema, IPC shape, capability table structure/revocation,
+# memory object model, fault delegation, Frame lifecycle,
+# per-physical-core concerns (power, thermal, shared cache/TLB).
 # See spec.md#Open questions.
 #
 # Render with: d2 --layout elk graph.d2
@@ -62,10 +62,12 @@ kernel: {
   frame: {
     label: Frame
     style.multiple: true
-    # Vocabulary: coupled Space(s) + exactly one Time.
-    # D5: each Frame has its own virtual address space
-    # (page table tree), enforced by MMU via TTBR.
-    # Internal schema TBD (spec.md#Open questions).
+    # D6: single schedulable execution unit.
+    # One register state, one Time, one capability table,
+    # one address space. "Process" is a userspace convention
+    # (group of Frames sharing a Space).
+    # D5: address space enforced by MMU via TTBR.
+    # Minimum schema TBD (spec.md#Open questions).
 
     capabilities: {
       label: Capability table
