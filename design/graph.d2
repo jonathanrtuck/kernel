@@ -5,9 +5,10 @@
 # corresponding spec.md entry; items labeled "TBD" await downstream
 # derivation.
 #
-# Intentionally absent (pending derivation): syscall surface,
-# Frame minimum schema, IPC shape, capability table structure/revocation,
-# memory object model, fault delegation, Frame lifecycle,
+# Intentionally absent (pending derivation): specific syscall surface,
+# Frame minimum schema, IPC mechanism (sync/async/hybrid),
+# capability table structure/revocation, memory object model,
+# fault delegation, Frame lifecycle,
 # per-physical-core concerns (power, thermal, shared cache/TLB).
 # See spec.md#Open questions.
 #
@@ -131,8 +132,12 @@ kernel.frame.capabilities -> kernel.space-manager: Space capabilities
 kernel.space-manager -> kernel.frame.address-space: map/unmap
 kernel.frame.capabilities -> kernel.core-manager.time-manager: Time capabilities
 
-# External interface: the userspace-facing shape is still TBD.
-# userspace -> kernel is a capability-mediated invocation producing
-# some combination of O1's three output types.
-userspace -> kernel.core-manager: syscall (capability-mediated, D4)
+# External interface: two mechanism families (D7).
+# 1. Typed kernel operation syscalls (Frame -> Kernel, always synchronous).
+# 2. IPC syscalls (Frame <-> Frame, mechanism TBD).
+# Both are capability-mediated (D4). The split reflects the
+# trust-model asymmetry: kernel is exception handler (A4),
+# not a peer.
+userspace -> kernel.core-manager: kernel op syscalls (D7, capability-mediated)
+userspace -> userspace: IPC (D7, peer, mechanism TBD)
 kernel -> userspace: fault delivery, messages (shape TBD)

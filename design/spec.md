@@ -298,6 +298,43 @@ or capability table structure.
   essential complexity into userspace that capabilities alone cannot cover.
 - **Journal:** `journal/006-frame-is-execution-unit.md`.
 
+### D7 — Split interaction model: IPC + typed kernel operations
+
+The kernel's external interface has two mechanism families: a dedicated IPC
+mechanism for Frame↔Frame peer communication, and typed kernel operation
+syscalls for Frame→Kernel resource management. The two families reflect two
+genuinely different relationships. IPC carries peer messages between Frames and
+may block, queue, or multiplex. Kernel operations act on resources (Frames,
+Spaces, capabilities) and are always synchronous.
+
+The unified model (seL4/EROS — everything through capability invocation, type
+determines operation) was rejected because it hides the trust-model asymmetry
+that A4 makes explicit: the kernel is the exception handler, not a peer. Full
+fragmentation (Zircon — 170+ typed syscalls) was rejected on A5 grounds: large
+interface surface, large verification and attack surface.
+
+Does NOT settle: specific syscall surface (names, signatures, count), IPC model
+(synchronous vs. asynchronous), notification mechanism, capability transfer
+mechanism, or fast-path design.
+
+- **Rests on:** A4 (purely reactive — the kernel is the exception handler, not a
+  message server; the Frame→Kernel relationship is asymmetric and the split
+  preserves this), D1 (hot-path dispatch — the split model's IPC hot path is
+  structurally shorter by one indirection; the kernel knows the operation from
+  the syscall number before touching the capability table), D4 (capability-based
+  authority — both models satisfy D4; the question is orthogonal to D4's
+  "designation = authority" concern), A5 (rejects full fragmentation — large
+  syscall surfaces are large interfaces; does not distinguish unified from
+  split), `design/research/syscall-landscape.md` §10.2–10.3 (IPC model coupling:
+  async buffered IPC introduces behavioral divergence — queuing, blocking,
+  multiplexing — that aligns naturally with a split).
+- **Status:** settled — revisit if the IPC/kernel-op boundary proves
+  unprincipled (too many ambiguous cases degrade the split into two mechanisms
+  plus special cases), or if a practical use case requires transparent
+  kernel-operation interposition that cannot be served by EL2 hardware,
+  capability restriction, or kernel-level mechanisms.
+- **Journal:** `journal/007-scope-of-capability-mediation.md`.
+
 ### Entry template
 
 Each derivation entry names three things: what rests on what, how settled the
@@ -371,11 +408,6 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   Frame has its own virtual address space. Open: can Frames share address space
   structure (shared page table subtrees)? Is one-to-many a property of Frames or
   a separate decision?
-- **Scope of capability mediation.** D4 settles capabilities as the authority
-  model. Open: everything through capability invocation (seL4/EROS — universal
-  invoke, capability type determines operation) vs. resources through
-  capabilities with operations as direct syscalls (Zircon-style). Shapes syscall
-  surface and composability.
 - **Revocation model.** Close-only (refcount), authoritative destroy, derivation
   tracking (seL4 CDT), or generation numbers. Each has different cost profiles
   under D1 (hot/cold split) and O2 (cross-core IPIs). Interacts with capability
@@ -389,7 +421,7 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   does the kernel track which Frames share which Space (for TLB shootdown)?
 - **Frame lifecycle.** Create, destroy, suspend, resume. Whether Frame is a
   capability-held object type (archive journal/013 said yes). Interacts with D4
-  and scope of capability mediation.
+  and D7 (lifecycle operations are typed kernel syscalls under the split model).
 - **Can Frames share capability tables?** D4 requires per-Frame tables, D6
   settles per-execution-unit authority. Open: can the underlying table structure
   be shared (like seL4 TCBs sharing a CSpace)? Determines multi-threading
@@ -409,6 +441,15 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   unmapped access). Open: kernel resolves faults internally, or forwards to
   userspace pager Frames? Interacts with A4 (reactive), A5 (complexity
   placement).
+- **IPC model.** D7 settles the split interaction model but not the IPC
+  mechanism itself. Synchronous register-based (L4/seL4 tradition) vs.
+  asynchronous buffered (Mach/Zircon tradition) vs. hybrid. Determines message
+  format, channel structure, blocking behavior, multiplexing, and the specific
+  IPC syscall surface. Tightly coupled with D7 — async IPC was a factor in the
+  split decision.
+- **Specific syscall surface.** D7 settles two mechanism families but not the
+  exact set. The archive's 10-syscall design is a data point. Depends on IPC
+  model, Frame lifecycle, and memory object model.
 - **Boot / bring-up model.** BSP-then-APs vs symmetric bring-up. Touches A2 but
   not derived.
 
@@ -434,6 +475,9 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
 - `006-frame-is-execution-unit.md` — reasoning for D6: vocabulary + D2 force
   Frame = single schedulable entity; no kernel grouping because D4 capabilities
   handle lifecycle and A3 makes grouping non-universal; seL4 validates approach.
+- `007-scope-of-capability-mediation.md` — reasoning for D7: A4 trust-model
+  asymmetry, D1 hot-path dispatch, IPC model coupling all favor split; unified
+  hides trust boundary; full fragmentation rejected on A5; archive convergence.
 
 ---
 
