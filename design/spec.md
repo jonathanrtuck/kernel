@@ -236,6 +236,37 @@ capability table structure (kernel-managed vs. CNode-style), or revocation model
   simultaneously (either alone leaves at least one derivation path intact).
 - **Journal:** `journal/004-capability-based-authority.md`.
 
+### D5 — MMU-backed virtual memory with per-Frame address spaces
+
+The kernel requires the ARM64 MMU to be enabled and uses it for inter-Frame
+memory isolation. Each Frame has its own address space (page table tree); the
+MMU enforces that a Frame can only access physical memory mapped into its page
+tables. Three independent paths converge: (1) A2 hardware requires MMU enabled
+for cached memory access — page tables must exist; (2) A3 + A5 require
+hardware-enforced inter-Frame isolation, and the MMU is the only such mechanism
+on ARM64; (3) philosophy "use what the hardware provides." Every alternative
+(physical-only, language-safety isolation, CHERI-only, SFI) is foreclosed by
+axioms or hardware facts.
+
+Does NOT settle: address space structure sharing between Frames, page size
+exposure vs. hiding, memory object model (what capabilities designate as
+memory), fault delegation (kernel-internal vs. userspace pager), or CHERI
+forward-compatibility. These are one level down. The memory interface should be
+shaped around objects and permissions, not page-table-specific concepts, to
+avoid foreclosing CHERI as a future complementary enforcement layer.
+
+- **Rests on:** A2 (MMU must be enabled for cached operation — hardware fact,
+  not design choice), A3 + A5 (generic workloads require hardware isolation;
+  kernel absorbs that complexity), D1 (TTBR switching is hot-path cost,
+  accepted; TLB shootdown is cold-path, consistent with hot/cold split),
+  `design/landscape.md` §2 (all surveyed systems with hardware isolation use
+  MMU-backed virtual memory), `design/philosophy.md` "use what the hardware
+  provides."
+- **Status:** settled — revisit only if A2 changes to include non-MMU isolation
+  hardware (e.g., CHERI in silicon), which would open the question of whether
+  MMU remains the sole enforcement mechanism or becomes one of two.
+- **Journal:** `journal/005-memory-translation-model.md`.
+
 ### Entry template
 
 Each derivation entry names three things: what rests on what, how settled the
@@ -305,8 +336,10 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   abstract scheduling properties, but the minimum set (priority? deadline?
   IO-bound flag? period?) is not fixed.
 - **Frame-Space cardinality formalization.** The Vocabulary section describes
-  Frames as correlating "one or more Spaces." Whether one-to-many is a property
-  of Frames or a separate decision with alternatives has not been derived.
+  Frames as correlating "one or more Spaces." D5 grounds this concretely: each
+  Frame has its own virtual address space. Open: can Frames share address space
+  structure (shared page table subtrees)? Is one-to-many a property of Frames or
+  a separate decision?
 - **Scope of capability mediation.** D4 settles capabilities as the authority
   model. Open: everything through capability invocation (seL4/EROS — universal
   invoke, capability type determines operation) vs. resources through
@@ -322,9 +355,18 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
 - **Interrupt model (device interrupts, not exceptions).** Who owns device
   interrupts? Per-core or routed? Kernel-handled or delegated to userspace
   drivers?
-- **Memory translation model.** MMU-backed virtual memory is implied by A2 but
-  not stated. Needs explicit derivation: virtual memory mandatory, physical-only
-  allowed, tagged pointers, etc.
+- **Page size exposure.** D5 settles MMU-backed virtual memory. Open: expose
+  page granularity to userspace (proven, universal) or hide it behind
+  byte-addressed objects (archive's novel position, no precedent in surveyed
+  systems)? Determines the Space manager's external interface granularity.
+- **Memory object model.** D5 settles virtual memory; D4 settles capabilities.
+  Open: what is the capability-designated memory resource? seL4-style typed
+  frames, Zircon-style VMOs, or something new shaped by the Space vocabulary?
+  Determines create/map separation.
+- **Fault delegation model.** D5 means page faults occur (MMU generates them on
+  unmapped access). Open: kernel resolves faults internally, or forwards to
+  userspace pager Frames? Interacts with A4 (reactive), A5 (complexity
+  placement).
 - **Boot / bring-up model.** BSP-then-APs vs symmetric bring-up. Touches A2 but
   not derived.
 
@@ -343,6 +385,10 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
 - `004-capability-based-authority.md` — reasoning for D4: two independent paths
   (A5 + confused deputy; D1 + hot-path data organization) converge on
   capabilities; ambient and pure ACLs foreclosed; archive convergence.
+- `005-memory-translation-model.md` — reasoning for D5: three independent paths
+  (A2 hardware requires MMU; A3+A5 require hardware isolation; philosophy) all
+  converge on MMU-backed virtual memory; all alternatives foreclosed by axioms
+  or hardware facts; CHERI forward-compatibility noted.
 
 ---
 

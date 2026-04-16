@@ -1,13 +1,14 @@
 # Kernel structural map.
 #
-# Populated from design/spec.md derivations D1-D4, observations O2-O3,
+# Populated from design/spec.md derivations D1-D5, observations O2-O3,
 # and Vocabulary (Space, Time, Frame). Every box and edge has a
 # corresponding spec.md entry; items labeled "TBD" await downstream
 # derivation.
 #
 # Intentionally absent (pending derivation): syscall surface,
 # Frame schema, IPC shape, capability table structure/revocation,
-# per-physical-core concerns (power, thermal, shared cache/TLB).
+# memory object model, fault delegation, per-physical-core concerns
+# (power, thermal, shared cache/TLB).
 # See spec.md#Open questions.
 #
 # Render with: d2 --layout elk graph.d2
@@ -62,6 +63,8 @@ kernel: {
     label: Frame
     style.multiple: true
     # Vocabulary: coupled Space(s) + exactly one Time.
+    # D5: each Frame has its own virtual address space
+    # (page table tree), enforced by MMU via TTBR.
     # Internal schema TBD (spec.md#Open questions).
 
     capabilities: {
@@ -70,6 +73,14 @@ kernel: {
       # Each entry: (kernel object ref, rights mask).
       # Table structure (flat/CNode/etc.) TBD.
     }
+
+    address-space: {
+      label: Address space
+      # D5: per-Frame page table tree.
+      # MMU enforces isolation — Frame can only access
+      # physical memory mapped into its tables.
+      # Structure sharing between Frames TBD.
+    }
   }
 }
 
@@ -77,6 +88,12 @@ hardware: {
   shape: parallelogram
 
   memory
+  mmu: {
+    label: MMU
+    # D5: per-core, programs TTBR to current Frame's page tables.
+    # Enforces virtual-to-physical translation and memory attributes
+    # (cacheability, permissions) on every access.
+  }
   core: {
     style.multiple: true
     # Logical core. Per-physical-core concerns (power, thermal,
@@ -93,16 +110,23 @@ hardware.core -> kernel.core-manager: exceptions (incl. SGI)
 
 # Kernel -> hardware
 kernel.core-manager.time-manager -> hardware.core: timer programming
-kernel.space-manager -> hardware.memory
+# D5: Space manager programs page tables; MMU enforces them.
+kernel.space-manager -> hardware.mmu: page table updates
+hardware.mmu -> hardware.memory: translated access
 
 # D4: Core manager resolves capabilities from the running Frame's
 # table during syscall handling (hot path, per-core).
 kernel.core-manager -> kernel.frame.capabilities: resolve (hot path)
 
+# D5: Core manager loads Frame's TTBR on context switch (hot path).
+kernel.core-manager -> kernel.frame.address-space: TTBR load (hot path)
+
 # Capabilities designate kernel objects (Space, Time, etc.).
 # The capability table connects Frames to the resources they
 # are authorized to use.
 kernel.frame.capabilities -> kernel.space-manager: Space capabilities
+# D5: Space manager manages per-Frame address spaces.
+kernel.space-manager -> kernel.frame.address-space: map/unmap
 kernel.frame.capabilities -> kernel.core-manager.time-manager: Time capabilities
 
 # External interface: the userspace-facing shape is still TBD.
