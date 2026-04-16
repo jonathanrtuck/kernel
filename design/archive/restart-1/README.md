@@ -21,16 +21,19 @@ them in this archive is contingent and up for re-derivation.
   produced spec.md.
 - `claims.toml` — Pre-restart design decisions (28 claims), itself already
   archived relative to restart-1.
+- `AUDIT.md` — Translation notes for reading archive reasoning under the current
+  (post-2026-04-15) axiom/philosophy split. Read first if pulling archive
+  reasoning into a live derivation.
 
 ## What to preserve across restarts
 
 Nothing in this directory is authoritative for the current design. But two
 classes of content here are worth referencing:
 
-- **Dead-end markers.** If a fresh derivation starts down a path journaled
-  here as rejected, the reasoning for rejection is here.
+- **Dead-end markers.** If a fresh derivation starts down a path journaled here
+  as rejected, the reasoning for rejection is here.
 - **Convergence candidates.** If a fresh derivation arrives at a decision
-  structurally identical to one here, that convergence is evidence the
-  decision captures something real about the problem shape.
+  structurally identical to one here, that convergence is evidence the decision
+  captures something real about the problem shape.
 
 Otherwise, re-derive from the axioms forward.
