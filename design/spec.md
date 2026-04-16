@@ -194,11 +194,15 @@ Explicitly does NOT commit to: shared global allocator, per-CPU caches,
 NUMA-partitioning, or any other specific internal strategy. Those are leaf-node
 decisions recorded where the implementation is chosen.
 
-- **Rests on:** A3 (generic across hardware topologies), A5 (topology-specific
-  complexity belongs behind an interface in a leaf, not in the kernel skeleton —
-  committing the skeleton to non-NUMA would foreclose NUMA support, which is
-  about as wrong as a structural decision can be under A3+A5), D1 (allocation is
-  cold-path; interface-level simplicity is not paid for on the hot path).
+- **Rests on:** A2 (ARM64 target covers NUMA hardware — committing the skeleton
+  to non-NUMA would foreclose supported configurations), A3 (generic across
+  hardware topologies — we cannot assume away NUMA by workload convention), D1
+  (allocation is cold-path; interface-level simplicity is not paid for on the
+  hot path). The structural argument that topology-specific complexity belongs
+  behind an interface in a leaf rather than in the kernel skeleton applies the
+  "push complexity to the leaves" principle fractally within the kernel's
+  internal tree; per the axiom/philosophy split above, it is named inline in the
+  journal rather than listed as an axiom-level predecessor.
 - **Status:** settled — revisit when a workload makes allocation hot-path
   (violating the D1-cold assumption) OR if the single-interface commitment
   itself starts costing.

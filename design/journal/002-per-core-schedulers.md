@@ -40,10 +40,13 @@ scheduling algorithms. Each workload class has well-studied algorithms that fit
 it; forcing them through a single algorithm is a policy decision the kernel
 should not make.
 
-A5 (kernel is a leaf node) says complex policy belongs kernel-side, not pushed
-to userspace. Translating that to scheduling: the kernel must absorb the
-complexity of different algorithms rather than forcing userspace to build
-scheduling discipline on top of an algorithm that doesn't fit the workload.
+A5 (kernel is a leaf node) is not load-bearing for D2. A5 answers the
+kernel|userspace question — does scheduling policy belong inside the kernel or
+pushed out to userspace? — and that is already settled for this project:
+scheduling is kernel-side. A5 is silent on the internal question this entry
+addresses: whether per-core schedulers must share one algorithm or may differ.
+A2 and A3 do that work alone. `spec.md#D2`'s "Rests on" line correctly
+reflects this by citing A2 + A3 + D1 without A5.
 
 ### Requirements on the Frame model
 
@@ -87,12 +90,12 @@ wholesale — the Frame-model constraint above is a consequence we had to derive
 
 ### Applying "isolate uncertain decisions behind interfaces"
 
-The Company OS claim "Isolate uncertain decisions behind interfaces" does
-load-bearing work here. Scheduling algorithm choice is genuinely uncertain:
-workloads, hardware envelopes, and user policies all argue for different
-answers. The response is not to pick one algorithm and commit — it is to make
-the scheduler algorithm a leaf node swappable per core, and to expose a
-Frame-level interface that any reasonable algorithm can satisfy.
+The philosophy principle "isolate uncertain decisions behind interfaces"
+(philosophy.md) does load-bearing work here. Scheduling algorithm choice is
+genuinely uncertain: workloads, hardware envelopes, and user policies all argue
+for different answers. The response is not to pick one algorithm and commit — it
+is to make the scheduler algorithm a leaf node swappable per core, and to expose
+a Frame-level interface that any reasonable algorithm can satisfy.
 
 ## Status
 

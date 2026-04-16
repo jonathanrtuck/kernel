@@ -37,17 +37,28 @@ hardware, a single global pool without topology awareness gives a Frame memory
 from a region that may be remote to the core it runs on; the Frame pays that
 latency cost on every memory access, not just at allocation time.
 
-A5 (kernel is a leaf node) says topology-specific complexity belongs behind an
-interface in a leaf, not in the kernel's skeleton. A skeleton commitment to
-"single global pool" forecloses NUMA support — adding NUMA-awareness later would
-require restructuring the kernel's memory management, not swapping a leaf. That
-is precisely the A5 violation the principle is designed to prevent.
+Applying "push complexity outward to the leaves" (philosophy.md) fractally
+within the kernel's own internal tree: topology-specific complexity belongs
+behind an interface, contained in a leaf, not embedded in the kernel's skeleton.
+A skeleton commitment to "single global pool" forecloses NUMA support — adding
+NUMA-awareness later would require restructuring the kernel's memory management,
+not swapping a leaf. That is the structural failure the leaf-node principle is
+designed to prevent.
+
+(This is distinct from A5. A5 places complexity on the kernel side of the
+kernel|userspace boundary; it has nothing to say about where, within the kernel,
+that complexity then sits. The fractal leaf-node principle invoked here is about
+the kernel's internal structure, and per `spec.md`'s axiom/philosophy split it
+is named inline as a derivation strategy rather than listed as an axiom-level
+predecessor.)
 
 A3 (generic kernel) reinforces this: we cannot assume workload shape, and
 therefore we cannot assume a regime in which single-pool contention and
 NUMA-blindness don't bite. A workload shape we cannot exclude (many short-lived
 Frames on a server-class chip) is one where single-pool commitment would be
-pathological.
+pathological. A2 and A3 together make the NUMA concern load-bearing rather than
+hypothetical: A2 puts the hardware in scope, A3 forbids ruling it out by
+workload assumption.
 
 ### Why the interface commitment is right
 
@@ -70,15 +81,14 @@ derivation will rely on:
 These benefits are structural, not aesthetic. Several future derivations are
 likely to cite D3 under "Rests on" precisely because of them.
 
-### Applying "interfaces are the design, implementations are leaf nodes"
+### Applying "the architecture is the interfaces, not the components"
 
-The Company OS claim "Settle the approach before choosing the technology —
-interfaces are the design, implementations are leaf nodes that can be swapped"
-does load-bearing work. The interface is the design. Whether the implementation
-is a single global free-list, per-NUMA-node pools with cross-node fallback, or
-per-core caches backed by a global reserve is downstream of the interface — a
-leaf-node decision recorded where the implementation is chosen, not a
-skeleton-level commitment.
+The philosophy principle "the architecture is the interfaces, not the
+components" (philosophy.md) does load-bearing work. The interface is the design.
+Whether the implementation is a single global free-list, per-NUMA-node pools
+with cross-node fallback, or per-core caches backed by a global reserve is
+downstream of the interface — a leaf-node decision recorded where the
+implementation is chosen, not a skeleton-level commitment.
 
 This framing lets us decide the structural question now (one logical Space
 manager) without deciding the scaling question yet (which internal strategy).
@@ -94,8 +104,9 @@ cache-coherent SoC — but it was incorrect _as justification for the
 architectural decision_, because the architectural decision should not depend on
 hardware regime under A2's unqualified scope.
 
-Replacing that framing with A3 + A5 + D1 as the load-bearing predecessors makes
-D3 robust across A2's full range.
+Replacing that framing with A2 + A3 + D1 as the load-bearing predecessors — plus
+the fractal leaf-node philosophy principle as the derivation strategy (named
+inline, not listed as an axiom) — makes D3 robust across A2's full range.
 
 ### D1's role
 
