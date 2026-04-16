@@ -115,6 +115,20 @@ This is "push complexity to the leaves" applied to time: the uncertain decision
 IS a leaf node. You'll swap it out when you learn more. The interface ensures
 that swap is cheap.
 
+### Use what the hardware provides
+
+When hardware already enforces a property, the kernel programs that mechanism —
+it doesn't reimplement the enforcement in software. A software reimplementation
+is always a weaker guarantee competing with a stronger one, and it adds
+complexity that moves in the wrong direction: inward from the leaf.
+
+This is "push complexity to the leaves" applied to the hardware boundary.
+Hardware is the outermost leaf. If it already handles a concern — memory
+isolation, privilege separation, cache coherence, interrupt priority — the
+correct response is to use it, not to rebuild it at a different granularity. The
+kernel's job at this boundary is to _program_ the mechanism, not to _be_ the
+mechanism.
+
 ### Find the abstraction that absorbs the edge cases
 
 Real simplicity isn't avoiding hard cases — it's finding the abstraction where
