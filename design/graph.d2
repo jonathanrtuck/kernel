@@ -23,6 +23,12 @@ kernel: {
     # Per logical core (spec.md#D1).
     # Owns the per-core hot path: exception entry, state update,
     # next-Frame selection, resumption.
+    #
+    # External entry surface (exception vector) is intentionally
+    # not drawn as a single interface node — the three sources
+    # (userspace syscall, hardware exceptions, cross-core IPI)
+    # are heterogeneous and the unifying contract is not yet
+    # derived. See spec.md#Open questions.
 
     time-manager: {
       label: Time manager
@@ -30,6 +36,13 @@ kernel: {
       # Scheduling algorithm is a leaf-node, swappable per core.
       # Carries algorithm-specific state; Frame carries only
       # abstract scheduling properties.
+
+      interface: {
+        shape: class
+        # In: Frame's abstract scheduling properties.
+        # Out: next Frame to resume.
+        # D2: algorithm-specific state stays inside.
+      }
     }
   }
 
@@ -39,6 +52,10 @@ kernel: {
     # Internal strategy (partitioning, NUMA-awareness, per-core
     # caches, cross-node fallback) is a leaf-node concern below
     # this layer and intentionally not represented here.
+
+    interface: {
+      shape: class
+    }
   }
 
   frame: {
@@ -75,5 +92,5 @@ kernel.space-manager -> hardware.memory
 # External interface: the userspace-facing shape is still TBD.
 # userspace -> kernel is a kernel invocation producing some
 # combination of O1's three output types.
-userspace -> kernel.core-manager: invokes (syscall interface TBD)
+userspace -> kernel.core-manager: syscall
 kernel -> userspace: fault delivery, messages (shape TBD)
