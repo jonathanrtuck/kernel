@@ -293,9 +293,10 @@ or capability table structure.
   target cooperation), A3 (generic — no workload assumes or requires
   kernel-level grouping), `design/landscape.md` §4.4, §6.1 (seL4 validates
   no-kernel-process; all surveyed systems schedule thread-level entities).
-- **Status:** settled — revisit if a downstream derivation (capability table
-  structure, Frame lifecycle) reveals that the absence of kernel grouping forces
-  essential complexity into userspace that capabilities alone cannot cover.
+- **Status:** settled — revisit if a downstream derivation (Frame lifecycle)
+  reveals that the absence of kernel grouping forces essential complexity into
+  userspace that capabilities alone cannot cover. (D8 settled capability table
+  structure with per-Frame tables — no grouping pressure found.)
 - **Journal:** `journal/006-frame-is-execution-unit.md`.
 
 ### D7 — Split interaction model: IPC + typed kernel operations
@@ -334,6 +335,50 @@ mechanism, or fast-path design.
   kernel-operation interposition that cannot be served by EL2 hardware,
   capability restriction, or kernel-level mechanisms.
 - **Journal:** `journal/007-scope-of-capability-mediation.md`.
+
+### D8 — Kernel-managed flat capability table with typed-memory backing
+
+Each Frame's capability table is a flat array of (kernel object pointer, rights
+mask) entries, managed internally by the kernel. Handles are opaque integers;
+the kernel handles slot allocation, growth, and reuse. Userspace never sees or
+manages the table's structure.
+
+The physical memory backing the table comes from the Frame's memory budget, not
+the kernel's pool. The Frame (or its creator) commits physical memory for
+capability storage. When the table is full and a new capability must be stored,
+the kernel faults the Frame; the fault handler commits more memory, then
+retries. This provides explicit resource accounting without exposing table
+structure.
+
+The CNode tree model (seL4) was rejected: D7 eliminates the dispatch role that
+CNode trees structurally serve, and A5 creates tension with CNode management
+pushed to userspace as interface complexity. Per-core replicated tables
+(Barrelfish) were rejected on D1 + A2 grounds. Unified cap/page tables
+(Composite) were rejected on D5 + A2 grounds.
+
+Each Frame always has its own table. Table sharing between Frames is deferred to
+the Frame-Space binding model — it is not a table-structure question.
+
+Does NOT settle: handle numbering/ABA prevention, entry layout (type tag, badge,
+generation counter), revocation model, table-full fault protocol, or maximum
+table size policy.
+
+- **Rests on:** D7 (split model narrows the table's role to designation/rights
+  lookup — not dispatch; CNode tree structure serves dispatch flexibility D7
+  eliminated), D4 (per-Frame, O(1) lookup, designation = authority — flat
+  indexing satisfies O(1); per-Frame tables are the unit of authority), A5
+  (kernel absorbs complexity — CNode management is interface complexity pushed
+  to userspace; flat table keeps the interface simple), D1 (hot path — one
+  memory access for flat index vs. two+ for CNode tree walk), D3 (one logical
+  Space manager — table memory charged to Frame's budget through the Space
+  manager), `design/research/authority-models.md` §4, §5.5 (seL4 CNode tree vs.
+  Zircon flat table; namespace shape comparison), `design/landscape.md` §1.1
+  (capability representation survey).
+- **Status:** settled — revisit if D7 is revised (unified model would
+  re-motivate CNode dispatch), if Frame-Space binding reveals that per-Frame
+  tables force essential sharing complexity into userspace, or if the revocation
+  model requires CDT and the absence of tree structure makes it impractical.
+- **Journal:** `journal/008-capability-table-structure.md`.
 
 ### Entry template
 
@@ -392,11 +437,6 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
 
 ## Open questions
 
-- **Capability table structure.** D4 settles capability-based authority; the
-  per-Frame capability table is the hot-path authority structure
-  (D1-compatible). Open: kernel-managed opaque handle table (Zircon) vs.
-  capability to a table object (seL4 CNode). Determines who controls the
-  authority-space structure and how table sizing/growth works.
 - **Time migration across cores.** When a Frame migrates to a less-loaded core,
   does its Time allocation transfer, or is it re-allocated on the destination?
   Affects D2's migration story.
@@ -410,8 +450,9 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   a separate decision?
 - **Revocation model.** Close-only (refcount), authoritative destroy, derivation
   tracking (seL4 CDT), or generation numbers. Each has different cost profiles
-  under D1 (hot/cold split) and O2 (cross-core IPIs). Interacts with capability
-  table structure.
+  under D1 (hot/cold split) and O2 (cross-core IPIs). D8 (flat table) is
+  compatible with refcount, destroy, and generation numbers; CDT would require a
+  separate tracking structure.
 - **Frame minimum schema.** D6 settles that a Frame is a single execution unit.
   The concrete field set (register state, TTBR, capability table pointer, Time
   binding, scheduling state, fault handler) needs formal derivation in the
@@ -422,10 +463,10 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
 - **Frame lifecycle.** Create, destroy, suspend, resume. Whether Frame is a
   capability-held object type (archive journal/013 said yes). Interacts with D4
   and D7 (lifecycle operations are typed kernel syscalls under the split model).
-- **Can Frames share capability tables?** D4 requires per-Frame tables, D6
-  settles per-execution-unit authority. Open: can the underlying table structure
-  be shared (like seL4 TCBs sharing a CSpace)? Determines multi-threading
-  ergonomics.
+- **Can Frames share capability tables?** D8 settles per-Frame tables with no
+  sharing. Deferred to Frame-Space binding model — table sharing is relevant
+  only if the kernel supports same-address-space Frame groups. If so, revisit as
+  a D8 downstream.
 - **Interrupt model (device interrupts, not exceptions).** Who owns device
   interrupts? Per-core or routed? Kernel-handled or delegated to userspace
   drivers?
@@ -478,6 +519,11 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
 - `007-scope-of-capability-mediation.md` — reasoning for D7: A4 trust-model
   asymmetry, D1 hot-path dispatch, IPC model coupling all favor split; unified
   hides trust boundary; full fragmentation rejected on A5; archive convergence.
+- `008-capability-table-structure.md` — reasoning for D8: D7 narrows table role
+  to designation/rights lookup (not dispatch), removing CNode tree
+  justification; A5 confirms CNode management is interface complexity;
+  typed-memory backing for explicit accounting; table sharing deferred to
+  Frame-Space binding.
 
 ---
 

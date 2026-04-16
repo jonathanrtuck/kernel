@@ -1,15 +1,13 @@
 # Kernel structural map.
 #
-# Populated from design/spec.md derivations D1-D6, observations O2-O3,
-# and Vocabulary (Space, Time, Frame). Every box and edge has a
-# corresponding spec.md entry; items labeled "TBD" await downstream
-# derivation.
+# Populated from design/spec.md derivations D1-D6, observations O2-O3, and
+# Vocabulary (Space, Time, Frame). Every box and edge has a corresponding
+# spec.md entry; items labeled "TBD" await downstream derivation.
 #
-# Intentionally absent (pending derivation): specific syscall surface,
-# Frame minimum schema, IPC mechanism (sync/async/hybrid),
-# capability table structure/revocation, memory object model,
-# fault delegation, Frame lifecycle,
-# per-physical-core concerns (power, thermal, shared cache/TLB).
+# Intentionally absent (pending derivation): specific syscall surface, Frame
+# minimum schema, IPC mechanism (sync/async/hybrid), revocation model, memory
+# object model, fault delegation, Frame lifecycle, per-physical-core concerns
+# (power, thermal, shared cache/TLB).
 # See spec.md#Open questions.
 #
 # Render with: d2 --layout elk graph.d2
@@ -72,9 +70,11 @@ kernel: {
 
     capabilities: {
       label: Capability table
-      # Per-Frame, per-core accessible (D4 + D1).
+      # D8: kernel-managed flat array, per-Frame (D4 + D1).
       # Each entry: (kernel object ref, rights mask).
-      # Table structure (flat/CNode/etc.) TBD.
+      # Backed by typed memory from Frame's budget.
+      # O(1) lookup via handle index.
+      # Table sharing deferred to Frame-Space binding.
     }
 
     address-space: {
