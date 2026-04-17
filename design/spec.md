@@ -298,7 +298,8 @@ or capability table structure.
 - **Status:** settled — revisit if a downstream derivation (Frame lifecycle)
   reveals that the absence of kernel grouping forces essential complexity into
   userspace that capabilities alone cannot cover. (D8 settled capability table
-  structure with per-Frame tables — no grouping pressure found.)
+  structure with per-Frame tables; D10 settled first-class address spaces as the
+  sharing mechanism — no grouping pressure found.)
 - **Journal:** `journal/006-frame-is-execution-unit.md`.
 
 ### D7 — Split interaction model: IPC + typed kernel operations
@@ -403,8 +404,8 @@ proliferation.
 
 Does NOT settle: page size exposure (byte-addressed vs. page-addressed
 interface), specific operations on memory objects (create, bind, COW/clone,
-resize), object-rights, fault delegation, precise Space-to-memory-object
-accounting relationship, or Frame-Space binding model.
+resize), object-rights, fault delegation, or precise Space-to-memory-object
+accounting relationship. (Frame-Space binding model settled by D10.)
 
 - **Rests on:** A5 (kernel absorbs complexity — same argument that rejected
   CNode trees in D8 applies to memory management), D5 (MMU-backed virtual
@@ -416,10 +417,57 @@ accounting relationship, or Frame-Space binding model.
   object backing flows through it), `design/landscape.md` §2.1–2.3 (four
   families surveyed; two-step create/map dominant).
 - **Status:** settled — revisit if A5 is revised (would re-open
-  userspace-managed models), if D5's CHERI note is dropped (would re-open
-  page-specific interfaces), or if the Frame-Space binding model reveals that
-  kernel-managed objects cannot express a required sharing pattern.
+  userspace-managed models), or if D5's CHERI note is dropped (would re-open
+  page-specific interfaces). (Frame-Space binding model settled by D10 — no
+  sharing pattern issues found.)
 - **Journal:** `journal/009-memory-object-model.md`.
+
+### D10 — The address space is a first-class kernel object
+
+The address space (page table tree) is a capability-designated kernel object,
+separate from the Frame. Frames bind to an address space; multiple Frames can
+bind to the same one, sharing the page table tree, TTBR value, and ASID. Memory
+objects (D9) are mapped into the address space, not into the Frame directly. The
+address space creator's Space budget pays for the page table memory (D8
+pattern).
+
+The vocabulary's "Space" remains the budget/resource-claim concept. The address
+space is a distinct object type. Working name: "address space" — final naming
+deferred to public API.
+
+The emergent model (address space as a Frame attribute, no separate object) was
+rejected on three independent paths: A5 (mapping consistency for co-located
+Frames is essential complexity pushed to userspace), D1 (TLB capacity pressure
+from per-Frame ASIDs), and D4 (cannot delegate address-space access
+independently of Frame access). The kernel needs to track shared address spaces
+internally regardless (for TLB shootdown); exposing the concept at the interface
+is simpler than inferring it.
+
+API design intent (not settled as interface): Frame creation requires an
+explicit address space capability; creating a new address space has equal
+friction to reusing an existing one; no "share by default."
+
+Does NOT settle: binding mutability (rebindable?), address space lifecycle
+(destruction semantics), Frame creation API, capability table sharing (D8
+downstream, now reopenable), or address space naming.
+
+- **Rests on:** A5 (mapping consistency is essential complexity; same A5
+  argument pattern as D8 and D9 — userspace rebuilds the concept if the kernel
+  omits it), D1 (TLB capacity pressure from per-Frame ASIDs on co-located
+  workloads; shared TTBR eliminates hot-path cost for same-address-space
+  switching), D4 (independent delegation of address-space access vs. Frame
+  access), D6 ("binding" language; "sharing a Space" = multiple Frames bound to
+  the same object), D5 (CHERI note: address space object abstracts the page
+  table), D8 (typed-memory-backing precedent for budget), vocabulary cardinality
+  ("one or more Spaces" fits Space-as-budget, not Space-as-address-space),
+  `design/landscape.md` §6.5 (all surveyed systems use first-class address
+  spaces), `design/research/execution-unit.md` §2 (thread↔address-space
+  cardinality across systems).
+- **Status:** settled — revisit if A5 is revised (re-opens whether mapping
+  consistency belongs in userspace), if D1's hot/cold split is revised (removes
+  TLB argument, though A5 and D4 remain), or if a downstream derivation reveals
+  that first-class address spaces force essential complexity into userspace.
+- **Journal:** `journal/010-address-space-is-first-class.md`.
 
 ### Entry template
 
@@ -485,10 +533,11 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   abstract scheduling properties, but the minimum set (priority? deadline?
   IO-bound flag? period?) is not fixed.
 - **Frame-Space cardinality formalization.** The Vocabulary section describes
-  Frames as correlating "one or more Spaces." D5 grounds this concretely: each
-  Frame has its own virtual address space. Open: can Frames share address space
-  structure (shared page table subtrees)? Is one-to-many a property of Frames or
-  a separate decision?
+  Frames as correlating "one or more Spaces." D10 confirms Space (vocabulary)
+  and address space are distinct: Space is a budget concept (one or more per
+  Frame); the address space is a first-class object (one per Frame, per D6).
+  Remaining: formalize the vocabulary's "one or more" — does a Frame hold
+  multiple Space claims, or is it one claim subdivided?
 - **Revocation model.** Close-only (refcount), authoritative destroy, derivation
   tracking (seL4 CDT), or generation numbers. Each has different cost profiles
   under D1 (hot/cold split) and O2 (cross-core IPIs). D8 (flat table) is
@@ -498,16 +547,19 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   The concrete field set (register state, TTBR, capability table pointer, Time
   binding, scheduling state, fault handler) needs formal derivation in the
   current chain. Archive journal/004 derived a first-principles minimum.
-- **Frame-Space binding model.** D5 + D6: each Frame has an address space, and
-  Frames can share Spaces. Open: binding at creation only, or rebindable? How
-  does the kernel track which Frames share which Space (for TLB shootdown)?
+- **Address space binding mutability.** D10 settles the address space as a
+  first-class object that Frames bind to. Open: is the binding immutable (set at
+  Frame creation) or rebindable at runtime? If rebindable, what happens to TLB
+  entries when a Frame changes address space?
 - **Frame lifecycle.** Create, destroy, suspend, resume. Whether Frame is a
   capability-held object type (archive journal/013 said yes). Interacts with D4
   and D7 (lifecycle operations are typed kernel syscalls under the split model).
 - **Can Frames share capability tables?** D8 settles per-Frame tables with no
-  sharing. Deferred to Frame-Space binding model — table sharing is relevant
-  only if the kernel supports same-address-space Frame groups. If so, revisit as
-  a D8 downstream.
+  sharing. D10 settles first-class address spaces with multi-Frame binding —
+  same-address-space Frame groups are now a supported pattern. Revisit as a D8
+  downstream: does same-address-space sharing create sufficient pressure for
+  shared capability tables, or is per-Frame authority (with explicit capability
+  transfer) sufficient?
 - **Interrupt model (device interrupts, not exceptions).** Who owns device
   interrupts? Per-core or routed? Kernel-handled or delegated to userspace
   drivers?
@@ -530,6 +582,9 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
 - **Specific syscall surface.** D7 settles two mechanism families but not the
   exact set. The archive's 10-syscall design is a data point. Depends on IPC
   model, Frame lifecycle, and D9 (memory objects).
+- **Address space lifecycle.** D10 introduces the address space as a kernel
+  object. When is it destroyed? Last capability dropped? Last Frame unbound?
+  Interacts with revocation model.
 - **Boot / bring-up model.** BSP-then-APs vs symmetric bring-up. Touches A2 but
   not derived.
 
@@ -568,6 +623,11 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   model; page-granularity rejected on D5 CHERI note; Space vocabulary provides
   accounting; vocabulary corrected (object identity, not physical address
   binding).
+- `010-address-space-is-first-class.md` — reasoning for D10: three independent
+  paths (A5 mapping consistency, D1 TLB capacity pressure, D4 independent
+  delegation) converge on first-class address space; emergent model rejected;
+  vocabulary Space confirmed as budget concept distinct from address space; API
+  design intent (no default, equal friction) addresses "right way easy" concern.
 
 ---
 

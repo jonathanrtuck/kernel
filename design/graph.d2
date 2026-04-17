@@ -1,6 +1,6 @@
 # Kernel structural map.
 #
-# Populated from design/spec.md derivations D1-D6, D8-D9, observations O2-O3,
+# Populated from design/spec.md derivations D1-D6, D8-D10, observations O2-O3,
 # and Vocabulary (Space, Time, Frame). Every box and edge has a corresponding
 # spec.md entry; items labeled "TBD" await downstream derivation.
 #
@@ -74,9 +74,9 @@ kernel: {
     style.multiple: true
     # D6: single schedulable execution unit.
     # One register state, one Time, one capability table,
-    # one address space. "Process" is a userspace convention
-    # (group of Frames sharing a Space).
-    # D5: address space enforced by MMU via TTBR.
+    # one address space binding (D10: binds to first-class
+    # address space object). "Process" is a userspace
+    # convention (group of Frames sharing an address space).
     # Minimum schema TBD (spec.md#Open questions).
 
     capabilities: {
@@ -85,16 +85,22 @@ kernel: {
       # Each entry: (kernel object ref, rights mask).
       # Backed by typed memory from Frame's budget.
       # O(1) lookup via handle index.
-      # Table sharing deferred to Frame-Space binding.
+      # Table sharing: D10 enables same-AS Frame groups;
+      # whether they share cap tables is open (D8 downstream).
     }
+  }
 
-    address-space: {
-      label: Address space
-      # D5: per-Frame page table tree.
-      # MMU enforces isolation — Frame can only access
-      # physical memory mapped into its tables.
-      # Structure sharing between Frames TBD.
-    }
+  address-space: {
+    label: address space
+    style.multiple: true
+    # D10: first-class, capability-designated kernel object.
+    # Contains the page table tree (virtual→physical mappings).
+    # Frames bind to an address space; multiple Frames can
+    # share one (same TTBR, same ASID, shared TLB entries).
+    # Memory objects (D9) are mapped into the address space.
+    # Creator's Space budget pays for page table memory (D8 pattern).
+    # Vocabulary "Space" is a separate concept (budget).
+    # Lifecycle, binding mutability TBD.
   }
 }
 
@@ -132,17 +138,23 @@ hardware.mmu -> hardware.memory: translated access
 # table during syscall handling (hot path, per-core).
 kernel.core-manager -> kernel.frame.capabilities: resolve (hot path)
 
-# D5: Core manager loads Frame's TTBR on context switch (hot path).
-kernel.core-manager -> kernel.frame.address-space: TTBR load (hot path)
+# D5 + D10: Core manager loads address space TTBR on context switch (hot path).
+# Same address space → same TTBR → skip reload.
+kernel.core-manager -> kernel.address-space: TTBR load (hot path)
 
 # Capabilities designate kernel objects (Space, Time, memory objects, etc.).
 # The capability table connects Frames to the resources they
 # are authorized to use.
 kernel.frame.capabilities -> kernel.memory-object: designate (D4, D9)
+kernel.frame.capabilities -> kernel.address-space: designate (D4, D10)
+# D10: Frame binds to address space (one binding per Frame; many Frames per AS).
+kernel.frame -> kernel.address-space: binds to (D10)
 # D9: Space manager allocates physical backing for memory objects.
 kernel.space-manager -> kernel.memory-object: physical backing
-# D9 + D5: Space manager maps memory objects into Frame address spaces.
-kernel.space-manager -> kernel.frame.address-space: map/unmap
+# D10: Space manager also backs address space page tables (D8 pattern).
+kernel.space-manager -> kernel.address-space: page table backing
+# D9 + D10: Memory objects are mapped into address spaces, not Frames directly.
+kernel.memory-object -> kernel.address-space: mapped into (D9, D10)
 kernel.frame.capabilities -> kernel.core-manager.time-manager: Time capabilities
 
 # External interface: two mechanism families (D7).
