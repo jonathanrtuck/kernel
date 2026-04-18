@@ -223,3 +223,19 @@ separately.
 
 Note: Hybrid as a transparent optimization (below the delegation interface) is
 not rejected — only hybrid as a designed-in interface-level distinction.
+
+---
+
+## Audit note (2026-04-18)
+
+Flagged by independent audit (HIGH severity): (1) potential mischaracterization
+of archive conclusion, (2) derivation gap — A4 alone does not foreclose
+synchronous inline resolution by the exception handler. Independent
+re-derivation (archive physically removed from tree) clarified: A4 forecloses
+background paging, not synchronous resolution. But A3 + A4 combined force
+delegation at the interface level — A3 rejects a single hardcoded policy, and
+the hybrid boundary is workload-dependent (A3). The kernel remains free to
+optimize behind the interface (resolve trivial faults inline). Conclusion
+stands; the "Kernel- internal rejected by A4 + A3" row in the table above should
+be read as "A3 + A4 combined at the interface level," not "A4 alone forecloses
+all inline resolution."

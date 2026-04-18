@@ -193,3 +193,14 @@ vocabulary, D2, D4, and A3.
 
 A5 is load-bearing for Part 2 (no grouping) but not for Part 1 (Observer =
 execution unit). Part 1 is forced by vocabulary + D2 alone.
+
+---
+
+## Audit note (2026-04-18)
+
+Flagged by independent audit: vocabulary "one Time per Observer" may be
+inherited from archive; diagnostic pattern mirrors archive/004. Independent
+re-derivation (archive physically removed from tree) confirmed the conclusion is
+axiom-forced: A3 + A5 reject kernel grouping, D2 schedules Observers directly,
+D4 + D14 enable userspace grouping, D10 is the shared-memory anchor. Conclusion
+stands; structural similarity to the archive's reasoning is noted.

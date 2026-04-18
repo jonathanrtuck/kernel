@@ -147,3 +147,14 @@ Revisit triggers (named in the spec entry):
 
 Those are leaf-node decisions made at the point of implementation, recorded in
 their own journal entries at that time.
+
+---
+
+## Audit note (2026-04-18)
+
+Flagged by independent audit for potential archive import: the interface-level
+conclusion (single Space manager) may have been imported from the archive and
+re-justified from axioms. Independent re-derivation (archive physically removed
+from tree) confirmed the conclusion is axiom-forced: A2 + A3 + A5 + D1
+independently produce the same answer. Conclusion stands; original reasoning
+path's independence is qualified.

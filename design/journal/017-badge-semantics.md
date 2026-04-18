@@ -326,3 +326,17 @@ pass through A2.
   interact with per-badge tracking — per-badge slots could serve as both
   tracking infrastructure and coalescing mechanism. Connection noted; not
   explored here.
+
+---
+
+## Audit note (2026-04-18)
+
+Flagged by independent audit: the distinguish/identify distinction (load-bearing
+for minter-assigned) mirrors archive/012's cognitive structure. "A5 (applied
+fractally)" conflates the axiom with the philosophy principle without citation.
+Three uncited assumptions about workload patterns. Independent re-derivation
+(archive removed from tree) confirmed all three conclusions: minter-assigned
+(from D15 identification need + receiver-controlled values), mint right (from D4
+authority model), opt-in tracking (from A3/A4 tension). The conclusions stand;
+the original reasoning path for badge assignment follows the archive's cognitive
+structure without full independence.

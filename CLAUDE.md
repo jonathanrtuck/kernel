@@ -29,6 +29,12 @@ manager:
 - **Don't inject old concepts.** When the design restarts or deliberately drops
   a concept, don't re-introduce it from memory. Concepts must be re-derived from
   first principles to re-enter.
+- **Archive isolation.** `design/archive/` must be physically moved out of the
+  working tree during derivation sessions (`/explore` Phases 2–5). Instructions
+  alone are insufficient — an audit of D1–D17 found 6 of 17 entries with
+  archive-shaped reasoning paths despite explicit "don't import" instructions.
+  The `/explore` protocol handles this automatically. If running derivation
+  outside `/explore`, move the archive manually before starting.
 
 ## Working Protocol (MANDATORY)
 

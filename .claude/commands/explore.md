@@ -112,6 +112,31 @@ premature depth, note it in the question file. Advance to Phase 2.
 
 ---
 
+## Archive isolation (MANDATORY)
+
+Before beginning Phase 2, move the archive out of the working tree:
+
+```
+mv design/archive /tmp/kernel-archive
+```
+
+The archive contains conclusions from a previous derivation chain. Even with
+instructions not to import them, the archive shapes reasoning unconsciously —
+cognitive patterns leak through. Physically removing it is the only reliable
+guard. This was validated on 2026-04-18: an independent audit of D1–D17 found
+6 of 17 entries with archive-shaped reasoning paths despite explicit
+instructions not to import.
+
+Restore the archive during Phase 6 (RECORD) for convergence checking:
+
+```
+mv /tmp/kernel-archive design/archive
+```
+
+If the archive is not present (already moved or doesn't exist), skip this step.
+
+---
+
 ## Phase 2: CHECK
 
 **What happens:** Determine what is already known.

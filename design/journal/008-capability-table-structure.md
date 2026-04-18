@@ -209,3 +209,14 @@ Revisit if:
 - The revocation model requires CDT and the absence of tree structure makes CDT
   impractical (would pressure toward CNode structure or a separate derivation
   tree)
+
+---
+
+## Audit note (2026-04-18)
+
+Flagged by independent audit: two reasoning patterns ("what role does this
+serve?" and "budget-driven resource accounting") follow archive precedent
+without acknowledgment. Independent re-derivation (archive physically removed
+from tree) confirmed the conclusion is axiom-forced: D7 eliminates CNode
+dispatch role, D1 requires O(1) hot-path, A5 rejects userspace table management.
+Conclusion stands; original reasoning patterns' archive provenance is noted.

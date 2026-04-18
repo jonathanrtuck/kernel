@@ -202,3 +202,15 @@ organization AND explicit-trigger-compatible lifecycle.
 - Bootstrap: how the first Observer acquires initial capabilities
 - Capability-Observer relationship (interacts with "what the execution unit is"
   — resolved by D6)
+
+---
+
+## Audit note (2026-04-18)
+
+Flagged by independent audit: the confused deputy reasoning path was imported
+from the archive and framed as one of two "independent" convergences.
+Independent re-derivation (archive physically removed from tree) confirmed the
+conclusion is axiom-forced via two paths: A5 + confused deputy, and D1 +
+hot-path data locality. A third path through O2/O3 also emerged. Conclusion
+stands; original entry's claim of full independence for the confused deputy path
+is qualified.
