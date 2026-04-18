@@ -1,13 +1,13 @@
 # Kernel structural map.
 #
-# Populated from design/spec.md derivations D1-D6, D8-D10, observations O2-O3,
+# Populated from design/spec.md derivations D1-D6, D8-D11, observations O2-O3,
 # and Vocabulary (Space, Time, Frame). Every box and edge has a corresponding
 # spec.md entry; items labeled "TBD" await downstream derivation.
 #
 # Intentionally absent (pending derivation): specific syscall surface, Frame
-# minimum schema, IPC mechanism (sync/async/hybrid), revocation model, fault
-# delegation, Frame lifecycle, per-physical-core concerns (power, thermal,
-# shared cache/TLB).
+# minimum schema, IPC mechanism (sync/async/hybrid), revocation add-ons
+# (generation, CDT, badges — base settled in D11), fault delegation, Frame
+# lifecycle, per-physical-core concerns (power, thermal, shared cache/TLB).
 # See spec.md#Open questions.
 #
 # Render with: d2 --layout elk graph.d2
@@ -83,8 +83,13 @@ kernel: {
       label: Capability table
       # D8: kernel-managed flat array, per-Frame (D4 + D1).
       # Each entry: (kernel object ref, rights mask).
+      # Handles carry a generational slot tag (D11) — bumped on
+      # slot reuse, prevents stale-handle aliasing. ABA defense,
+      # not revocation; does not invalidate live capabilities.
       # Backed by typed memory from Frame's budget.
       # O(1) lookup via handle index.
+      # Revocation primitive: close-only (refcount on drop) +
+      # authoritative destroy (D11). Add-ons deferred with IPC.
       # Table sharing: D10 enables same-AS Frame groups;
       # whether they share cap tables is open (D8 downstream).
     }

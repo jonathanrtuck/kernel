@@ -223,7 +223,10 @@ state). The archived chain reached the same conclusion from a third path.
 
 Does NOT settle: scope of capability mediation (everything vs. resources-only),
 capability table structure (kernel-managed vs. CNode-style), or revocation model
-(refcount, destroy, CDT, generation numbers). These are one level down.
+(refcount, destroy, CDT, generation numbers). These are one level down. (D7
+settled scope via the split interaction model; D8 settled table structure as
+kernel-managed flat table; D11 settled the base revocation primitive as
+close-only + destroy + ABA tag — add-ons deferred with IPC model.)
 
 - **Rests on:** A5 (confused deputy forces authority-tracking complexity into
   userspace — an A5 violation; capabilities are the only model where designation
@@ -364,7 +367,10 @@ the Frame-Space binding model — it is not a table-structure question.
 
 Does NOT settle: handle numbering/ABA prevention, entry layout (type tag, badge,
 generation counter), revocation model, table-full fault protocol, or maximum
-table size policy.
+table size policy. (D11 settled handle ABA prevention via generational slot tag
+and the base revocation primitive as close-only + destroy; entry-layout
+specifics beyond the slot tag, revocation add-ons, table-full protocol, and size
+policy remain open.)
 
 - **Rests on:** D7 (split model narrows the table's role to designation/rights
   lookup — not dispatch; CNode tree structure serves dispatch flexibility D7
@@ -469,6 +475,59 @@ downstream, now reopenable), or address space naming.
   that first-class address spaces force essential complexity into userspace.
 - **Journal:** `journal/010-address-space-is-first-class.md`.
 
+### D11 — Base revocation primitive: close-only + authoritative destroy
+
+The base revocation primitive is close-only (refcount on holder-drop) plus
+authoritative destroy (an entity with appropriate rights can destroy the
+underlying object; outstanding capabilities become dead handles, observable as
+errors on next use). Handles carry a generational slot tag — bumped on slot
+reuse — to prevent stale-handle aliasing of reused table slots. The slot tag is
+ABA defense, not revocation: it does not invalidate live capabilities.
+
+Close-only alone (Base-A) was rejected. Four structural workload patterns under
+A3 — adversarial targets, failure-mode targets, pressure response, and
+structural cascade — require terminate-by-force. For kernel-owned resources
+(Frames, address spaces, memory objects), close-only cannot express this; the
+userspace construction that would substitute cannot interpose at the MMU level
+and must route through a kernel mechanism that is itself a form of authoritative
+destroy under another name. Forcing this construction into userspace violates A5
+via O4 (a).
+
+Add-on mechanisms for mass invalidation (generation-as-revocation) and selective
+revocation (CDT, badges) are deferred. Their value depends on the IPC model:
+endpoint rotation serves mass invalidation only if endpoint-like kernel objects
+exist; badges ride on IPC; proxy indirection requires IPC mediation. Committing
+to add-ons before the IPC model is settled would either skip a level or
+overspend on features whose alternatives may be free.
+
+Does NOT settle: mass invalidation (deferred with IPC), selective revocation
+(deferred with IPC), who authorizes destroy, cross-core prompt-effect policy
+(strong vs. weak), destroy cleanup protocol (inline vs. preemptible), ABA tag
+size and encoding, budget treatment of freed slots, table-full fault ↔
+revocation interaction.
+
+- **Rests on:** A5 (close-only alone forces terminate-by-force into userspace
+  for kernel-owned resources — O4 (a) violation), D4 (revocation preserves
+  designation = authority; close retracts the cap, destroy retracts the target),
+  D8 (flat table is compatible with refcount, destroy, and per-slot ABA tags;
+  CDT requires separate structure — deferred; D11 closes D8's deferred ABA
+  sub-question), D7 (revocation ops are typed kernel syscalls, synchronous), A4
+  (no background sweeper; synchronous), D3 (slot tag field flows through Space
+  accounting), O2 (cross-core prompt effect costs IPIs; weak observation is
+  IPI-free), O4 (a, c — base primitive is essential; add-ons require essential
+  justification that depends on IPC-model context), `design/landscape.md` §1.4
+  (every surveyed system with authoritative revocation has close + destroy as a
+  base; add-on selection varies), `design/research/capability-revocation.md`
+  (per-mechanism survey, cost table, stale-capability discovery modes,
+  distributed-setting costs), `design/research/authority-models.md` §4.1–4.8,
+  §5.2, §6.3 (per-system survey, cost table, seL4 WCET concern).
+- **Status:** settled — revisit when the IPC model decision reveals whether
+  Base-B plus IPC-level mechanisms (endpoint rotation, badges) cover the
+  workloads that would otherwise justify generation-as-revocation or CDT, or if
+  a downstream lifecycle derivation (Frame, address space) reveals the base
+  primitive is structurally insufficient.
+- **Journal:** `journal/011-base-revocation-primitive.md`.
+
 ### Entry template
 
 Each derivation entry names three things: what rests on what, how settled the
@@ -538,11 +597,15 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   Frame); the address space is a first-class object (one per Frame, per D6).
   Remaining: formalize the vocabulary's "one or more" — does a Frame hold
   multiple Space claims, or is it one claim subdivided?
-- **Revocation model.** Close-only (refcount), authoritative destroy, derivation
-  tracking (seL4 CDT), or generation numbers. Each has different cost profiles
-  under D1 (hot/cold split) and O2 (cross-core IPIs). D8 (flat table) is
-  compatible with refcount, destroy, and generation numbers; CDT would require a
-  separate tracking structure.
+- **Revocation add-ons.** D11 settles the base primitive (close-only + destroy
+  - ABA slot tag). Deferred jointly with IPC model: whether to add
+    generation-as-revocation (O(1) mass invalidation; alternative is endpoint
+    rotation via destroy, which requires endpoint-like kernel objects); whether
+    to add CDT (selective revocation of a subtree); whether to add badges
+    (IPC-carried discrimination for service-mediated selective revocation); who
+    authorizes destroy; strong vs. weak cross-core prompt-effect policy; destroy
+    cleanup protocol (inline vs. preemptible). Each add-on's value-vs-cost
+    depends on what IPC-level mechanisms exist.
 - **Frame minimum schema.** D6 settles that a Frame is a single execution unit.
   The concrete field set (register state, TTBR, capability table pointer, Time
   binding, scheduling state, fault handler) needs formal derivation in the
@@ -628,6 +691,13 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   delegation) converge on first-class address space; emergent model rejected;
   vocabulary Space confirmed as budget concept distinct from address space; API
   design intent (no default, equal friction) addresses "right way easy" concern.
+- `011-base-revocation-primitive.md` — reasoning for D11: two-level
+  decomposition (base primitive vs. add-ons); four workload patterns
+  (adversarial, failure-mode, pressure response, structural cascade) establish
+  terminate-by-force as essential under A3, rejecting Base-A; generational slot
+  tag closes D8's deferred ABA question; add-ons (generation-as-revocation, CDT,
+  badges) deferred jointly with IPC model because their alternatives depend on
+  IPC-level mechanisms.
 
 ---
 
