@@ -45,18 +45,18 @@ kernel|userspace question — does scheduling policy belong inside the kernel or
 pushed out to userspace? — and that is already settled for this project:
 scheduling is kernel-side. A5 is silent on the internal question this entry
 addresses: whether per-core schedulers must share one algorithm or may differ.
-A2 and A3 do that work alone. `spec.md#D2`'s "Rests on" line correctly
-reflects this by citing A2 + A3 + D1 without A5.
+A2 and A3 do that work alone. `spec.md#D2`'s "Rests on" line correctly reflects
+this by citing A2 + A3 + D1 without A5.
 
-### Requirements on the Frame model
+### Requirements on the Observer model
 
-Allowing different algorithms per core imposes a constraint: the Frame model
-cannot carry algorithm-specific state. A Frame that might migrate from a CFS
+Allowing different algorithms per core imposes a constraint: the Observer model
+cannot carry algorithm-specific state. An Observer that might migrate from a CFS
 core to a fixed-priority core cannot carry CFS virtual runtime, because the
 destination scheduler has no way to interpret it.
 
-The Frame carries _abstract_ scheduling properties — properties any reasonable
-scheduler can interpret in its own terms:
+The Observer carries _abstract_ scheduling properties — properties any
+reasonable scheduler can interpret in its own terms:
 
 - Priority (relative, within a class).
 - CPU-bound vs. IO-bound classification (hint for schedulers that distinguish).
@@ -67,9 +67,9 @@ questions).
 
 Algorithm-specific state — CFS vruntime, deadline tracking counters,
 priority-aging state — lives in the per-core scheduler's own structures, not in
-the Frame. On migration, abstract properties transfer; the destination scheduler
-initializes its own algorithm-specific state from those abstracts and its own
-current state.
+the Observer. On migration, abstract properties transfer; the destination
+scheduler initializes its own algorithm-specific state from those abstracts and
+its own current state.
 
 Some information loss on migration is acceptable and expected. A CFS vruntime
 does not transfer to a round-robin scheduler; the destination initializes with a
@@ -86,7 +86,8 @@ delegates scheduling policy entirely and does not grapple with this question.
 
 This is a novel position. The novelty is small (not an unprecedented
 architectural move), but it does mean we cannot adopt a prior-art blueprint
-wholesale — the Frame-model constraint above is a consequence we had to derive.
+wholesale — the Observer-model constraint above is a consequence we had to
+derive.
 
 ### Applying "isolate uncertain decisions behind interfaces"
 
@@ -95,7 +96,7 @@ The philosophy principle "isolate uncertain decisions behind interfaces"
 genuinely uncertain: workloads, hardware envelopes, and user policies all argue
 for different answers. The response is not to pick one algorithm and commit — it
 is to make the scheduler algorithm a leaf node swappable per core, and to expose
-a Frame-level interface that any reasonable algorithm can satisfy.
+an Observer-level interface that any reasonable algorithm can satisfy.
 
 ## Status
 
@@ -106,12 +107,12 @@ hardware scope, A3's prohibition on mandating one scheduling algorithm for all
 workloads, D1's per-core structure, and the landscape check showing novelty
 without structural blockers. The arguments are complete as stated.
 
-**Revisit trigger:** the minimum abstract-property set on the Frame has not yet
-been derived. If that downstream derivation finds no property set expressible
-across candidate scheduling algorithms (CFS, round-robin, fixed-priority,
-deadline-based, etc.), D2 must be re-examined — either walked back to commit to
-a single algorithm, or qualified to permit heterogeneity only within compatible
-algorithm groups.
+**Revisit trigger:** the minimum abstract-property set on the Observer has not
+yet been derived. If that downstream derivation finds no property set
+expressible across candidate scheduling algorithms (CFS, round-robin,
+fixed-priority, deadline-based, etc.), D2 must be re-examined — either walked
+back to commit to a single algorithm, or qualified to permit heterogeneity only
+within compatible algorithm groups.
 
 Triggers considered and rejected as unrealistic under current axioms:
 formal-verification pressure (not a project goal, and A5 should not bend to
@@ -121,9 +122,9 @@ universal scheduling algorithm (scheduling is NP-hard in general).
 
 **Open sub-questions:**
 
-- Minimum abstract scheduling-property set on the Frame.
+- Minimum abstract scheduling-property set on the Observer.
 - Whether cross-core migration in the presence of algorithm heterogeneity needs
-  admission control on the destination (a Frame migrating to a deadline
+  admission control on the destination (an Observer migrating to a deadline
   scheduler must fit into its deadline admission envelope).
 - Whether userspace can influence per-core algorithm choice, or whether
   algorithm choice is strictly a kernel-configuration-time decision.

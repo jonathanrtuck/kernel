@@ -84,45 +84,58 @@ under "Rests on"; it exists so later sections can be precise.
   shared pipeline resources; the kernel guarantees scheduling allocation, not
   physical-compute-rate delivery.
 
-- **Frame.** Coupled Space and Time: the condition under which compute (Time)
-  executes instructions within specific memory (Space). Borrowed from physics'
-  reference frame — each Frame is an independent coordinate system in which a
-  specific computation unfolds. A Frame correlates one or more Spaces but
-  exactly one Time. SMT-concurrent workloads, when hardware supports them, are
-  expressed as multiple Frames sharing a Space, each with its own Time on its
-  own logical core — not as a single Frame with multiple Times. This keeps the
-  one-Time commitment intact across SMT and non-SMT hardware.
+- **Observer.** A schedulable execution unit coupling Space and Time — the
+  condition under which compute (Time) executes instructions within specific
+  memory (Space). Borrowed from physics: in physics a reference frame bundles
+  observer + coordinate system; this kernel unbundles them, so Observer is the
+  executing entity and Coordinate System is the chart it binds to. Each Observer
+  is an independent perspective in which a specific computation unfolds, binding
+  to a Coordinate System within which its Spaces are located. An Observer
+  correlates one or more Spaces but exactly one Time. SMT-concurrent workloads,
+  when hardware supports them, are expressed as multiple Observers sharing a
+  Space, each with its own Time on its own logical core — not as a single
+  Observer with multiple Times. This keeps the one-Time commitment intact across
+  SMT and non-SMT hardware.
+
+- **Coordinate System.** An instance of the framework by which portions of
+  memory (Spaces) are located within an Observer's computation — the page table
+  tree of D10. Unlike Space and Time, a Coordinate System is not a claim on a
+  bounded substance; it is a framework instance, and multiple Observers can bind
+  to the same one, sharing its mappings, TTBR value, and ASID. An Observer binds
+  to exactly one Coordinate System. Spaces are mapped into a Coordinate System;
+  the same Space may be mapped into multiple Coordinate Systems at different
+  coordinates. Working name; common-term equivalent from broader OS literature
+  is "address space" (D10). No short form — "Coordinate System" stands as-is.
 
 _Term categories:_ The vocabulary has two shapes of term. **Substance names**
-(Space, Time) name a bounded substance; a Frame possesses specific,
-identifiable portions of it — each an object with identity. Naming the
-substance names the possession. **Framework names** (Coordinate System, the
-address-space object of D10) name an instance of a framework that generates
-references — coordinates — by which substance portions are located. A Frame
-possesses the framework instance, not a portion of it. The substance/framework
-split is a categorical difference in what the name refers to, not a style
-inconsistency. Some framework-shaped concepts have no terse single-word
-English name that fits precisely; in those cases the vocabulary accepts a
-two-word proper noun over reaching for an obscure technical term (e.g.,
-"Chart" from differential geometry).
+(Space, Time) name a bounded substance; an Observer possesses specific,
+identifiable portions of it — each an object with identity. Naming the substance
+names the possession. **Framework names** (Coordinate System, the address-space
+object of D10) name an instance of a framework that generates references —
+coordinates — by which substance portions are located. An Observer possesses the
+framework instance, not a portion of it. The substance/framework split is a
+categorical difference in what the name refers to, not a style inconsistency.
+Some framework-shaped concepts have no terse single-word English name that fits
+precisely; in those cases the vocabulary accepts a two-word proper noun over
+reaching for an obscure technical term (e.g., "Chart" from differential
+geometry).
 
-_Capitalized-vs-lowercase convention:_ Capitalized terms (Space, Time, Frame,
-Coordinate System) are kernel proper nouns — names of specific concepts in
-this kernel's design, with the semantics defined here. Lowercase equivalents
-from broader OS literature (memory object, address space) refer to the same
-kind of thing but without claiming this kernel's specific semantics. The two
-are interchangeable in prose; capitalization signals "speaking of our
-concept" vs. "speaking of the general concept." This convention also
-disambiguates the Frame definition's metaphor — "each Frame is an
-independent coordinate system" uses the lowercase general concept, while
-"Coordinate System" (capitalized) refers specifically to the address-space
-object a Frame binds to.
+_Capitalized-vs-lowercase convention:_ Capitalized terms (Space, Time, Observer,
+Coordinate System) are kernel proper nouns — names of specific concepts in this
+kernel's design, with the semantics defined here. Lowercase equivalents from
+broader OS literature (memory object, address space, thread) refer to the same
+kind of thing but without claiming this kernel's specific semantics. The two are
+interchangeable in prose; capitalization signals "speaking of our concept" vs.
+"speaking of the general concept." Practical effect: lowercase "coordinate
+system" and "reference frame" refer to the physics/general concepts; "Coordinate
+System" (capitalized) refers specifically to the D10 address-space object that
+Observers bind to.
 
 _Naming note:_ these terms are for internal thinking and will not necessarily
-appear in public API names. Public naming is deferred until v0.1. D10's
-working name "address space" is the lowercase common-term equivalent of the
-proper-noun candidate "Coordinate System"; final choice deferred with the
-rest of public naming.
+appear in public API names. Public naming is deferred until v0.1. D10's working
+name "address space" is the lowercase common-term equivalent of the proper-noun
+candidate "Coordinate System"; final choice deferred with the rest of public
+naming.
 
 ---
 
@@ -133,11 +146,11 @@ derived choices. Derivation entries may cite these under "Rests on" when the
 observation is load-bearing.
 
 - **O1 — Three output types.** Every kernel invocation produces some combination
-  of: (1) updated kernel state, (2) a message delivered to a Frame, (3) a choice
-  of which Frame to resume. Descriptive summary of what the kernel does; not an
-  exhaustiveness claim with axiom strength. If a future invocation appears to
-  need a fourth output type, that is a signal to examine the kernel's role
-  definition — not to contort the new mechanism to fit the three.
+  of: (1) updated kernel state, (2) a message delivered to an Observer, (3) a
+  choice of which Observer to resume. Descriptive summary of what the kernel
+  does; not an exhaustiveness claim with axiom strength. If a future invocation
+  appears to need a fourth output type, that is a signal to examine the kernel's
+  role definition — not to contort the new mechanism to fit the three.
 
 - **O2 — Cross-core coordination requires IPIs.** A4 applied to A2 has a
   hardware consequence: the only mechanism to wake another core's kernel is an
@@ -176,10 +189,11 @@ and are orthogonal to D1/D2.
 ### D1 — Per-core hot path, shared cold path
 
 Each hardware core has its own kernel-side structure for handling high-frequency
-work: exception entry, state update, selecting the next Frame to resume,
+work: exception entry, state update, selecting the next Observer to resume,
 resumption. This structure touches no cross-core shared state on the hot path.
-Infrequent cross-core concerns — Frame migration, cross-core message delivery,
-shared resource allocation — route through an explicitly shared cold path.
+Infrequent cross-core concerns — Observer migration, cross-core message
+delivery, shared resource allocation — route through an explicitly shared cold
+path.
 
 - **Rests on:** A4 (no kernel thread means per-core exception handlers are the
   only way to respond to per-core exceptions), A5 (cross-core coordination
@@ -193,22 +207,22 @@ shared resource allocation — route through an explicitly shared cold path.
 
 ### D2 — Per-core schedulers may run different algorithms
 
-The scheduler that selects which Frame resumes on a core is per-core (direct
+The scheduler that selects which Observer resumes on a core is per-core (direct
 consequence of D1). Additionally, each core's scheduler may run a _different_
 algorithm — throughput-oriented on a big core, simple fixed-priority on a LITTLE
-core, deadline-based on a core dedicated to real-time Frames. The Frame model
-carries only abstract scheduling properties (priority, CPU/IO classification,
-optional deadline); algorithm-specific state (e.g., CFS virtual runtime,
-deadline parameters) lives per-core in the scheduler, not in the Frame. On
-migration, abstract properties transfer; algorithm-specific state is re-derived
-by the destination scheduler.
+core, deadline-based on a core dedicated to real-time Observers. The Observer
+model carries only abstract scheduling properties (priority, CPU/IO
+classification, optional deadline); algorithm-specific state (e.g., CFS virtual
+runtime, deadline parameters) lives per-core in the scheduler, not in the
+Observer. On migration, abstract properties transfer; algorithm-specific state
+is re-derived by the destination scheduler.
 
 - **Rests on:** D1, A2 (big.LITTLE asymmetric cores are within target hardware),
   A3 (a generic kernel cannot mandate one scheduling algorithm as the right
   answer), `design/landscape.md` (no surveyed system cleanly separates per-core
   scheduler algorithms as a first-class feature — novel position).
 - **Status:** settled — revisit when the minimum abstract-property set on the
-  Frame proves unexpressible across the candidate scheduling-algorithm space.
+  Observer proves unexpressible across the candidate scheduling-algorithm space.
 - **Journal:** `journal/002-per-core-schedulers.md`.
 
 ### D3 — One logical Space manager
@@ -240,8 +254,8 @@ decisions recorded where the implementation is chosen.
 
 ### D4 — Capability-based authority
 
-A Frame proves it is allowed to perform an operation by presenting an
-unforgeable, per-Frame handle (capability) that designates the resource AND
+An Observer proves it is allowed to perform an operation by presenting an
+unforgeable, per-Observer handle (capability) that designates the resource AND
 carries the permitted operations. The kernel resolves the handle, checks the
 rights, and proceeds or rejects. No identity lookup, no global namespace, no
 ambient privilege. Two independent derivation paths converge: (1) A5 forecloses
@@ -259,9 +273,9 @@ close-only + destroy + ABA tag — add-ons deferred with IPC model.)
 - **Rests on:** A5 (confused deputy forces authority-tracking complexity into
   userspace — an A5 violation; capabilities are the only model where designation
   = authority), D1 + O3 (hot-path authority checks must use per-core data;
-  per-Frame capability tables are per-core; per-resource ACLs are shared mutable
-  state), A4 (no background authority management; capability refcount fits
-  explicit-trigger model), A3 (no identity requirement — capabilities work
+  per-Observer capability tables are per-core; per-resource ACLs are shared
+  mutable state), A4 (no background authority management; capability refcount
+  fits explicit-trigger model), A3 (no identity requirement — capabilities work
   across all workloads without assuming an identity scheme),
   `design/landscape.md` §1.2 (confused deputy: Hardy 1988, Miller's
   formalization, "Capability Myths Demolished" 2003).
@@ -269,19 +283,19 @@ close-only + destroy + ABA tag — add-ons deferred with IPC model.)
   simultaneously (either alone leaves at least one derivation path intact).
 - **Journal:** `journal/004-capability-based-authority.md`.
 
-### D5 — MMU-backed virtual memory with per-Frame address spaces
+### D5 — MMU-backed virtual memory with per-Observer address spaces
 
-The kernel requires the ARM64 MMU to be enabled and uses it for inter-Frame
-memory isolation. Each Frame has its own address space (page table tree); the
-MMU enforces that a Frame can only access physical memory mapped into its page
-tables. Three independent paths converge: (1) A2 hardware requires MMU enabled
-for cached memory access — page tables must exist; (2) A3 + A5 require
-hardware-enforced inter-Frame isolation, and the MMU is the only such mechanism
-on ARM64; (3) philosophy "use what the hardware provides." Every alternative
-(physical-only, language-safety isolation, CHERI-only, SFI) is foreclosed by
-axioms or hardware facts.
+The kernel requires the ARM64 MMU to be enabled and uses it for inter-Observer
+memory isolation. Each Observer has its own address space (page table tree); the
+MMU enforces that an Observer can only access physical memory mapped into its
+page tables. Three independent paths converge: (1) A2 hardware requires MMU
+enabled for cached memory access — page tables must exist; (2) A3 + A5 require
+hardware-enforced inter-Observer isolation, and the MMU is the only such
+mechanism on ARM64; (3) philosophy "use what the hardware provides." Every
+alternative (physical-only, language-safety isolation, CHERI-only, SFI) is
+foreclosed by axioms or hardware facts.
 
-Does NOT settle: address space structure sharing between Frames, page size
+Does NOT settle: address space structure sharing between Observers, page size
 exposure vs. hiding, memory object model (what capabilities designate as
 memory), fault delegation (kernel-internal vs. userspace pager), or CHERI
 forward-compatibility. These are one level down. The memory interface should be
@@ -300,47 +314,49 @@ avoid foreclosing CHERI as a future complementary enforcement layer.
   MMU remains the sole enforcement mechanism or becomes one of two.
 - **Journal:** `journal/005-memory-translation-model.md`.
 
-### D6 — A Frame is a single schedulable execution unit
+### D6 — An Observer is a single schedulable execution unit
 
-A Frame is a single schedulable execution unit: one register state, one program
-counter, one Time, one capability table, one address space binding. The kernel
-has no "process" concept — "process" is a userspace convention (a group of
-Frames sharing a Space). Multi-threaded execution in shared memory is multiple
-Frames sharing a Space, each with its own Time. Green threads and cooperative
-concurrency are internal to a Frame (userspace, invisible to kernel).
+An Observer is a single schedulable execution unit: one register state, one
+program counter, one Time, one capability table, one address space binding. The
+kernel has no "process" concept — "process" is a userspace convention (a group
+of Observers sharing a Space). Multi-threaded execution in shared memory is
+multiple Observers sharing a Space, each with its own Time. Green threads and
+cooperative concurrency are internal to an Observer (userspace, invisible to
+kernel).
 
-The kernel provides no Frame-grouping mechanism. Grouping is neither essential
-complexity (D4 capabilities handle Frame lifecycle without the target's
-cooperation) nor workload-universal (A3 — not all workloads need groups).
-Userspace builds grouping policy from capabilities; the kernel provides the
-mechanism.
+The kernel provides no Observer-grouping mechanism. Grouping is neither
+essential complexity (D4 capabilities handle Observer lifecycle without the
+target's cooperation) nor workload-universal (A3 — not all workloads need
+groups). Userspace builds grouping policy from capabilities; the kernel provides
+the mechanism.
 
-Does NOT settle: Frame minimum schema (concrete fields need formal derivation),
-Frame-Space binding model (when/how binding occurs), Frame lifecycle operations
-(create, destroy, suspend, resume), whether Frames can share capability tables,
-or capability table structure.
+Does NOT settle: Observer minimum schema (concrete fields need formal
+derivation), Observer-Space binding model (when/how binding occurs), Observer
+lifecycle operations (create, destroy, suspend, resume), whether Observers can
+share capability tables, or capability table structure.
 
-- **Rests on:** Frame vocabulary (one Time per Frame; SMT paragraph explicitly
-  models concurrency as multi-Frame), D2 (scheduler selects Frames — one-level
-  selection), D4 (per-Frame capability table; destroy capability works without
-  target cooperation), A3 (generic — no workload assumes or requires
-  kernel-level grouping), `design/landscape.md` §4.4, §6.1 (seL4 validates
-  no-kernel-process; all surveyed systems schedule thread-level entities).
-- **Status:** settled — revisit if a downstream derivation (Frame lifecycle)
+- **Rests on:** Observer vocabulary (one Time per Observer; SMT paragraph
+  explicitly models concurrency as multi-Observer), D2 (scheduler selects
+  Observers — one-level selection), D4 (per-Observer capability table; destroy
+  capability works without target cooperation), A3 (generic — no workload
+  assumes or requires kernel-level grouping), `design/landscape.md` §4.4, §6.1
+  (seL4 validates no-kernel-process; all surveyed systems schedule thread-level
+  entities).
+- **Status:** settled — revisit if a downstream derivation (Observer lifecycle)
   reveals that the absence of kernel grouping forces essential complexity into
   userspace that capabilities alone cannot cover. (D8 settled capability table
-  structure with per-Frame tables; D10 settled first-class address spaces as the
-  sharing mechanism — no grouping pressure found.)
-- **Journal:** `journal/006-frame-is-execution-unit.md`.
+  structure with per-Observer tables; D10 settled first-class address spaces as
+  the sharing mechanism — no grouping pressure found.)
+- **Journal:** `journal/006-observer-is-execution-unit.md`.
 
 ### D7 — Split interaction model: IPC + typed kernel operations
 
 The kernel's external interface has two mechanism families: a dedicated IPC
-mechanism for Frame↔Frame peer communication, and typed kernel operation
-syscalls for Frame→Kernel resource management. The two families reflect two
-genuinely different relationships. IPC carries peer messages between Frames and
-may block, queue, or multiplex. Kernel operations act on resources (Frames,
-Spaces, capabilities) and are always synchronous.
+mechanism for Observer↔Observer peer communication, and typed kernel operation
+syscalls for Observer→Kernel resource management. The two families reflect two
+genuinely different relationships. IPC carries peer messages between Observers
+and may block, queue, or multiplex. Kernel operations act on resources
+(Observers, Spaces, capabilities) and are always synchronous.
 
 The unified model (seL4/EROS — everything through capability invocation, type
 determines operation) was rejected because it hides the trust-model asymmetry
@@ -353,7 +369,7 @@ Does NOT settle: specific syscall surface (names, signatures, count), IPC model
 mechanism, or fast-path design.
 
 - **Rests on:** A4 (purely reactive — the kernel is the exception handler, not a
-  message server; the Frame→Kernel relationship is asymmetric and the split
+  message server; the Observer→Kernel relationship is asymmetric and the split
   preserves this), D1 (hot-path dispatch — the split model's IPC hot path is
   structurally shorter by one indirection; the kernel knows the operation from
   the syscall number before touching the capability table), D4 (capability-based
@@ -372,15 +388,15 @@ mechanism, or fast-path design.
 
 ### D8 — Kernel-managed flat capability table with typed-memory backing
 
-Each Frame's capability table is a flat array of (kernel object pointer, rights
-mask) entries, managed internally by the kernel. Handles are opaque integers;
-the kernel handles slot allocation, growth, and reuse. Userspace never sees or
-manages the table's structure.
+Each Observer's capability table is a flat array of (kernel object pointer,
+rights mask) entries, managed internally by the kernel. Handles are opaque
+integers; the kernel handles slot allocation, growth, and reuse. Userspace never
+sees or manages the table's structure.
 
-The physical memory backing the table comes from the Frame's memory budget, not
-the kernel's pool. The Frame (or its creator) commits physical memory for
+The physical memory backing the table comes from the Observer's memory budget,
+not the kernel's pool. The Observer (or its creator) commits physical memory for
 capability storage. When the table is full and a new capability must be stored,
-the kernel faults the Frame; the fault handler commits more memory, then
+the kernel faults the Observer; the fault handler commits more memory, then
 retries. This provides explicit resource accounting without exposing table
 structure.
 
@@ -390,8 +406,9 @@ pushed to userspace as interface complexity. Per-core replicated tables
 (Barrelfish) were rejected on D1 + A2 grounds. Unified cap/page tables
 (Composite) were rejected on D5 + A2 grounds.
 
-Each Frame always has its own table. Table sharing between Frames is deferred to
-the Frame-Space binding model — it is not a table-structure question.
+Each Observer always has its own table. Table sharing between Observers is
+deferred to the Observer-Space binding model — it is not a table-structure
+question.
 
 Does NOT settle: handle numbering/ABA prevention, entry layout (type tag, badge,
 generation counter), revocation model, table-full fault protocol, or maximum
@@ -402,36 +419,38 @@ policy remain open.)
 
 - **Rests on:** D7 (split model narrows the table's role to designation/rights
   lookup — not dispatch; CNode tree structure serves dispatch flexibility D7
-  eliminated), D4 (per-Frame, O(1) lookup, designation = authority — flat
-  indexing satisfies O(1); per-Frame tables are the unit of authority), A5
+  eliminated), D4 (per-Observer, O(1) lookup, designation = authority — flat
+  indexing satisfies O(1); per-Observer tables are the unit of authority), A5
   (kernel absorbs complexity — CNode management is interface complexity pushed
   to userspace; flat table keeps the interface simple), D1 (hot path — one
   memory access for flat index vs. two+ for CNode tree walk), D3 (one logical
-  Space manager — table memory charged to Frame's budget through the Space
+  Space manager — table memory charged to Observer's budget through the Space
   manager), `design/research/authority-models.md` §4, §5.5 (seL4 CNode tree vs.
   Zircon flat table; namespace shape comparison), `design/landscape.md` §1.1
   (capability representation survey).
 - **Status:** settled — revisit if D7 is revised (unified model would
-  re-motivate CNode dispatch), if Frame-Space binding reveals that per-Frame
-  tables force essential sharing complexity into userspace, or if the revocation
-  model requires CDT and the absence of tree structure makes it impractical.
+  re-motivate CNode dispatch), if Observer-Space binding reveals that
+  per-Observer tables force essential sharing complexity into userspace, or if
+  the revocation model requires CDT and the absence of tree structure makes it
+  impractical.
 - **Journal:** `journal/008-capability-table-structure.md`.
 
 ### D9 — Variable-size kernel-managed memory objects
 
 The capability-designated memory resource is a variable-size, kernel-managed
-memory object. Frames hold capabilities to memory objects; the kernel allocates
-physical pages behind them and maps them into address spaces internally. Memory
-objects exist independently of any address space binding (two-step: create, then
-bind). Sharing is through capability transfer — multiple Frames holding
-capabilities to the same object. Physical backing is drawn from the Frame's
-Space; which physical pages back an object is a kernel-internal concern.
+memory object. Observers hold capabilities to memory objects; the kernel
+allocates physical pages behind them and maps them into address spaces
+internally. Memory objects exist independently of any address space binding
+(two-step: create, then bind). Sharing is through capability transfer — multiple
+Observers holding capabilities to the same object. Physical backing is drawn
+from the Observer's Space; which physical pages back an object is a
+kernel-internal concern.
 
 The seL4 untyped-memory model (userspace manages physical allocation and
 constructs page tables) was rejected: A5 forecloses pushing memory management
 complexity into userspace, and D8's precedent (kernel-managed flat capability
 table) established the pattern of kernel-internal management with resource
-accounting charged to the Frame's Space. Page-granularity objects (one
+accounting charged to the Observer's Space. Page-granularity objects (one
 capability per hardware page) were rejected: they force page size exposure,
 violate D5's CHERI forward-compatibility note, and cause capability
 proliferation.
@@ -439,7 +458,7 @@ proliferation.
 Does NOT settle: page size exposure (byte-addressed vs. page-addressed
 interface), specific operations on memory objects (create, bind, COW/clone,
 resize), object-rights, fault delegation, or precise Space-to-memory-object
-accounting relationship. (Frame-Space binding model settled by D10.)
+accounting relationship. (Observer-Space binding model settled by D10.)
 
 - **Rests on:** A5 (kernel absorbs complexity — same argument that rejected
   CNode trees in D8 applies to memory management), D5 (MMU-backed virtual
@@ -447,51 +466,51 @@ accounting relationship. (Frame-Space binding model settled by D10.)
   page-table-specific concepts), D4 (capability-designated; sharing through
   capability transfer), D7 (memory operations are typed kernel syscalls, not
   IPC), D8 (precedent: kernel-managed structure with typed-memory backing from
-  Frame's budget), D3 (Space manager is the single allocation interface; memory
-  object backing flows through it), `design/landscape.md` §2.1–2.3 (four
+  Observer's budget), D3 (Space manager is the single allocation interface;
+  memory object backing flows through it), `design/landscape.md` §2.1–2.3 (four
   families surveyed; two-step create/map dominant).
 - **Status:** settled — revisit if A5 is revised (would re-open
   userspace-managed models), or if D5's CHERI note is dropped (would re-open
-  page-specific interfaces). (Frame-Space binding model settled by D10 — no
+  page-specific interfaces). (Observer-Space binding model settled by D10 — no
   sharing pattern issues found.)
 - **Journal:** `journal/009-memory-object-model.md`.
 
 ### D10 — The address space is a first-class kernel object
 
 The address space (page table tree) is a capability-designated kernel object,
-separate from the Frame. Frames bind to an address space; multiple Frames can
-bind to the same one, sharing the page table tree, TTBR value, and ASID. Memory
-objects (D9) are mapped into the address space, not into the Frame directly. The
-address space creator's Space budget pays for the page table memory (D8
-pattern).
+separate from the Observer. Observers bind to an address space; multiple
+Observers can bind to the same one, sharing the page table tree, TTBR value, and
+ASID. Memory objects (D9) are mapped into the address space, not into the
+Observer directly. The address space creator's Space budget pays for the page
+table memory (D8 pattern).
 
 The vocabulary's "Space" remains the budget/resource-claim concept. The address
 space is a distinct object type. Working name: "address space" — final naming
 deferred to public API.
 
-The emergent model (address space as a Frame attribute, no separate object) was
-rejected on three independent paths: A5 (mapping consistency for co-located
-Frames is essential complexity pushed to userspace), D1 (TLB capacity pressure
-from per-Frame ASIDs), and D4 (cannot delegate address-space access
-independently of Frame access). The kernel needs to track shared address spaces
-internally regardless (for TLB shootdown); exposing the concept at the interface
-is simpler than inferring it.
+The emergent model (address space as an Observer attribute, no separate object)
+was rejected on three independent paths: A5 (mapping consistency for co-located
+Observers is essential complexity pushed to userspace), D1 (TLB capacity
+pressure from per-Observer ASIDs), and D4 (cannot delegate address-space access
+independently of Observer access). The kernel needs to track shared address
+spaces internally regardless (for TLB shootdown); exposing the concept at the
+interface is simpler than inferring it.
 
-API design intent (not settled as interface): Frame creation requires an
+API design intent (not settled as interface): Observer creation requires an
 explicit address space capability; creating a new address space has equal
 friction to reusing an existing one; no "share by default."
 
 Does NOT settle: binding mutability (rebindable?), address space lifecycle
-(destruction semantics), Frame creation API, capability table sharing (D8
+(destruction semantics), Observer creation API, capability table sharing (D8
 downstream, now reopenable), or address space naming.
 
 - **Rests on:** A5 (mapping consistency is essential complexity; same A5
   argument pattern as D8 and D9 — userspace rebuilds the concept if the kernel
-  omits it), D1 (TLB capacity pressure from per-Frame ASIDs on co-located
+  omits it), D1 (TLB capacity pressure from per-Observer ASIDs on co-located
   workloads; shared TTBR eliminates hot-path cost for same-address-space
-  switching), D4 (independent delegation of address-space access vs. Frame
-  access), D6 ("binding" language; "sharing a Space" = multiple Frames bound to
-  the same object), D5 (CHERI note: address space object abstracts the page
+  switching), D4 (independent delegation of address-space access vs. Observer
+  access), D6 ("binding" language; "sharing a Space" = multiple Observers bound
+  to the same object), D5 (CHERI note: address space object abstracts the page
   table), D8 (typed-memory-backing precedent for budget), vocabulary cardinality
   ("one or more Spaces" fits Space-as-budget, not Space-as-address-space),
   `design/landscape.md` §6.5 (all surveyed systems use first-class address
@@ -515,7 +534,7 @@ ABA defense, not revocation: it does not invalidate live capabilities.
 Close-only alone (Base-A) was rejected. Four structural workload patterns under
 A3 — adversarial targets, failure-mode targets, pressure response, and
 structural cascade — require terminate-by-force. For kernel-owned resources
-(Frames, address spaces, memory objects), close-only cannot express this; the
+(Observers, address spaces, memory objects), close-only cannot express this; the
 userspace construction that would substitute cannot interpose at the MMU level
 and must route through a kernel mechanism that is itself a form of authoritative
 destroy under another name. Forcing this construction into userspace violates A5
@@ -552,7 +571,7 @@ revocation interaction.
 - **Status:** settled — revisit when the IPC model decision reveals whether
   Base-B plus IPC-level mechanisms (endpoint rotation, badges) cover the
   workloads that would otherwise justify generation-as-revocation or CDT, or if
-  a downstream lifecycle derivation (Frame, address space) reveals the base
+  a downstream lifecycle derivation (Observer, address space) reveals the base
   primitive is structurally insufficient.
 - **Journal:** `journal/011-base-revocation-primitive.md`.
 
@@ -613,18 +632,18 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
 
 ## Open questions
 
-- **Time migration across cores.** When a Frame migrates to a less-loaded core,
-  does its Time allocation transfer, or is it re-allocated on the destination?
-  Affects D2's migration story.
-- **Minimum abstract scheduling properties on a Frame.** D2 says Frames carry
-  abstract scheduling properties, but the minimum set (priority? deadline?
+- **Time migration across cores.** When an Observer migrates to a less-loaded
+  core, does its Time allocation transfer, or is it re-allocated on the
+  destination? Affects D2's migration story.
+- **Minimum abstract scheduling properties on an Observer.** D2 says Observers
+  carry abstract scheduling properties, but the minimum set (priority? deadline?
   IO-bound flag? period?) is not fixed.
-- **Frame-Space cardinality formalization.** The Vocabulary section describes
-  Frames as correlating "one or more Spaces." D10 confirms Space (vocabulary)
+- **Observer-Space cardinality formalization.** The Vocabulary section describes
+  Observers as correlating "one or more Spaces." D10 confirms Space (vocabulary)
   and address space are distinct: Space is a budget concept (one or more per
-  Frame); the address space is a first-class object (one per Frame, per D6).
-  Remaining: formalize the vocabulary's "one or more" — does a Frame hold
-  multiple Space claims, or is it one claim subdivided?
+  Observer); the address space is a first-class object (one per Observer, per
+  D6). Remaining: formalize the vocabulary's "one or more" — does an Observer
+  hold multiple Space claims, or is it one claim subdivided?
 - **Revocation add-ons.** D11 settles the base primitive (close-only + destroy
   - ABA slot tag). Deferred jointly with IPC model: whether to add
     generation-as-revocation (O(1) mass invalidation; alternative is endpoint
@@ -634,23 +653,24 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
     authorizes destroy; strong vs. weak cross-core prompt-effect policy; destroy
     cleanup protocol (inline vs. preemptible). Each add-on's value-vs-cost
     depends on what IPC-level mechanisms exist.
-- **Frame minimum schema.** D6 settles that a Frame is a single execution unit.
-  The concrete field set (register state, TTBR, capability table pointer, Time
-  binding, scheduling state, fault handler) needs formal derivation in the
+- **Observer minimum schema.** D6 settles that an Observer is a single execution
+  unit. The concrete field set (register state, TTBR, capability table pointer,
+  Time binding, scheduling state, fault handler) needs formal derivation in the
   current chain. Archive journal/004 derived a first-principles minimum.
 - **Address space binding mutability.** D10 settles the address space as a
-  first-class object that Frames bind to. Open: is the binding immutable (set at
-  Frame creation) or rebindable at runtime? If rebindable, what happens to TLB
-  entries when a Frame changes address space?
-- **Frame lifecycle.** Create, destroy, suspend, resume. Whether Frame is a
-  capability-held object type (archive journal/013 said yes). Interacts with D4
-  and D7 (lifecycle operations are typed kernel syscalls under the split model).
-- **Can Frames share capability tables?** D8 settles per-Frame tables with no
-  sharing. D10 settles first-class address spaces with multi-Frame binding —
-  same-address-space Frame groups are now a supported pattern. Revisit as a D8
-  downstream: does same-address-space sharing create sufficient pressure for
-  shared capability tables, or is per-Frame authority (with explicit capability
-  transfer) sufficient?
+  first-class object that Observers bind to. Open: is the binding immutable (set
+  at Observer creation) or rebindable at runtime? If rebindable, what happens to
+  TLB entries when an Observer changes address space?
+- **Observer lifecycle.** Create, destroy, suspend, resume. Whether Observer is
+  a capability-held object type (archive journal/013 said yes). Interacts with
+  D4 and D7 (lifecycle operations are typed kernel syscalls under the split
+  model).
+- **Can Observers share capability tables?** D8 settles per-Observer tables with
+  no sharing. D10 settles first-class address spaces with multi-Observer binding
+  — same-address-space Observer groups are now a supported pattern. Revisit as a
+  D8 downstream: does same-address-space sharing create sufficient pressure for
+  shared capability tables, or is per-Observer authority (with explicit
+  capability transfer) sufficient?
 - **Interrupt model (device interrupts, not exceptions).** Who owns device
   interrupts? Per-core or routed? Kernel-handled or delegated to userspace
   drivers?
@@ -662,7 +682,7 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   interface.
 - **Fault delegation model.** D5 means page faults occur (MMU generates them on
   unmapped access). Open: kernel resolves faults internally, or forwards to
-  userspace pager Frames? Interacts with A4 (reactive), A5 (complexity
+  userspace pager Observers? Interacts with A4 (reactive), A5 (complexity
   placement).
 - **IPC model.** D7 settles the split interaction model but not the IPC
   mechanism itself. Synchronous register-based (L4/seL4 tradition) vs.
@@ -672,9 +692,9 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   split decision.
 - **Specific syscall surface.** D7 settles two mechanism families but not the
   exact set. The archive's 10-syscall design is a data point. Depends on IPC
-  model, Frame lifecycle, and D9 (memory objects).
+  model, Observer lifecycle, and D9 (memory objects).
 - **Address space lifecycle.** D10 introduces the address space as a kernel
-  object. When is it destroyed? Last capability dropped? Last Frame unbound?
+  object. When is it destroyed? Last capability dropped? Last Observer unbound?
   Interacts with revocation model.
 - **Boot / bring-up model.** BSP-then-APs vs symmetric bring-up. Touches A2 but
   not derived.
@@ -686,7 +706,7 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
 - `001-per-core-hot-path.md` — reasoning for D1: hot/cold split, IPI
   coordination, landscape check vs seL4 BKL and Barrelfish multikernel.
 - `002-per-core-schedulers.md` — reasoning for D2: per-core algorithms, abstract
-  vs algorithm-specific properties on the Frame, migration implications.
+  vs algorithm-specific properties on the Observer, migration implications.
 - `003-space-manager-interface.md` — reasoning for D3: single interface
   commitment with topology-aware implementation as leaf node; why the archive's
   "small cache-coherent SoC" framing was not load-bearing for the allocator
@@ -698,9 +718,10 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   (A2 hardware requires MMU; A3+A5 require hardware isolation; philosophy) all
   converge on MMU-backed virtual memory; all alternatives foreclosed by axioms
   or hardware facts; CHERI forward-compatibility noted.
-- `006-frame-is-execution-unit.md` — reasoning for D6: vocabulary + D2 force
-  Frame = single schedulable entity; no kernel grouping because D4 capabilities
-  handle lifecycle and A3 makes grouping non-universal; seL4 validates approach.
+- `006-observer-is-execution-unit.md` — reasoning for D6: vocabulary + D2 force
+  Observer = single schedulable entity; no kernel grouping because D4
+  capabilities handle lifecycle and A3 makes grouping non-universal; seL4
+  validates approach.
 - `007-scope-of-capability-mediation.md` — reasoning for D7: A4 trust-model
   asymmetry, D1 hot-path dispatch, IPC model coupling all favor split; unified
   hides trust boundary; full fragmentation rejected on A5; archive convergence.
@@ -708,7 +729,7 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   to designation/rights lookup (not dispatch), removing CNode tree
   justification; A5 confirms CNode management is interface complexity;
   typed-memory backing for explicit accounting; table sharing deferred to
-  Frame-Space binding.
+  Observer-Space binding.
 - `009-memory-object-model.md` — reasoning for D9: D8 precedent (kernel-managed,
   typed-memory backing) extends to memory; A5 rejects seL4 userspace-managed
   model; page-granularity rejected on D5 CHERI note; Space vocabulary provides

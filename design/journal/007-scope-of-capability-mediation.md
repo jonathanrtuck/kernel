@@ -35,14 +35,14 @@ syscall. Large surface. 50–170+ syscalls.
 
 A4 (purely reactive) means the kernel is the exception handler, not a server. It
 runs because hardware forced an exception, not because someone sent it a
-message. The Frame→Kernel relationship is fundamentally asymmetric: the kernel
-always handles, always synchronously, always in EL1, and cannot choose not to
-respond. Frame→Frame IPC is a peer relationship — the receiver chooses when to
-wait, and the interaction may be synchronous or asynchronous.
+message. The Observer→Kernel relationship is fundamentally asymmetric: the
+kernel always handles, always synchronously, always in EL1, and cannot choose
+not to respond. Observer→Observer IPC is a peer relationship — the receiver
+chooses when to wait, and the interaction may be synchronous or asynchronous.
 
-The unified model smooths over this asymmetry — both Frame→Kernel and
-Frame→Frame look like "invoke a capability." The split model preserves it —
-syscalls and IPC are different mechanisms reflecting different trust
+The unified model smooths over this asymmetry — both Observer→Kernel and
+Observer→Observer look like "invoke a capability." The split model preserves it
+— syscalls and IPC are different mechanisms reflecting different trust
 relationships.
 
 The archive (restart-1, journal 013) reached the same observation from a
@@ -50,10 +50,10 @@ different angle: "the parent isn't telling the child to kill — it's telling th
 kernel to kill the child. The kernel is the actor, not a peer. Dressing kernel
 operations as IPC obscures the trust model."
 
-Applying "design boundaries that match the shape" (philosophy): the Frame→Kernel
-and Frame→Frame relationships are genuinely different in trust level, synchrony,
-and mechanism. The split model's two mechanism families match this shape. The
-unified model's single mechanism hides it.
+Applying "design boundaries that match the shape" (philosophy): the
+Observer→Kernel and Observer→Observer relationships are genuinely different in
+trust level, synchrony, and mechanism. The split model's two mechanism families
+match this shape. The unified model's single mechanism hides it.
 
 ### D4's "designation = authority" is orthogonal
 
@@ -91,12 +91,12 @@ interaction model are coupled:
 
 Async IPC introduces substantial kernel-managed state (message queues, channel
 lifecycle, multiplexing) that is different in kind from resource operations like
-"create Frame" or "map memory." The split model's two mechanism families align
-naturally with this behavioral difference: IPC operations may block, queue, or
-multiplex; kernel resource operations are always synchronous. A unified model
-strains when these behavioral profiles diverge — the uniform `invoke` syntax
-hides real differences in blocking behavior, memory allocation, and
-multiplexing.
+"create Observer" or "map memory." The split model's two mechanism families
+align naturally with this behavioral difference: IPC operations may block,
+queue, or multiplex; kernel resource operations are always synchronous. A
+unified model strains when these behavioral profiles diverge — the uniform
+`invoke` syntax hides real differences in blocking behavior, memory allocation,
+and multiplexing.
 
 The designer confirmed a lean toward async IPC, which reinforces the split
 model: the behavioral domains (messaging vs. resource ops) map naturally to two
@@ -118,7 +118,7 @@ boundary.
 
 ### Transparent interposition
 
-The unified model provides transparent interposition: a child Frame calling
+The unified model provides transparent interposition: a child Observer calling
 `invoke(cap, ...)` cannot distinguish whether the cap points to a real kernel
 object or to a proxy endpoint. In the split model, a child making a typed kernel
 syscall goes directly to the kernel — a proxy cannot transparently intercept it.
@@ -198,9 +198,9 @@ paths converge, trust the convergence" (philosophy).
 
 **Accepted as `spec.md#D7` — settled.**
 
-Split interaction model: dedicated IPC mechanism for Frame↔Frame communication,
-typed kernel operation syscalls for Frame→Kernel resource operations. Full
-fragmentation (Zircon-style) rejected.
+Split interaction model: dedicated IPC mechanism for Observer↔Observer
+communication, typed kernel operation syscalls for Observer→Kernel resource
+operations. Full fragmentation (Zircon-style) rejected.
 
 Revisit if: (1) a downstream derivation reveals that the IPC/kernel-op boundary
 cannot be drawn principally — if too many operations are ambiguous, the split

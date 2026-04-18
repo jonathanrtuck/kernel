@@ -1,12 +1,12 @@
 # Capability Table Structure — 2026-04-16
 
 Eighth exploration. How should the kernel organize and resolve capabilities
-per-Frame? The table that maps opaque integer handles to (kernel object, rights
-mask) — who owns its structure, and what shape does it take?
+per-Observer? The table that maps opaque integer handles to (kernel object,
+rights mask) — who owns its structure, and what shape does it take?
 
 ## Starting point
 
-D4 settles capability-based authority with per-Frame capability tables. D7
+D4 settles capability-based authority with per-Observer capability tables. D7
 settles a split interaction model where the syscall number encodes the operation
 before the capability table is consulted. The table's role is narrower than in a
 unified model: it is a designation/rights lookup, not a dispatch structure.
@@ -24,7 +24,7 @@ that affect dispatch.
 
 D7 eliminates dispatch from the table's responsibilities. The kernel already
 knows the operation from the syscall number. The table is consulted for one
-thing: "does this Frame hold a capability to resource X with right Y?" Each
+thing: "does this Observer hold a capability to resource X with right Y?" Each
 entry is a value — (object pointer, rights mask) — not a dispatch target. The
 minimum sufficient structure is: integer handle → (object, rights). This is a
 lookup table.
@@ -51,7 +51,7 @@ chooses the structuring policy.
 
 **Rejected:** D2's argument rests on A3 (generic, can't mandate one scheduling
 algorithm). But scheduling algorithms are behind the scheduler interface — the
-Frame carries abstract properties, and algorithm-specific state lives in the
+Observer carries abstract properties, and algorithm-specific state lives in the
 leaf (the per-core scheduler). Authority-space structure is NOT behind an
 interface — it IS the interface. CNode tree structure determines how handles
 work, how delegation works, how sharing works. It's connective tissue, not a
@@ -69,52 +69,52 @@ well-mitigated: growth is cold-path (D1), amortized doubling handles diverse
 workloads, and Zircon/Mach ship successfully with kernel-managed sizing.
 
 The remaining concern: memory accounting. Under a pure kernel-managed model, the
-kernel allocates table memory from its own pool. The Frame doesn't see the cost.
-A Frame acquiring thousands of capabilities consumes kernel memory with no
-explicit accounting — a resource exhaustion vector.
+kernel allocates table memory from its own pool. The Observer doesn't see the
+cost. An Observer acquiring thousands of capabilities consumes kernel memory
+with no explicit accounting — a resource exhaustion vector.
 
 The CNode model solves this by making CNodes typed objects allocated from the
-Frame's physical memory budget. But this bundles accounting with tree structure.
-These are separable concerns.
+Observer's physical memory budget. But this bundles accounting with tree
+structure. These are separable concerns.
 
 **Resolution:** The kernel manages the table structure (flat array, growth
 strategy, slot reuse) but the physical memory backing the table comes from the
-Frame's memory budget. The Frame (or its creator) commits physical memory for
-capability storage. When more slots are needed, more memory must be committed.
-The kernel manages the layout; the Frame controls the budget.
+Observer's memory budget. The Observer (or its creator) commits physical memory
+for capability storage. When more slots are needed, more memory must be
+committed. The kernel manages the layout; the Observer controls the budget.
 
 This gives:
 
 - A5 satisfied — kernel absorbs structural complexity
-- Explicit accounting — table size bounded by Frame's physical memory budget
+- Explicit accounting — table size bounded by Observer's physical memory budget
 - D7 aligned — flat lookup map for a flat lookup role
 - D1 aligned — one memory access per capability lookup
 
 When a capability transfer arrives and the table is full, the kernel faults the
-Frame ("table full"). The fault handler (supervisor) commits more memory, then
-retries. This mirrors how page faults work under D5 — the Frame doesn't pre-map
-all memory, faults trigger allocation.
+Observer ("table full"). The fault handler (supervisor) commits more memory,
+then retries. This mirrors how page faults work under D5 — the Observer doesn't
+pre-map all memory, faults trigger allocation.
 
 ## Capability table sharing
 
-**Considered:** Can Frames share a capability table?
+**Considered:** Can Observers share a capability table?
 
-In a capability system, the natural model for multi-Frame parallelism is
-separate Frames with separate address spaces sharing specific memory objects via
-capabilities — not Frames sharing an entire address space (the POSIX threads
-model). Each Frame has its own trust domain. They SHOULD have separate
-authority. A shared memory buffer between Frames does not imply shared authority
-over everything else.
+In a capability system, the natural model for multi-Observer parallelism is
+separate Observers with separate address spaces sharing specific memory objects
+via capabilities — not Observers sharing an entire address space (the POSIX
+threads model). Each Observer has its own trust domain. They SHOULD have
+separate authority. A shared memory buffer between Observers does not imply
+shared authority over everything else.
 
 The "POSIX threads" model (same address space, same file descriptor table) is a
 specific pattern where table sharing makes ergonomic sense. But whether this
-kernel supports same-address-space Frame groups is the open Frame-Space binding
-model question — it is not a capability table question.
+kernel supports same-address-space Observer groups is the open Observer-Space
+binding model question — it is not a capability table question.
 
-**Decision:** Each Frame always has its own capability table. Table sharing is
-deferred to the Frame-Space binding model. If that derivation later settles on
-supporting same-address-space Frame groups, table sharing can be reconsidered as
-a downstream consequence.
+**Decision:** Each Observer always has its own capability table. Table sharing
+is deferred to the Observer-Space binding model. If that derivation later
+settles on supporting same-address-space Observer groups, table sharing can be
+reconsidered as a downstream consequence.
 
 ## Foreclosed alternatives
 
@@ -122,9 +122,9 @@ a downstream consequence.
 CNode trees structurally serve. A5 creates genuine tension with CNode management
 pushed to userspace. The CNode model's advantages (CDT revocation, partial
 subtree sharing) either have alternative solutions (revocation via other
-mechanisms) or are downstream of decisions not yet made (Frame-Space binding).
-Its costs (expanded syscall surface for CNode operations, two+ memory accesses
-per lookup, userspace authority-space management burden) are real.
+mechanisms) or are downstream of decisions not yet made (Observer-Space
+binding). Its costs (expanded syscall surface for CNode operations, two+ memory
+accesses per lookup, userspace authority-space management burden) are real.
 
 A5 is not load-bearing here in the sense of "A5 alone forces the decision."
 Rather: D7 removes the CNode model's structural justification, and A5 confirms
@@ -162,7 +162,7 @@ flat model.
 to CNode trees.
 
 No surveyed system uses the specific combination of flat kernel-managed table
-with typed-memory backing (Frame pays from its own budget). This is a novel
+with typed-memory backing (Observer pays from its own budget). This is a novel
 position. The novelty is in the accounting model, not the table structure — the
 flat table itself is well-validated.
 
@@ -190,9 +190,9 @@ used implicit kernel-pool accounting.
   structure — whether that's needed is the revocation question.
 - **Table-full fault protocol.** Exact mechanism for "table full" faults and the
   commit-more-memory interaction. Depends on fault delegation model.
-- **Frame-Space binding and table sharing.** Deferred.
-- **Maximum table size.** Bounded by the Frame's physical memory budget, but any
-  kernel-imposed hard cap is a separate policy question.
+- **Observer-Space binding and table sharing.** Deferred.
+- **Maximum table size.** Bounded by the Observer's physical memory budget, but
+  any kernel-imposed hard cap is a separate policy question.
 
 ## Status
 
@@ -202,9 +202,10 @@ Revisit if:
 
 - D7 is revised (a move to unified model would re-motivate CNode trees as
   dispatch structures)
-- The Frame-Space binding model reveals that same-address-space Frame groups
-  need shared capability tables and the per-Frame-table model forces essential
-  complexity into userspace that cannot be covered by capability transfer alone
+- The Observer-Space binding model reveals that same-address-space Observer
+  groups need shared capability tables and the per-Observer-table model forces
+  essential complexity into userspace that cannot be covered by capability
+  transfer alone
 - The revocation model requires CDT and the absence of tree structure makes CDT
   impractical (would pressure toward CNode structure or a separate derivation
   tree)

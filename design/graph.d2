@@ -1,12 +1,13 @@
 # Kernel structural map.
 #
 # Populated from design/spec.md derivations D1-D6, D8-D11, observations O2-O3,
-# and Vocabulary (Space, Time, Frame). Every box and edge has a corresponding
-# spec.md entry; items labeled "TBD" await downstream derivation.
+# and Vocabulary (Space, Time, Observer, Coordinate System). Every box and edge
+# has a corresponding spec.md entry; items labeled "TBD" await downstream
+# derivation.
 #
-# Intentionally absent (pending derivation): specific syscall surface, Frame
+# Intentionally absent (pending derivation): specific syscall surface, Observer
 # minimum schema, IPC mechanism (sync/async/hybrid), revocation add-ons
-# (generation, CDT, badges — base settled in D11), fault delegation, Frame
+# (generation, CDT, badges — base settled in D11), fault delegation, Observer
 # lifecycle, per-physical-core concerns (power, thermal, shared cache/TLB).
 # See spec.md#Open questions.
 #
@@ -22,7 +23,7 @@ kernel: {
     style.multiple: true
     # Per logical core (spec.md#D1).
     # Owns the per-core hot path: exception entry, state update,
-    # next-Frame selection, resumption.
+    # next-Observer selection, resumption.
     #
     # External entry surface (exception vector) is intentionally
     # not drawn as a single interface node — the three sources
@@ -34,13 +35,13 @@ kernel: {
       label: Time manager
       # Per Core manager (spec.md#D2).
       # Scheduling algorithm is a leaf-node, swappable per core.
-      # Carries algorithm-specific state; Frame carries only
+      # Carries algorithm-specific state; Observer carries only
       # abstract scheduling properties.
 
       interface: {
         shape: class
-        # In: Frame's abstract scheduling properties.
-        # Out: next Frame to resume.
+        # In: Observer's abstract scheduling properties.
+        # Out: next Observer to resume.
         # D2: algorithm-specific state stays inside.
       }
     }
@@ -59,48 +60,48 @@ kernel: {
   }
 
   memory-object: {
-    label: Memory object
+    label: Space
     style.multiple: true
     # D9: variable-size, kernel-managed.
     # Designated by capabilities. Exists independently of
     # address space binding (two-step: create, then bind).
-    # Physical backing drawn from Frame's Space; which
+    # Physical backing drawn from Observer's Space; which
     # physical pages back the object is kernel-internal.
-    # Sharing: multiple Frames hold capabilities to same object.
+    # Sharing: multiple Observers hold capabilities to same object.
   }
 
-  frame: {
-    label: Frame
+  observer: {
+    label: Observer
     style.multiple: true
     # D6: single schedulable execution unit.
     # One register state, one Time, one capability table,
     # one address space binding (D10: binds to first-class
     # address space object). "Process" is a userspace
-    # convention (group of Frames sharing an address space).
+    # convention (group of Observers sharing an address space).
     # Minimum schema TBD (spec.md#Open questions).
 
     capabilities: {
       label: Capability table
-      # D8: kernel-managed flat array, per-Frame (D4 + D1).
+      # D8: kernel-managed flat array, per-Observer (D4 + D1).
       # Each entry: (kernel object ref, rights mask).
       # Handles carry a generational slot tag (D11) — bumped on
       # slot reuse, prevents stale-handle aliasing. ABA defense,
       # not revocation; does not invalidate live capabilities.
-      # Backed by typed memory from Frame's budget.
+      # Backed by typed memory from Observer's budget.
       # O(1) lookup via handle index.
       # Revocation primitive: close-only (refcount on drop) +
       # authoritative destroy (D11). Add-ons deferred with IPC.
-      # Table sharing: D10 enables same-AS Frame groups;
+      # Table sharing: D10 enables same-AS Observer groups;
       # whether they share cap tables is open (D8 downstream).
     }
   }
 
   address-space: {
-    label: address space
+    label: Coordinate System
     style.multiple: true
     # D10: first-class, capability-designated kernel object.
     # Contains the page table tree (virtual→physical mappings).
-    # Frames bind to an address space; multiple Frames can
+    # Observers bind to an address space; multiple Observers can
     # share one (same TTBR, same ASID, shared TLB entries).
     # Memory objects (D9) are mapped into the address space.
     # Creator's Space budget pays for page table memory (D8 pattern).
@@ -115,7 +116,7 @@ hardware: {
   memory
   mmu: {
     label: MMU
-    # D5: per-core, programs TTBR to current Frame's page tables.
+    # D5: per-core, programs TTBR to current Observer's page tables.
     # Enforces virtual-to-physical translation and memory attributes
     # (cacheability, permissions) on every access.
   }
@@ -139,32 +140,32 @@ kernel.core-manager.time-manager -> hardware.core: timer programming
 kernel.space-manager -> hardware.mmu: page table updates
 hardware.mmu -> hardware.memory: translated access
 
-# D4: Core manager resolves capabilities from the running Frame's
+# D4: Core manager resolves capabilities from the running Observer's
 # table during syscall handling (hot path, per-core).
-kernel.core-manager -> kernel.frame.capabilities: resolve (hot path)
+kernel.core-manager -> kernel.observer.capabilities: resolve (hot path)
 
 # D5 + D10: Core manager loads address space TTBR on context switch (hot path).
 # Same address space → same TTBR → skip reload.
 kernel.core-manager -> kernel.address-space: TTBR load (hot path)
 
 # Capabilities designate kernel objects (Space, Time, memory objects, etc.).
-# The capability table connects Frames to the resources they
+# The capability table connects Observers to the resources they
 # are authorized to use.
-kernel.frame.capabilities -> kernel.memory-object: designate (D4, D9)
-kernel.frame.capabilities -> kernel.address-space: designate (D4, D10)
-# D10: Frame binds to address space (one binding per Frame; many Frames per AS).
-kernel.frame -> kernel.address-space: binds to (D10)
+kernel.observer.capabilities -> kernel.memory-object: designate (D4, D9)
+kernel.observer.capabilities -> kernel.address-space: designate (D4, D10)
+# D10: Observer binds to address space (one binding per Observer; many Observers per AS).
+kernel.observer -> kernel.address-space: binds to (D10)
 # D9: Space manager allocates physical backing for memory objects.
 kernel.space-manager -> kernel.memory-object: physical backing
 # D10: Space manager also backs address space page tables (D8 pattern).
 kernel.space-manager -> kernel.address-space: page table backing
-# D9 + D10: Memory objects are mapped into address spaces, not Frames directly.
+# D9 + D10: Memory objects are mapped into address spaces, not Observers directly.
 kernel.memory-object -> kernel.address-space: mapped into (D9, D10)
-kernel.frame.capabilities -> kernel.core-manager.time-manager: Time capabilities
+kernel.observer.capabilities -> kernel.core-manager.time-manager: Time capabilities
 
 # External interface: two mechanism families (D7).
-# 1. Typed kernel operation syscalls (Frame -> Kernel, always synchronous).
-# 2. IPC syscalls (Frame <-> Frame, mechanism TBD).
+# 1. Typed kernel operation syscalls (Observer -> Kernel, always synchronous).
+# 2. IPC syscalls (Observer <-> Observer, mechanism TBD).
 # Both are capability-mediated (D4). The split reflects the
 # trust-model asymmetry: kernel is exception handler (A4),
 # not a peer.

@@ -1,12 +1,12 @@
 # Memory Object Model — 2026-04-16
 
 Ninth exploration. Derived the nature of the capability-designated memory
-resource: what kernel object type do Frames hold capabilities to in order to use
-memory?
+resource: what kernel object type do Observers hold capabilities to in order to
+use memory?
 
 ## Starting point
 
-D5 settled MMU-backed virtual memory with per-Frame address spaces and listed
+D5 settled MMU-backed virtual memory with per-Observer address spaces and listed
 "memory object model" as one level down. D4 settled capability-based authority.
 D8 settled kernel-managed flat capability tables with typed-memory backing. The
 open question (spec.md): "what is the capability-designated memory resource?
@@ -36,8 +36,8 @@ Working through every axiom and derivation:
 2. **Operations on it are typed kernel syscalls** (D7). Create, destroy, bind to
    address space — all kernel operations, not IPC.
 
-3. **Sharing is through capability transfer** (D4 + D6). Two Frames share memory
-   by holding capabilities to the same resource.
+3. **Sharing is through capability transfer** (D4 + D6). Two Observers share
+   memory by holding capabilities to the same resource.
 
 4. **Physical backing flows through the Space manager** (D3). No bypassing the
    single allocation interface.
@@ -51,9 +51,9 @@ Working through every axiom and derivation:
 ### The D8 precedent
 
 D8 settled: kernel-managed structure (not userspace-managed), flat (not
-tree-structured), physical memory charged to the Frame's budget. The reasoning
-was: D7 eliminates the dispatch role that motivated trees, and A5 creates
-tension with management-complexity pushed to userspace.
+tree-structured), physical memory charged to the Observer's budget. The
+reasoning was: D7 eliminates the dispatch role that motivated trees, and A5
+creates tension with management-complexity pushed to userspace.
 
 This precedent is load-bearing. The same A5 argument that rejected CNode trees
 (userspace managing capability table structure is interface complexity) applies
@@ -75,7 +75,7 @@ argument applies with equal force to the entire untyped-memory model.
 
 The accounting concern (seL4's explicit userspace-visible accounting prevents
 resource exhaustion bugs) is real but does not require userspace management.
-D8's pattern (kernel manages internally, charges physical memory to Frame's
+D8's pattern (kernel manages internally, charges physical memory to Observer's
 budget) provides accounting without management burden.
 
 ### D5's CHERI note
@@ -125,13 +125,13 @@ itself). The forced page size exposure directly contradicts D5's CHERI note.
 
 **B vs. C dissolved.** The Space vocabulary already describes the budget
 concept: "a claim to a portion of the system's bounded memory resource." A
-Frame's Spaces are its memory budget. Subdividing Space is budget delegation.
+Observer's Spaces are its memory budget. Subdividing Space is budget delegation.
 The total conserves because Space is bounded. Option C's explicit budget was
 already Space. B vs. C is not a real fork — it's the same answer.
 
 **Accounting transparency is a non-issue.** The "less transparent physical
 accounting" listed as a cost of Option B assumes userspace needs to know its
-physical page count. It doesn't. A Frame needs to know whether an allocation
+physical page count. It doesn't. An Observer needs to know whether an allocation
 succeeded (error return) and how much Space it has (queryable). Which physical
 pages back an object, how much tail waste exists, whether huge pages were used —
 these are kernel-internal concerns. The kernel enforcing limits internally is A5
@@ -177,11 +177,11 @@ with another), not physical address binding.
   address spaces internally (A5 + D8 precedent).
 - Memory objects exist independently of address space binding (two-step: create,
   then bind). Follows from D4 capability semantics.
-- Sharing is through capability transfer — multiple Frames hold capabilities to
-  the same object.
-- Physical backing is drawn from the Frame's Space; which physical pages back an
-  object is a kernel-internal concern.
-- Space (from the vocabulary) serves as the accounting mechanism: a Frame's
+- Sharing is through capability transfer — multiple Observers hold capabilities
+  to the same object.
+- Physical backing is drawn from the Observer's Space; which physical pages back
+  an object is a kernel-internal concern.
+- Space (from the vocabulary) serves as the accounting mechanism: an Observer's
   Space claims are its memory budget.
 
 **Not settled (one level down):**
@@ -191,8 +191,8 @@ with another), not physical address binding.
 - Specific operations on memory objects (create, bind, COW/clone, resize,
   subdivide).
 - Object-rights (read, write, execute is likely but not derived here).
-- Fault delegation (who handles page faults when a Frame accesses unmapped
+- Fault delegation (who handles page faults when an Observer accesses unmapped
   virtual memory).
 - Precise Space-to-memory-object relationship (is creating an object a Space
   subdivision? How is Space consumed and returned?).
-- Frame-Space binding model (how Frames attach to address spaces).
+- Observer-Space binding model (how Observers attach to address spaces).

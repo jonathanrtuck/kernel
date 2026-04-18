@@ -48,14 +48,14 @@ factory/yield for architectural revocation; Coyotos uses non-delegable opaque
 capabilities; Mach destroys receive rights; Genode destroys children top-down;
 Barrelfish uses two-phase cross-core messaging (~1ms per 2-core revoke, Nevill
 2012). Research documents: `authority-models.md` §5.2 tabulates costs per
-system, §6.3 documents seL4's unbounded-revocation WCET concern addressed by
-MCS preemption points; `capability-revocation.md` organizes the mechanism
-space (close-only, authoritative destroy, CDT traversal, link chain,
-generation numbers) with cost-at-revoke vs. cost-at-use comparison and
-stale-capability discovery modes (eager nulling vs. lazy on-use detection),
-citing Coyotos's lazy-rewrite allocation-count pattern, SemperOS's
-cross-kernel-domain cost multipliers, and L4.Sec's versioned thread-ID
-experiment as additional data points.
+system, §6.3 documents seL4's unbounded-revocation WCET concern addressed by MCS
+preemption points; `capability-revocation.md` organizes the mechanism space
+(close-only, authoritative destroy, CDT traversal, link chain, generation
+numbers) with cost-at-revoke vs. cost-at-use comparison and stale-capability
+discovery modes (eager nulling vs. lazy on-use detection), citing Coyotos's
+lazy-rewrite allocation-count pattern, SemperOS's cross-kernel-domain cost
+multipliers, and L4.Sec's versioned thread-ID experiment as additional data
+points.
 
 ---
 
@@ -77,8 +77,8 @@ structure. Treating the four as parallel options obscures the actual shape.
 
 **Base-A: close-only (pure refcount).** A capability's lifetime is bounded only
 by its holders. When the last holder closes it, the object is freed. No entity
-can authoritatively invalidate a capability held by another Frame. This is the
-archive's tentative default.
+can authoritatively invalidate a capability held by another Observer. This is
+the archive's tentative default.
 
 **Base-B: close-only + authoritative destroy.** The default revocation is
 close-only. In addition, an entity holding sufficient authority can destroy the
@@ -102,7 +102,7 @@ serve the workload, under A3's generic coverage:
   teardown on server disconnect; container orchestration with force-stop.
 
 Without destroy at the kernel level, workloads in these patterns must construct
-force-termination in userspace. For kernel-owned resources (Frames, address
+force-termination in userspace. For kernel-owned resources (Observers, address
 spaces, memory objects), the userspace construction cannot interpose on
 MMU-level access — it would have to route through another kernel mechanism,
 which would itself be a form of authoritative destroy under a different name.
@@ -115,7 +115,7 @@ forecloses it. Destroy must be part of the base primitive.
 Three candidate add-ons:
 
 - **Generation-as-revocation.** Mass invalidation at O(1). Cost: ~1-2 cycles per
-  capability check on every Frame (universal payment for non-universal need —
+  capability check on every Observer (universal payment for non-universal need —
   similar in shape to the hot-path asymmetry D1 was designed to avoid). ~4-8
   bytes per table entry, accounted via D3.
 - **CDT.** Selective revocation of a subtree. Cost: separate kernel data
@@ -135,9 +135,9 @@ userspace would otherwise use:
 - _Selective revocation without CDT:_ badges (service-enforced) or proxy
   indirection (userspace proxy mediates). Both require IPC.
 - _Selective revocation of kernel-owned resources without CDT:_ only
-  destroy-the-holding-Frame (Base-B destroy applied to the Frame). Works for
-  "stop A from running" cases; does not support "retract one cap while keeping A
-  alive."
+  destroy-the-holding-Observer (Base-B destroy applied to the Observer). Works
+  for "stop A from running" cases; does not support "retract one cap while
+  keeping A alive."
 
 **The dependency.** Each alternative requires the IPC model to have specific
 properties — endpoint-like objects for endpoint rotation, per-message tag
@@ -221,8 +221,8 @@ Three paths land at Base-B + ABA:
 - **ABA tag size and encoding.** 8, 16, 32 bits; embedded in handle or stored
   alongside.
 - **Budget treatment of freed slots.** When a slot is closed, is its backing
-  table memory returned to the Frame's Space or held in the committed pool for
-  reuse?
+  table memory returned to the Observer's Space or held in the committed pool
+  for reuse?
 - **Table-full fault ↔ revocation interaction.** D8 deferred the table-full
   fault protocol; revocation's slot-reclamation interacts with it.
 
@@ -255,5 +255,5 @@ Revisit if:
   rotation, badges) do not cover A3-workload needs that generation-as-revocation
   or CDT would otherwise serve.
 - A5 is revised (would re-open Base-A).
-- A downstream lifecycle derivation (Frame, address space) reveals the base
+- A downstream lifecycle derivation (Observer, address space) reveals the base
   primitive is structurally insufficient for a specific pattern.

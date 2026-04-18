@@ -33,9 +33,9 @@ derivation: commitment 2 baked a topology assumption into the kernel's skeleton.
 A2 (ARM64) covers hardware ranging from small cache-coherent SoCs (Apple
 silicon, 4–8 cores, uniform memory) to multi-socket NUMA servers (AmpereOne,
 Graviton, 64+ cores, 1.5–3× memory latency deltas across nodes). On NUMA
-hardware, a single global pool without topology awareness gives a Frame memory
-from a region that may be remote to the core it runs on; the Frame pays that
-latency cost on every memory access, not just at allocation time.
+hardware, a single global pool without topology awareness gives an Observer
+memory from a region that may be remote to the core it runs on; the Observer
+pays that latency cost on every memory access, not just at allocation time.
 
 Applying "push complexity outward to the leaves" (philosophy.md) fractally
 within the kernel's own internal tree: topology-specific complexity belongs
@@ -55,7 +55,7 @@ predecessor.)
 A3 (generic kernel) reinforces this: we cannot assume workload shape, and
 therefore we cannot assume a regime in which single-pool contention and
 NUMA-blindness don't bite. A workload shape we cannot exclude (many short-lived
-Frames on a server-class chip) is one where single-pool commitment would be
+Observers on a server-class chip) is one where single-pool commitment would be
 pathological. A2 and A3 together make the NUMA concern load-bearing rather than
 hypothetical: A2 puts the hardware in scope, A3 forbids ruling it out by
 workload assumption.
@@ -68,7 +68,7 @@ derivation will rely on:
 - **One source of truth for Space accounting.** Total memory in the system
   equals the sum of what the Space manager has allocated plus what it has free.
   Conservation is trivially statable.
-- **Single escalation target for resource faults.** When a Frame needs more
+- **Single escalation target for resource faults.** When an Observer needs more
   Space and faults upward to its handler, the terminal escalation in the fault
   chain is the Space manager. There is one place the kernel's resource-policy
   decisions live (noted in archive journal 013 as a convergence point).
@@ -111,7 +111,7 @@ inline, not listed as an axiom) — makes D3 robust across A2's full range.
 ### D1's role
 
 D1 (per-core hot path, shared cold path) is cited because allocation is
-cold-path work. Space allocation happens at Frame creation and in response to
+cold-path work. Space allocation happens at Observer creation and in response to
 resource-escalation faults — not on the context-switch hot path. That placement
 is what makes interface-level simplicity cheap: consumers of the Space manager
 interface are not context-switch- frequency callers. The interface can be

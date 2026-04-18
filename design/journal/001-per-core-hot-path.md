@@ -81,13 +81,13 @@ state; infrequent cross-core work routes through an explicitly shared cold path.
 Hot path (per-core, no shared state):
 
 - Exception entry.
-- Frame state update.
+- Observer state update.
 - Scheduler pick.
 - Resumption.
 
 Cold path (shared, infrequent):
 
-- Frame migration between cores.
+- Observer migration between cores.
 - Cross-core message delivery.
 - Shared resource allocation (the Space manager interface, D3).
 - Capability operations that cross cores.
@@ -142,7 +142,7 @@ operation turns out to be frequent enough to contend the shared read-set).
 **Open sub-questions:**
 
 - Concrete mailbox shape for cross-core requests (size, placement, ABI).
-- Migration protocol detail: how a Frame moves between cores' state without
+- Migration protocol detail: how an Observer moves between cores' state without
   losing in-flight messages.
 - IPI semantics: synchronous-response (target ACKs before sender proceeds) vs.
   fire-and-forget. Different answers for different operation types.

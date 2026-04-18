@@ -6,13 +6,13 @@ Fourth derivation entry after the 2026-04-15 reset. Records the reasoning behind
 ## Starting point
 
 From the spec.md open questions: "Capability-based vs ACL vs ambient — not yet
-derived. High-leverage: will shape Frame creation, Space transfer, Time
+derived. High-leverage: will shape Observer creation, Space transfer, Time
 transfer, and the shape of every syscall."
 
 Three candidate model families:
 
-- **Capability-based:** authority is an unforgeable per-Frame token; holding it
-  IS the permission. Designation and authority are bundled.
+- **Capability-based:** authority is an unforgeable per-Observer token; holding
+  it IS the permission. Designation and authority are bundled.
 - **ACL-based:** authority is a per-resource list checked against the
   requester's identity. Designation and authority are separate.
 - **Ambient:** authority derives from inherited context (privilege level, UID,
@@ -37,12 +37,13 @@ proving authority over it. When these are separate, a deputy acting on behalf of
 two principals cannot distinguish whose authority to use. This is not a bug in
 ACL implementations — it is a property of the interface shape.
 
-- In ACL models: a Frame names Resource Y and the kernel checks Frame identity
-  against Y's access list. A deputy Frame serving two clients uses its own
-  identity for both lookups — confused deputy.
+- In ACL models: an Observer names Resource Y and the kernel checks Observer
+  identity against Y's access list. A deputy Observer serving two clients uses
+  its own identity for both lookups — confused deputy.
 - In ambient models: same structural problem, more severe.
-- In capability models: the Frame presents a handle that IS both the designation
-  and the authority. A deputy uses the client's handle — no confusion possible.
+- In capability models: the Observer presents a handle that IS both the
+  designation and the authority. A deputy uses the client's handle — no
+  confusion possible.
 
 A5 prohibits "exposing primitives that force complexity into userspace." An
 interface where every multi-client service must implement its own
@@ -50,7 +51,7 @@ authority-tracking logic to avoid confused deputies IS forcing complexity into
 userspace. Capabilities are the only model family where this complexity
 structurally cannot arise.
 
-This forecloses ambient authority (A5 violation) and ACLs as the kernel↔Frame
+This forecloses ambient authority (A5 violation) and ACLs as the kernel↔Observer
 interface (A5 violation via confused deputy).
 
 #### Path 2: D1 + O3 + hot path
@@ -60,18 +61,18 @@ resumption) touches no cross-core shared state. O3 says exceptions are taken on
 the causing core. Syscall handling is part of the exception entry path —
 authority checks during syscall handling are on the hot path.
 
-- Capability tables are per-Frame. The running Frame's table is part of per-core
-  state. Lookup is O(1) and touches only per-core data.
+- Capability tables are per-Observer. The running Observer's table is part of
+  per-core state. Lookup is O(1) and touches only per-core data.
 - ACLs are per-resource — shared data structures, writable by any
   authority-management operation on any core. Reading an ACL during syscall
   handling puts shared mutable state on the hot path, violating D1.
-- Ambient privilege levels are per-Frame (per-core accessible), but ambient is
-  already foreclosed by Path 1.
+- Ambient privilege levels are per-Observer (per-core accessible), but ambient
+  is already foreclosed by Path 1.
 
-The only workaround for ACLs — per-core caching of per-Frame authority snapshots
-— is structurally identical to a capability table. The ACL becomes a backing
-store that generates capability-table-equivalent caches. At that point the
-effective interface model IS capability-based.
+The only workaround for ACLs — per-core caching of per-Observer authority
+snapshots — is structurally identical to a capability table. The ACL becomes a
+backing store that generates capability-table-equivalent caches. At that point
+the effective interface model IS capability-based.
 
 This independently forecloses pure ACLs.
 
@@ -80,10 +81,10 @@ This independently forecloses pure ACLs.
 **A4 compatibility.** No kernel thread means no background authority-maintenance
 entity. All authority state transitions must be explicitly triggered during
 exception handling. Capability reference counting fits naturally (cleanup on
-last close, triggered by Frame operations). ACL models requiring periodic
+last close, triggered by Observer operations). ACL models requiring periodic
 garbage collection face tension.
 
-**A3 neutrality.** ACLs require Frame identity for permission lookup. A3 says
+**A3 neutrality.** ACLs require Observer identity for permission lookup. A3 says
 the kernel is generic across workloads. Some workloads (embedded,
 single-purpose) have no natural identity model. Capabilities work without
 identity — the handle IS the authority.
@@ -112,8 +113,8 @@ implementation language. The work is done by A5 + D1 + O3.
 load-bearing in Path 1 (confused deputy). It is NOT load-bearing in Path 2. Path
 2 rests on D1 + O3 — the mechanical constraint that hot-path authority checks
 must use per-core data. A5 answers "what complexity placement does the
-kernel↔Frame interface require?"; Path 2 answers "what data-access pattern does
-the hot path permit?" The work in Path 2 is done by D1 and O3 alone.
+kernel↔Observer interface require?"; Path 2 answers "what data-access pattern
+does the hot path permit?" The work in Path 2 is done by D1 and O3 alone.
 
 This matters because the two paths provide genuinely independent evidence. If A5
 were load-bearing in both, a challenge to A5 would undermine both arguments
@@ -162,22 +163,24 @@ independently.
 
 ### What IS settled for downstream derivations
 
-A Frame proves it is allowed to perform an operation by presenting an
-unforgeable, per-Frame handle (capability) that designates the resource AND
+An Observer proves it is allowed to perform an operation by presenting an
+unforgeable, per-Observer handle (capability) that designates the resource AND
 carries the permitted operations. The kernel resolves the handle, checks the
 rights, and proceeds or rejects.
 
 Properties that downstream derivations can rely on:
 
-- **Per-Frame:** each Frame has its own authority state, independent of other
-  Frames. Handle N in Frame A and handle N in Frame B are unrelated.
-- **Unforgeable:** a Frame cannot fabricate a capability. It acquires
-  capabilities at creation or via explicit transfer from another Frame.
+- **Per-Observer:** each Observer has its own authority state, independent of
+  other Observers. Handle N in Observer A and handle N in Observer B are
+  unrelated.
+- **Unforgeable:** an Observer cannot fabricate a capability. It acquires
+  capabilities at creation or via explicit transfer from another Observer.
 - **Designation = authority:** there is no separate naming step. The capability
   IS the name.
 - **Rights-bearing:** each capability carries a set of permitted operations. The
   kernel enforces the rights on every use.
-- **Transferable:** capabilities can be passed between Frames (mechanism TBD).
+- **Transferable:** capabilities can be passed between Observers (mechanism
+  TBD).
 - **Hot-path compatible:** capability resolution is per-core, O(1) lookup, no
   cross-core shared state.
 
@@ -187,7 +190,7 @@ Properties that downstream derivations can rely on:
 
 Revisit only if A5 is revised AND D1 is revised simultaneously (either alone
 leaves at least one derivation path intact), or if a new model family emerges
-that provides confused-deputy prevention AND per-Frame hot-path data
+that provides confused-deputy prevention AND per-Observer hot-path data
 organization AND explicit-trigger-compatible lifecycle.
 
 **Open sub-questions (deferred):**
@@ -196,5 +199,6 @@ organization AND explicit-trigger-compatible lifecycle.
 - Capability table structure (kernel-managed vs. CNode-style)
 - Revocation model (refcount, destroy, CDT, generation numbers)
 - Whether Time is a first-class capability
-- Bootstrap: how the first Frame acquires initial capabilities
-- Capability-Frame relationship (interacts with "what unit runs in a Frame")
+- Bootstrap: how the first Observer acquires initial capabilities
+- Capability-Observer relationship (interacts with "what the execution unit is"
+  — resolved by D6)

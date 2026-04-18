@@ -4,9 +4,9 @@
 design accommodate physical-only addressing, tagged pointers, or other
 translation models?
 
-**Answer:** The kernel requires MMU-backed virtual memory with per-Frame address
-spaces. This is a derived consequence — every alternative is foreclosed by
-axioms or hardware facts, not by preference.
+**Answer:** The kernel requires MMU-backed virtual memory with per-Observer
+address spaces. This is a derived consequence — every alternative is foreclosed
+by axioms or hardware facts, not by preference.
 
 ---
 
@@ -46,19 +46,19 @@ Therefore: page tables must exist and the MMU must be enabled. The remaining
 question is what the kernel does with the translation capability the MMU
 provides.
 
-### Path 2: A3 + A5 — hardware-enforced inter-Frame isolation
+### Path 2: A3 + A5 — hardware-enforced inter-Observer isolation
 
-A3 (generic kernel) means Frames may execute arbitrary, untrusted, potentially
-adversarial code. There are no workload assumptions that constrain what runs in
-a Frame. Inter-Frame isolation — preventing one Frame from accessing another's
-memory — is mandatory.
+A3 (generic kernel) means Observers may execute arbitrary, untrusted,
+potentially adversarial code. There are no workload assumptions that constrain
+what runs in an Observer. Inter-Observer isolation — preventing one Observer
+from accessing another's memory — is mandatory.
 
 A5 (kernel is leaf node) means the kernel absorbs isolation complexity rather
 than pushing it to userspace or constraining what code is allowed to run.
 
 On ARM64, the available isolation mechanisms are:
 
-1. **MMU page tables.** Per-Frame page tables map only authorized physical
+1. **MMU page tables.** Per-Observer page tables map only authorized physical
    memory. The MMU enforces access permissions on every memory access. This is
    the standard mechanism, available on all ARM64 hardware.
 
@@ -66,7 +66,7 @@ On ARM64, the available isolation mechanisms are:
    Processes (SIPs) in a single shared address space, relying on a verified
    language runtime to prevent cross-boundary access. **Foreclosed by A3:**
    requiring all code to be in a verified language is a workload assumption. A
-   generic kernel cannot dictate what language Frames run.
+   generic kernel cannot dictate what language Observers run.
 
 3. **CHERI hardware capabilities.** 128-bit tagged pointers with hardware-
    enforced bounds and permissions, enabling compartmentalization without MMU
@@ -80,7 +80,7 @@ On ARM64, the available isolation mechanisms are:
    what the hardware provides"). Also requires trusting the instrumentor and
    constraining loadable code formats, which tensions with A3.
 
-Only option 1 is available and unconstrained. Per-Frame page tables are the
+Only option 1 is available and unconstrained. Per-Observer page tables are the
 mechanism.
 
 ### Path 3: Philosophy — use what the hardware provides
@@ -89,7 +89,7 @@ mechanism.
 it doesn't reimplement the enforcement in software." The ARM64 MMU provides
 exactly the property needed: per-access permission enforcement based on the
 current page table. The kernel's job is to program the page tables correctly for
-each Frame, not to build a parallel enforcement system.
+each Observer, not to build a parallel enforcement system.
 
 ### Convergence
 
@@ -97,7 +97,7 @@ Each path is independently sufficient:
 
 - Path 1 alone: MMU must be enabled, so page tables exist and translation
   occurs.
-- Path 2 alone: isolation requires per-Frame page tables.
+- Path 2 alone: isolation requires per-Observer page tables.
 - Path 3 alone: hardware provides the mechanism; use it.
 
 Together they leave no design space for alternatives. The archive reached the
@@ -109,13 +109,13 @@ same conclusion (convergence confirmed), though without deriving it.
 
 These are accepted costs, not arguments against the derivation:
 
-- **TTBR switch on every Frame transition (D1 hot path).** Writing TTBR_EL1
+- **TTBR switch on every Observer transition (D1 hot path).** Writing TTBR_EL1
   requires an `isb` barrier. ARM64 ASIDs (8 or 16 bits, implementation-
   dependent) allow TLB entries to survive TTBR switches, mitigating the flush
   cost. ASID management (allocation, rollover) is added kernel complexity.
 
 - **Cross-core TLB shootdown on unmap (O2).** When a page is unmapped from a
-  Frame that may be running on another core, stale TLB entries must be
+  Observer that may be running on another core, stale TLB entries must be
   invalidated via IPI + TLBI instruction + DSB barrier. This is cold-path
   (consistent with D1) but expensive when it occurs.
 
@@ -129,8 +129,8 @@ These are accepted costs, not arguments against the derivation:
 
 ## What this does NOT settle
 
-- **Address space structure per Frame.** Whether each Frame has a fully
-  independent page table tree, or Frames can share structure (e.g., shared
+- **Address space structure per Observer.** Whether each Observer has a fully
+  independent page table tree, or Observers can share structure (e.g., shared
   upper-level tables). One level down.
 
 - **Page size exposure.** Whether the kernel exposes page granularity to
@@ -142,13 +142,13 @@ These are accepted costs, not arguments against the derivation:
   Space vocabulary. One level down.
 
 - **Fault delegation.** Whether the kernel resolves page faults internally or
-  forwards them to userspace pager Frames. Interacts with A4 (reactive) and A5
-  (complexity placement). One level down.
+  forwards them to userspace pager Observers. Interacts with A4 (reactive) and
+  A5 (complexity placement). One level down.
 
 - **CHERI forward-compatibility.** CHERI is foreclosed as a replacement for MMU
   isolation (A2 — hardware doesn't exist), but not as a future complement. CHERI
-  would provide finer-grained isolation _within_ a Frame's address space (the
-  CheriBSD "co-processes" model: multiple compartments sharing one address
+  would provide finer-grained isolation _within_ an Observer's address space
+  (the CheriBSD "co-processes" model: multiple compartments sharing one address
   space, separated by CHERI tags instead of MMU, with 1-2 orders of magnitude
   faster switching). The memory interface should be shaped to not foreclose
   this: design around memory objects and permissions rather than
@@ -165,7 +165,7 @@ These are accepted costs, not arguments against the derivation:
 | Language-safety isolation   | A3              | Workload assumption (verified language) |
 | CHERI-only                  | A2              | Hardware not present in target          |
 | Software Fault Isolation    | Philosophy + A3 | Weaker than hardware; constrains code   |
-| Single shared address space | A3 + A5         | No inter-Frame isolation mechanism      |
+| Single shared address space | A3 + A5         | No inter-Observer isolation mechanism   |
 
 ---
 
