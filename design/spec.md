@@ -332,8 +332,10 @@ the mechanism.
 
 Does NOT settle: Observer minimum schema (concrete fields need formal
 derivation), Observer-Space binding model (when/how binding occurs), Observer
-lifecycle operations (create, destroy, suspend, resume), whether Observers can
-share capability tables, or capability table structure.
+lifecycle operations beyond the D14 minimum (creation API, rights model,
+suspend, clonability), whether Observers can share capability tables. (D8
+settled capability table structure; D14 settled Observer as capability-held
+object type with resume and destroy as minimum operations.)
 
 - **Rests on:** Observer vocabulary (one Time per Observer; SMT paragraph
   explicitly models concurrency as multi-Observer), D2 (scheduler selects
@@ -681,6 +683,41 @@ badge semantics, D12 fault delivery specifics.
   multi-endpoint wait problem has no clean solution.
 - **Journal:** `journal/013-ipc-model.md`.
 
+### D14 — Observer is a capability-held kernel object type
+
+Observer is a kernel object type designated by capabilities, joining Space,
+Time, Coordinate System (D10), and endpoint (D13) as the fifth type. Lifecycle
+operations — at minimum resume and destroy — are typed kernel syscalls (D7)
+taking Observer capability handles. The capability's rights mask governs
+permitted operations. D11's destroy provides termination; outstanding
+capabilities become dead handles.
+
+The derivation is forced by a chain of settled decisions: D12 requires resume as
+a kernel operation on a suspended Observer (can't participate in IPC); D7
+requires it as a typed syscall; D4 requires a capability handle as the noun; D8
+accommodates the handle; D11 provides termination. The archive explored the
+alternative (lifecycle through IPC indirection — archive/006, archive/011) and
+reversed it (archive/013) for the same structural reason. Every surveyed
+capability system makes the execution unit a capability-held object type.
+
+Does NOT settle: creation API shape (create-then-configure vs. all-params),
+Observer rights model beyond resume and destroy (suspend, inspect, configure),
+Observer handle clonability, fault handler attachment (per-Observer vs.
+per-address-space), Time reclamation on destroy, Observer minimum schema.
+
+- **Rests on:** D12 (resume must exist — suspended Observer can't receive IPC;
+  independent path), D7 (lifecycle ops are typed kernel syscalls; provides
+  mechanism family), D4 (capability handle required as noun; designation =
+  authority), D8 (flat table accommodates Observer handles; rights mask, ABA
+  tag), D11 (destroy provides termination; dead-handle semantics), D6 (defines
+  what Observer is — the object the handle designates),
+  `design/research/execution-unit.md` (100% convergence across surveyed
+  capability systems), `design/landscape.md` §4.4, §6.7.
+- **Status:** settled — revisit if D7 is revised (unified model changes
+  mechanism family) or if D12 is revised (removing fault delegation removes the
+  structural demand for resume, though D4 and D6 provide independent support).
+- **Journal:** `journal/014-observer-is-capability-held.md`.
+
 ### Entry template
 
 Each derivation entry names three things: what rests on what, how settled the
@@ -759,18 +796,35 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
     of a subtree); who authorizes destroy; strong vs. weak cross-core
     prompt-effect policy; destroy cleanup protocol (inline vs. preemptible).
 - **Observer minimum schema.** D6 settles that an Observer is a single execution
-  unit. The concrete field set (register state, TTBR, capability table pointer,
-  Time binding, scheduling state, fault handler) needs formal derivation in the
-  current chain. Archive journal/004 derived a first-principles minimum. D12
-  confirms the fault handler field is structurally required.
+  unit. D14 settles that Observer is a capability-held kernel object type. The
+  concrete field set (register state, TTBR, capability table pointer, Time
+  binding, scheduling state, fault handler, Observer state: runnable/blocked/
+  faulted) needs formal derivation in the current chain. Archive journal/004
+  derived a first-principles minimum. D12 confirms the fault handler field is
+  structurally required. D14 confirms lifecycle state tracking is required.
 - **Address space binding mutability.** D10 settles the address space as a
   first-class object that Observers bind to. Open: is the binding immutable (set
   at Observer creation) or rebindable at runtime? If rebindable, what happens to
   TLB entries when an Observer changes address space?
-- **Observer lifecycle.** Create, destroy, suspend, resume. Whether Observer is
-  a capability-held object type (archive journal/013 said yes). Interacts with
-  D4 and D7 (lifecycle operations are typed kernel syscalls under the split
-  model).
+- **Observer creation API shape.** D14 settles Observer as capability-held but
+  not the creation interface. Create-then-configure (seL4 — inert Observer,
+  configured via cap ops, started separately) vs. all-params-upfront (archive —
+  one syscall). Minimum inputs: Space, Time, address space (D10), fault handler
+  endpoint (D12). Open: initial PC/SP, initial capabilities, create vs. start as
+  separate operations.
+- **Observer rights model.** D14 settles resume and destroy as minimum. Open:
+  suspend (external pause), inspect register state (debugging), modify
+  scheduling properties (D2), change fault handler, change address space binding
+  (D10 binding mutability). Each right = a typed kernel syscall under D7.
+- **Observer handle clonability.** Clonable: multiple independent lifecycle
+  managers, flexible delegation (parent delegates kill to sibling). Non-clonable
+  (like Time): exactly one manager, enables handle=handler unification.
+- **Suspend as distinct from faulted.** Is there external suspension (not caused
+  by fault)? If yes, Observer state has four values (runnable, blocked, faulted,
+  externally-suspended). Use cases: debugging, checkpointing, resource pressure.
+- **Time reclamation on Observer destroy.** Observer holds one Time (D6). On
+  destroy: return to destroyer? To creator? Destroy the Time? Interacts with
+  Time's non-clonable property.
 - **Can Observers share capability tables?** D8 settles per-Observer tables with
   no sharing. D10 settles first-class address spaces with multi-Observer binding
   — same-address-space Observer groups are now a supported pattern. Revisit as a
@@ -787,10 +841,11 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   memory object's interface granularity and the Space manager's external
   interface.
 - **Fault handler attachment.** D12 settles delegation but not where the fault
-  handler attaches. Per-Observer (archive choice) allows different fault
-  policies for Observers sharing an address space. Per-address-space (D10
-  natural fit) avoids redundant handling. Possibly both (address space default,
-  Observer override).
+  handler attaches. D14 (Observer as capability-held type) provides the Observer
+  handle as a natural per-Observer configuration noun. Per-Observer (archive
+  choice) allows different fault policies for Observers sharing an address
+  space. Per-address-space (D10 natural fit) avoids redundant handling. Possibly
+  both (address space default, Observer override).
 - **Pager unavailability protocol.** What happens when a pager Observer is
   destroyed, blocked, or unresponsive while an Observer is faulting? Archive
   used fault handler chains (Observer → handler → … → kernel as root).
@@ -799,10 +854,13 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   handler, but the initial Observer has no userspace pager yet. The archive used
   "kernel as root fault handler" — the one place the kernel does internal
   resolution. Alternatives exist.
-- **Pager reply/resume mechanism.** How does a pager signal "fault resolved,
-  resume the faulting Observer"? Reply capability (seL4), exception channel
-  operation (Zircon), or something shaped by this kernel's IPC model. Tightly
-  coupled with IPC design.
+- **Pager reply/resume mechanism.** D14 settles the resume half:
+  resume(observer_handle) as a typed kernel syscall. The Observer handle reaches
+  the pager via capability transfer in the fault message (D13). Remaining: how
+  does the pager signal that it has resolved the fault and prepared the address
+  space? Is resume() alone sufficient, or does the pager also need to perform
+  memory operations (map page, etc.) before calling resume()? The sequence (map
+  → resume) vs. (resume-with-mapping) shapes the pager's syscall pattern.
 - **D7 classification of fault traffic.** D12 says fault notifications go to
   pager Observers. D13 says all information delivery uses queued endpoints.
   Fault delivery is through normal IPC endpoints (kernel-as-sender). Remaining:
@@ -830,8 +888,9 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
 - **IPC fast-path conditions.** When does direct process switch occur? Receiver
   waiting? Priority check? seL4 fastpath requires no higher-priority runnable.
 - **Specific syscall surface.** D7 settles two mechanism families but not the
-  exact set. The archive's 10-syscall design is a data point. Depends on IPC
-  model, Observer lifecycle, and D9 (memory objects).
+  exact set. D14 adds resume() and confirms destroy() applies to Observers. The
+  archive's 10-syscall design is a data point. Depends on IPC model, Observer
+  creation API, Observer rights model, and D9 (memory objects).
 - **Address space lifecycle.** D10 introduces the address space as a kernel
   object. When is it destroyed? Last capability dropped? Last Observer unbound?
   Interacts with revocation model.
@@ -897,6 +956,12 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   message unification); coalescing tension documented; tentative pending
   downstream cluster (overflow, coalescing, notification, multi-wait, message
   format).
+- `014-observer-is-capability-held.md` — reasoning for D14: derivation chain
+  D12→D7→D4→D8→D11 forces Observer as capability-held type; archive explored
+  alternative (IPC indirection) and reversed it; 100% landscape convergence;
+  settles fault resume as resume(observer_handle) typed syscall; six downstream
+  questions opened (creation API, rights, clonability, suspend, fault handler
+  attachment, Time reclamation).
 
 ---
 

@@ -1,17 +1,17 @@
 # Kernel structural map.
 #
-# Populated from design/spec.md derivations D1-D6, D8-D13, observations O2-O3,
+# Populated from design/spec.md derivations D1-D6, D8-D14, observations O2-O3,
 # and Vocabulary (Space, Time, Observer, Coordinate System). Every box and edge
 # has a corresponding spec.md entry; items labeled "TBD" await downstream
 # derivation.
 #
 # Intentionally absent (pending derivation): specific syscall surface, Observer
-# minimum schema, endpoint shape details (overflow, coalescing, multi-wait,
-# message format — D13 downstream cluster), revocation add-ons (generation,
-# CDT, badges — base settled in D11; badges explorable now that D13 exists),
-# fault handler attachment (Observer vs. address space — D12 downstream),
-# Observer lifecycle, per-physical-core concerns (power, thermal, shared
-# cache/TLB). See spec.md#Open questions.
+# minimum schema, Observer creation API and rights model (D14 downstream),
+# endpoint shape details (overflow, coalescing, multi-wait, message format —
+# D13 downstream cluster), revocation add-ons (generation, CDT, badges — base
+# settled in D11; badges explorable now that D13 exists), fault handler
+# attachment (Observer vs. address space — D12 downstream), per-physical-core
+# concerns (power, thermal, shared cache/TLB). See spec.md#Open questions.
 #
 # Render with: d2 --layout elk graph.d2
 
@@ -76,11 +76,14 @@ kernel: {
     label: Observer
     style.multiple: true
     # D6: single schedulable execution unit.
+    # D14: capability-held kernel object type (fifth type).
+    # Lifecycle operations (resume, destroy, potentially more)
+    # are typed kernel syscalls (D7) taking Observer handles.
     # One register state, one Time, one capability table,
     # one address space binding (D10: binds to first-class
     # address space object). "Process" is a userspace
     # convention (group of Observers sharing an address space).
-    # Minimum schema TBD (spec.md#Open questions).
+    # Minimum schema, creation API, rights model TBD.
 
     capabilities: {
       label: Capability table
@@ -155,6 +158,7 @@ kernel.core-manager -> kernel.address-space: TTBR load (hot path)
 # are authorized to use.
 kernel.observer.capabilities -> kernel.memory-object: designate (D4, D9)
 kernel.observer.capabilities -> kernel.address-space: designate (D4, D10)
+kernel.observer.capabilities -> kernel.observer: lifecycle ops (D4, D14)
 # D10: Observer binds to address space (one binding per Observer; many Observers per AS).
 kernel.observer -> kernel.address-space: binds to (D10)
 # D9: Space manager allocates physical backing for memory objects.
@@ -181,5 +185,6 @@ userspace -> userspace: IPC via queued endpoints (D7+D13, capability-mediated)
 # Kernel provides dispatch only (detect, notify, resume).
 # Pager Observers handle policy (eviction, prefetch, page source).
 # Fault handler attachment (Observer vs. address space) TBD.
-# Pager reply/resume mechanism TBD (coupled with IPC model).
-kernel -> userspace: fault delegation (D12, pager notification + resume)
+# D14: Resume via resume(observer_handle) typed kernel syscall.
+# Observer handle delivered in fault message via cap transfer (D13).
+kernel -> userspace: fault delegation (D12+D14, pager notification + resume)
