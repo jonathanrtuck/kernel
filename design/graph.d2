@@ -1,17 +1,17 @@
 # Kernel structural map.
 #
-# Populated from design/spec.md derivations D1-D6, D8-D15, observations O2-O3,
+# Populated from design/spec.md derivations D1-D6, D8-D17, observations O2-O3,
 # and Vocabulary (Space, Time, Observer, Coordinate System). Every box and edge
 # has a corresponding spec.md entry; items labeled "TBD" await downstream
 # derivation.
 #
 # Intentionally absent (pending derivation): specific syscall surface, Observer
 # minimum schema, Observer creation API and rights model (D14 downstream),
-# endpoint details (overflow, coalescing, multi-wait, message format, badge
-# semantics — D13/D15 downstream), revocation add-ons (generation, CDT,
-# badges — base settled in D11; badges explorable now that D15 exists), fault
-# handler attachment (Observer vs. address space — D12 downstream),
-# per-physical-core concerns (power, thermal, shared cache/TLB).
+# endpoint details (overflow, coalescing, multi-wait, message format —
+# D13/D15 downstream), revocation add-ons (generation, CDT — base settled
+# in D11; badges settled in D17), fault handler attachment and representation
+# (Observer vs. address space, cap-table entry vs. kernel-internal — D12/D17
+# downstream), per-physical-core concerns (power, thermal, shared cache/TLB).
 # See spec.md#Open questions.
 #
 # Render with: d2 --layout elk graph.d2
@@ -89,14 +89,17 @@ kernel: {
     capabilities: {
       label: Capability table
       # D8: kernel-managed flat array, per-Observer (D4 + D1).
-      # Each entry: (kernel object ref, rights mask).
+      # Each entry: (kernel object ref, rights mask, badge, slot tag).
+      # D17: badge is minter-assigned, immutable, kernel-attached
+      # to messages. Rights mask includes send, receive, mint (D17).
       # Handles carry a generational slot tag (D11) — bumped on
       # slot reuse, prevents stale-handle aliasing. ABA defense,
       # not revocation; does not invalidate live capabilities.
       # Backed by typed memory from Observer's budget.
       # O(1) lookup via handle index.
       # Revocation primitive: close-only (refcount on drop) +
-      # authoritative destroy (D11). Add-ons deferred with IPC.
+      # authoritative destroy (D11). Badge-closure notifications
+      # on tracked endpoints (D17).
       # Table sharing: D10 enables same-AS Observer groups;
       # whether they share cap tables is open (D8 downstream).
     }
@@ -108,16 +111,19 @@ kernel: {
     # D13: queued endpoints with direct-switch fast path (tentative).
     # D15: unidirectional, many-to-many, send/receive as object-rights.
     # D16: reply via pre-allocated reply endpoint with send-once cap.
+    # D17: badge semantics — minter-assigned, mint-right-controlled,
+    # opt-in per-badge lifecycle tracking.
     # Single kernel object: bounded queue + waiters list.
+    # Optionally: per-badge refcount map (creation-time opt-in, D17).
     # Topology via capability distribution (not kernel-enforced).
-    # Rights: send (enqueue), receive (dequeue), send-once (D16:
-    # use-limited send, consumed after one use) — independently
-    # grantable through D8 rights mask.
-    # All information delivery (IPC, faults, interrupts) through
-    # the same mechanism. Kernel is a sender for fault/interrupt
-    # messages (D12). Each Observer has a pre-allocated reply
-    # endpoint; Call() creates a send-once cap for RPC reply.
-    # Badge, overflow, coalescing, multi-wait, message format TBD.
+    # Rights: send, receive, mint (D17), send-once (D16) —
+    # independently grantable through D8 rights mask.
+    # All information delivery (IPC, faults, interrupts, badge-closure
+    # notifications on tracked endpoints) through the same mechanism.
+    # Kernel is a sender for fault/interrupt/closure messages (D12, D17).
+    # Each Observer has a pre-allocated reply endpoint; Call() creates
+    # a send-once cap for RPC reply (D16).
+    # Overflow, coalescing, multi-wait, message format TBD.
   }
 
   address-space: {

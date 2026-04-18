@@ -740,9 +740,8 @@ cost; D16 settles the mechanism as send-once cap on a pre-allocated reply
 endpoint). Peer disconnection detection requires a badge-closure notification
 mechanism (deferred to badge-semantics exploration).
 
-Does NOT settle: badge semantics (per-capability sender identification,
-badge-closure notifications), overflow policy, multi-endpoint wait, message
-format, endpoint naming. (Reply-cap mechanism settled by D16.)
+Does NOT settle: overflow policy, multi-endpoint wait, message format, endpoint
+naming. (Reply-cap mechanism settled by D16. Badge semantics settled by D17.)
 
 - **Rests on:** D4 (send/receive as independent authorities — confused deputy
   forecloses undifferentiated access), D8 (flat table with rights mask —
@@ -818,6 +817,63 @@ disambiguation (depends on badge semantics), message format interaction.
   without a dedicated Reply type.
 - **Journal:** `journal/016-reply-cap-mechanism.md`.
 
+### D17 — Badge semantics: minter-assigned, mint-right-controlled, opt-in lifecycle tracking
+
+A badge is a per-capability field in D8's entry layout, set by the minter at
+clone time, immutable after creation, attached by the kernel to every message
+sent through that capability. The sender cannot read, choose, or modify its
+badge. Badges serve identification (key into receiver state), not merely
+distinguishing. The minter chooses the value; the kernel enforces unforgeability
+and immutability.
+
+Mint is a third independent right in D8's rights mask (send, receive, mint),
+controlling who can assign badges when cloning. The endpoint creator controls
+mint-right distribution, aligning badge population growth with budget authority.
+
+Lifecycle visibility is opt-in: the endpoint creator specifies at creation
+whether per-badge refcount tracking is enabled. With tracking: when the last
+send cap with badge B to endpoint E is closed, the kernel enqueues a closure
+notification to E's receive side (through the endpoint queue, D13). Without
+tracking: no per-badge state, no notifications, trivial close path. Opt-in
+resolves the A3/A4 tension: not all workloads need disconnection detection (A3),
+but those that do should not fall back to polling (A4).
+
+Five tensions are accepted for tracked endpoints: D16 send-once consumption vs.
+badge-closure (must distinguish consumed-by-use from closed-without-use); D13
+bounded queue vs. notification volume; per-badge map growth (controlled by
+mint-right distribution and bounded by creation-time capacity); reverse
+information flow (receiver observes sender's close — accepted as deliberately
+constructed); D14 Observer destroy cascade.
+
+Does NOT settle: badge size (implementation detail, 64-bit default), send-once
+exemption encoding, badge on D16 kernel-created send-once caps, max-badge-count
+semantics, fault handler representation (cap-table entry vs. kernel-internal —
+determines whether badge-closure covers child Observer destruction), badge-
+closure message format, badge-closure × overflow policy interaction, per-badge
+tracking × coalescing interaction.
+
+- **Rests on:** D15 (many-to-one patterns create the structural need for sender
+  identification; send/receive rights pattern extended with mint), D8 (flat cap
+  table — badge stored in entry; rights mask holds mint right), D4 (designation
+  = authority — badge unforgeability prevents confused deputy at IPC layer;
+  badge-based addressing foreclosed; mint authority is capability-mediated), D13
+  (one delivery mechanism — closure notifications use the endpoint queue), D12
+  (fault handler badge structurally required — kernel synthesizes fault messages
+  without a sender cap), D11 (base revocation — badge-closure is a revocation
+  add-on; close triggers per-badge check on tracked endpoints), D16 (send-once
+  caps create the consumed-vs-closed tension), A3 (generic — not all workloads
+  need lifecycle tracking; opt-in), A4 (purely reactive — polling-based
+  disconnection detection is inconsistent; event-driven notification is
+  A4-consistent), `design/research/endpoint-shape.md` (seL4 badge mechanism,
+  Mach send-once rights, Zircon peer-closed signal), `design/landscape.md` §1.3,
+  §3.5, §3.6, §5.2 (badge and notification mechanisms across surveyed systems).
+- **Status:** settled — revisit if D15 is revised (changes the many-to-one
+  composition that creates the need), if D8 is revised (changes where badge is
+  stored), if D13 is revised (changes the notification delivery mechanism), or
+  if the opt-in model proves insufficient (a workload pattern requires
+  badge-closure on an endpoint the receiver didn't create and can't replace).
+- **Journal:** `journal/017-badge-semantics.md`.
+
 ### Entry template
 
 Each derivation entry names three things: what rests on what, how settled the
@@ -888,15 +944,14 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   D6). Remaining: formalize the vocabulary's "one or more" — does an Observer
   hold multiple Space claims, or is it one claim subdivided?
 - **Revocation add-ons.** D11 settles the base primitive (close-only + destroy
-  - ABA slot tag). D13 (queued endpoints) + D15 (unidirectional, many-to-many)
-    now enable exploring: badges (per-capability, attached by kernel to messages
-    — natural fit for D15's model; badge-closure notifications address D15's
-    peer disconnection gap); endpoint rotation via destroy (D11 provides
-    destroy; endpoint lifecycle needed); generation-as-revocation (O(1) mass
-    invalidation; alternative is endpoint rotation). Still deferred: CDT
-    (selective revocation of a subtree); who authorizes destroy; strong vs. weak
-    cross-core prompt-effect policy; destroy cleanup protocol (inline vs.
-    preemptible).
+  - ABA slot tag). D17 settles badge semantics (minter-assigned, opt-in
+    per-badge tracking with closure notifications). Remaining add-ons: endpoint
+    rotation via destroy (D11 provides destroy; endpoint lifecycle needed);
+    generation-as-revocation (O(1) mass invalidation; alternative is endpoint
+    rotation). Still deferred: CDT (selective revocation of a subtree); who
+    authorizes destroy; strong vs. weak cross-core prompt-effect policy; destroy
+    cleanup protocol (inline vs. preemptible — D17's destroy cascade tension
+    amplifies this question).
 - **Observer minimum schema.** D6 settles that an Observer is a single execution
   unit. D14 settles that Observer is a capability-held kernel object type. The
   concrete field set (register state, TTBR, capability table pointer, Time
@@ -981,12 +1036,23 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   binding to Observer? D15's many-to-many model reduces urgency (one endpoint
   serves many sources), but the problem persists for Observers handling multiple
   distinct endpoints (e.g., pager with fault endpoint + user-request endpoint).
-- **Badge semantics.** D15 settles unidirectional many-to-many with send/receive
-  rights. Per-capability badge (kernel-attached to messages) enables receiver to
-  identify sender source. Encoding, assignment (kernel-minted vs.
-  creator-specified), and badge-closure notifications (event-driven peer
-  disconnection detection — the gap D15 documents) are open. Connected to D11's
-  deferred revocation add-ons.
+- **Badge downstream details.** D17 settles badge semantics (minter-assigned,
+  mint right, opt-in per-badge tracking). Remaining: badge size (implementation
+  detail, 64-bit default), send-once exemption encoding (consumed-by-use vs.
+  closed-without-use — deferred with D16's send-once right encoding), badge on
+  D16 kernel-created send-once caps (Call() badge assignment), max-badge-count /
+  capacity semantics for tracked endpoints, badge-closure message format,
+  badge-closure × overflow policy interaction, per-badge tracking × coalescing
+  interaction (D13 tension — per-badge slots may serve as both tracking
+  infrastructure and coalescing mechanism).
+- **Fault handler representation.** D17 surfaces a connection between fault
+  handler attachment (D12 downstream) and badge lifecycle: if the fault handler
+  reference is a cap-table entry in the faulting Observer's table, then child
+  destruction closes that cap, triggering badge-closure on the handler's tracked
+  endpoint. If the fault handler is a kernel-internal reference, badge-closure
+  doesn't cover child destruction. This choice determines whether badge-closure
+  provides Observer-lifecycle visibility for free or whether a separate
+  mechanism is needed.
 - **Message format.** Size, slot count, capability transfer encoding, badge
   placement. The archive chose 4 slots (32 bytes), cap_mask bitmask, badge from
   capability. Interacts with D8 (cap transfer from table to table), D15 (badge
@@ -1086,6 +1152,14 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   use-limited attenuation (Mach precedent), not reply-specific; dedicated Reply
   type rejected (optimization achievable behind endpoint interface); archive
   convergence on same object model, refined with send-once.
+- `017-badge-semantics.md` — reasoning for D17: D15's many-to-one patterns
+  require sender identification; minter-assigned because identification (key
+  into receiver state) requires receiver-controlled values; mint right as third
+  independent right in D8's rights mask (D4 consistency, budget alignment);
+  opt-in per-badge lifecycle tracking resolves A3/A4 tension (not all workloads
+  need it, but those that do should not fall back to polling); five tensions
+  accepted for tracked endpoints; archive convergence on representation and
+  assignment, mint right and lifecycle tracking are new.
 
 ---
 
