@@ -575,6 +575,59 @@ revocation interaction.
   primitive is structurally insufficient.
 - **Journal:** `journal/011-base-revocation-primitive.md`.
 
+### D12 — Fault delegation to userspace pager Observers
+
+The kernel delegates all page faults to userspace pager Observers. The kernel's
+role is fault dispatch: detect the fault, identify the faulting Observer,
+deliver a fault notification to the designated pager Observer, and resume the
+faulting Observer when the pager replies. The kernel does not contain paging
+policy (eviction, prefetch, page source selection, write-back).
+
+Three independent paths converge: (1) A4 forecloses kernel-internal background
+paging — pager Observers with their own Time are the only way to do background
+page management; (2) A3 forecloses a single hardcoded paging policy — policy
+belongs in userspace where each workload implements its own; (3) A5 (net) — the
+fault dispatch interface is smaller than a policy-configuration interface, and
+policy complexity lives in pager Observers (leaf nodes).
+
+Self-paging (Nemesis/Barrelfish — faults reflected to the faulting Observer) was
+rejected: A5 + O4 (a) — pushes fault-handling complexity into every Observer.
+Kernel-internal (QNX/Redox) was rejected: A4 + A3 — no background paging, no
+single policy fits all. Hybrid (kernel resolves simple, delegates complex) was
+rejected as a designed-in interface distinction: the simple/complex boundary is
+workload-dependent policy (A3), though a transparent kernel optimization below
+the delegation interface is not foreclosed.
+
+IPC overhead on every fault (minimum: 1 IPC + 1 syscall roundtrip per D9's
+kernel-managed memory objects) and the requirement that every Observer have a
+fault handler are accepted costs. Nothing structural is foreclosed — a
+kernel-internal fast path for trivial faults can be added later without
+interface changes.
+
+Does NOT settle: fault handler attachment (Observer vs. address space), pager
+unavailability protocol (chains vs. double-fault-kill), root/bootstrap case
+mechanism, fault message contents, pager reply/resume mechanism, D7
+classification of fault traffic (IPC vs. dedicated mechanism), Observer minimum
+schema (though fault handler field is now confirmed structurally required).
+
+- **Rests on:** A4 (no kernel thread → no background paging; independent path),
+  A3 (generic → no single policy; independent path), A5 (net: dispatch interface
+  smaller than policy-configuration interface; confirms delegation's interface
+  economics), D5 (MMU-backed virtual memory — faults are a hardware fact; makes
+  the question unavoidable), D7 (fault traffic must be classified under the
+  split model), D9 (kernel-managed memory objects create the structural
+  roundtrip: kernel → pager → kernel), `design/landscape.md` §2.4 (three
+  patterns surveyed), §5.3 (fault delivery mechanisms),
+  `design/research/execution-unit.md` §4 (per-system fault handling),
+  `design/research/address-space-as-object.md` §1.3, §1.5, §1.6 (L4 pager,
+  Barrelfish self-paging, Mach external pagers).
+- **Status:** settled — revisit if A4 is revised (background kernel paging
+  becomes possible, weakening the execution-model path), if A3 is revised
+  (workload-specific kernel allowed, weakening the policy path), or if the IPC
+  model derivation reveals that kernel-as-sender fault traffic cannot be
+  accommodated without unacceptable IPC complexity.
+- **Journal:** `journal/012-fault-delegation.md`.
+
 ### Entry template
 
 Each derivation entry names three things: what rests on what, how settled the
@@ -656,7 +709,8 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
 - **Observer minimum schema.** D6 settles that an Observer is a single execution
   unit. The concrete field set (register state, TTBR, capability table pointer,
   Time binding, scheduling state, fault handler) needs formal derivation in the
-  current chain. Archive journal/004 derived a first-principles minimum.
+  current chain. Archive journal/004 derived a first-principles minimum. D12
+  confirms the fault handler field is structurally required.
 - **Address space binding mutability.** D10 settles the address space as a
   first-class object that Observers bind to. Open: is the binding immutable (set
   at Observer creation) or rebindable at runtime? If rebindable, what happens to
@@ -680,16 +734,34 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   (archive's novel position, no precedent in surveyed systems)? Determines the
   memory object's interface granularity and the Space manager's external
   interface.
-- **Fault delegation model.** D5 means page faults occur (MMU generates them on
-  unmapped access). Open: kernel resolves faults internally, or forwards to
-  userspace pager Observers? Interacts with A4 (reactive), A5 (complexity
-  placement).
+- **Fault handler attachment.** D12 settles delegation but not where the fault
+  handler attaches. Per-Observer (archive choice) allows different fault
+  policies for Observers sharing an address space. Per-address-space (D10
+  natural fit) avoids redundant handling. Possibly both (address space default,
+  Observer override).
+- **Pager unavailability protocol.** What happens when a pager Observer is
+  destroyed, blocked, or unresponsive while an Observer is faulting? Archive
+  used fault handler chains (Observer → handler → … → kernel as root).
+  Alternative: double fault = kill the faulting Observer.
+- **Root/bootstrap fault handling.** D12 requires every Observer to have a fault
+  handler, but the initial Observer has no userspace pager yet. The archive used
+  "kernel as root fault handler" — the one place the kernel does internal
+  resolution. Alternatives exist.
+- **Pager reply/resume mechanism.** How does a pager signal "fault resolved,
+  resume the faulting Observer"? Reply capability (seL4), exception channel
+  operation (Zircon), or something shaped by this kernel's IPC model. Tightly
+  coupled with IPC design.
+- **D7 classification of fault traffic.** D12 says fault notifications go to
+  pager Observers. Under D7's split model, is this IPC (kernel-as-sender) or a
+  dedicated kernel mechanism? Shapes IPC design.
 - **IPC model.** D7 settles the split interaction model but not the IPC
   mechanism itself. Synchronous register-based (L4/seL4 tradition) vs.
   asynchronous buffered (Mach/Zircon tradition) vs. hybrid. Determines message
   format, channel structure, blocking behavior, multiplexing, and the specific
   IPC syscall surface. Tightly coupled with D7 — async IPC was a factor in the
-  split decision.
+  split decision. D12 adds a constraint: fault traffic (kernel-as-sender,
+  reply-resume semantics, potentially high-frequency under memory pressure) is a
+  first-class IPC workload.
 - **Specific syscall surface.** D7 settles two mechanism families but not the
   exact set. The archive's 10-syscall design is a data point. Depends on IPC
   model, Observer lifecycle, and D9 (memory objects).
@@ -747,6 +819,11 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   tag closes D8's deferred ABA question; add-ons (generation-as-revocation, CDT,
   badges) deferred jointly with IPC model because their alternatives depend on
   IPC-level mechanisms.
+- `012-fault-delegation.md` — reasoning for D12: three independent paths (A4 no
+  background paging, A3 no single policy, A5 dispatch interface smaller than
+  policy-configuration interface) converge on delegation; self-paging foreclosed
+  by A5; kernel-internal foreclosed by A4+A3; hybrid boundary is
+  workload-dependent policy (A3); archive convergence on full delegation.
 
 ---
 

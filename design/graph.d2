@@ -1,14 +1,15 @@
 # Kernel structural map.
 #
-# Populated from design/spec.md derivations D1-D6, D8-D11, observations O2-O3,
+# Populated from design/spec.md derivations D1-D6, D8-D12, observations O2-O3,
 # and Vocabulary (Space, Time, Observer, Coordinate System). Every box and edge
 # has a corresponding spec.md entry; items labeled "TBD" await downstream
 # derivation.
 #
 # Intentionally absent (pending derivation): specific syscall surface, Observer
 # minimum schema, IPC mechanism (sync/async/hybrid), revocation add-ons
-# (generation, CDT, badges — base settled in D11), fault delegation, Observer
-# lifecycle, per-physical-core concerns (power, thermal, shared cache/TLB).
+# (generation, CDT, badges — base settled in D11), fault handler attachment
+# (Observer vs. address space — D12 downstream), Observer lifecycle,
+# per-physical-core concerns (power, thermal, shared cache/TLB).
 # See spec.md#Open questions.
 #
 # Render with: d2 --layout elk graph.d2
@@ -171,4 +172,9 @@ kernel.observer.capabilities -> kernel.core-manager.time-manager: Time capabilit
 # not a peer.
 userspace -> kernel.core-manager: kernel op syscalls (D7, capability-mediated)
 userspace -> userspace: IPC (D7, peer, mechanism TBD)
-kernel -> userspace: fault delivery, messages (shape TBD)
+# D12: All page faults delegated to userspace pager Observers.
+# Kernel provides dispatch only (detect, notify, resume).
+# Pager Observers handle policy (eviction, prefetch, page source).
+# Fault handler attachment (Observer vs. address space) TBD.
+# Pager reply/resume mechanism TBD (coupled with IPC model).
+kernel -> userspace: fault delegation (D12, pager notification + resume)
