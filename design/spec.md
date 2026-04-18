@@ -675,12 +675,12 @@ fast-path conditions, D11 badge semantics, D12 fault delivery specifics.
   §3.1 (sync vs. async survey), §3.2 ("every production microkernel converges on
   hybrid"), §3.4 (fast-path data), `design/research/syscall-landscape.md` §10
   (IPC as pivot point, performance data, lessons from removals).
-- **Status:** tentative — accepted to enable derivation of the downstream
-  endpoint-shape cluster (overflow, coalescing, notification, multi-wait,
-  message format). Revisit if: the coalescing gap cannot be solved without a
-  full second primitive (undermining the "one mechanism" value); bounded queue
-  capacity creates unsolvable priority inversion or deadlock patterns; the
-  multi-endpoint wait problem has no clean solution.
+- **Status:** tentative — D18 resolves trigger #1 (coalescing gap dissolved — no
+  second primitive needed) and settles overflow policy. Remaining triggers:
+  bounded queue capacity creates unsolvable priority inversion or deadlock
+  patterns; the multi-endpoint wait problem has no clean solution. Revisit
+  trigger #2 is a downstream concern of priority/scheduling interaction (D2);
+  trigger #3 is its own open question.
 - **Journal:** `journal/013-ipc-model.md`.
 
 ### D14 — Observer is a capability-held kernel object type
@@ -874,6 +874,51 @@ tracking × coalescing interaction.
   badge-closure on an endpoint the receiver didn't create and can't replace).
 - **Journal:** `journal/017-badge-semantics.md`.
 
+### D18 — Error-to-sender overflow with deferred fault delivery
+
+When a send to a queued endpoint finds the queue at capacity, the kernel returns
+an error. No per-endpoint policy modes, no overwrite, no kernel-level
+coalescing. Coalescing workloads use shared memory + signaling (D9/D10 +
+capacity-1 endpoints) — the standard microkernel architecture (landscape §3.2).
+
+For the kernel-as-sender (D12 fault messages), deferred delivery: the kernel
+links the faulting Observer into a per-endpoint pending list. The next receive()
+that frees a slot delivers the deferred fault. The pending list is an intrusive
+linked list through existing Observer objects — zero additional memory
+allocation. D17 badge-closure notifications are dropped on full queue; the
+receiver discovers staleness lazily.
+
+The D13 coalescing tension (cross-source data loss on shared endpoints with
+overwrite semantics) dissolves: no overwrite means no cross-source data loss.
+D13 revisit trigger #1 does not fire — coalescing is achieved through
+composition of existing primitives, not through a second IPC primitive.
+
+Does NOT settle: interrupt delivery mechanism (must account for error-on-full
+via masking), pager unavailability protocol (endpoint destroy with pending
+faults adds a trigger), multi-endpoint wait (D13 revisit trigger #3), Observer
+minimum schema (pending-list linkage field).
+
+- **Rests on:** A3 (generic — different workloads, but only error is
+  irreducible; coalescing is reducible to shared memory + signaling), A4 (purely
+  reactive — kernel-as-sender can't block or retry; receive() is the only
+  trigger for deferred delivery), D12 (fault delegation — fault messages must be
+  delivered; the kernel-as-sender constraint drives deferred delivery), D13
+  (bounded queue, fixed capacity — overflow is the question this answers; one
+  mechanism — deferred delivery stays within the endpoint, not a second
+  primitive), D1 (overflow is cold-path; deferred delivery check on receive is
+  cold-path), D9 + D10 (shared memory for coalescing — the existing primitives
+  that make kernel-level coalescing reducible), D17 (badge-closure dropped on
+  full — not a correctness issue; per-badge tracking × coalescing interaction
+  dissolved), `design/landscape.md` §3.2 (every production microkernel converges
+  on shared memory + IPC signaling for data-plane communication), §5.1
+  (mask-on-delivery for interrupt coalescing).
+- **Status:** settled — revisit if D13 is revised (different IPC model may
+  change overflow semantics), if a downstream derivation reveals that dropped
+  badge-closure notifications create a correctness issue (not just a timeliness
+  issue), or if the interrupt model derivation reveals that error-on-full
+  combined with interrupt masking creates unsolvable delivery gaps.
+- **Journal:** `journal/018-endpoint-overflow-policy.md`.
+
 ### Entry template
 
 Each derivation entry names three things: what rests on what, how settled the
@@ -1006,7 +1051,8 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
 - **Pager unavailability protocol.** What happens when a pager Observer is
   destroyed, blocked, or unresponsive while an Observer is faulting? Archive
   used fault handler chains (Observer → handler → … → kernel as root).
-  Alternative: double fault = kill the faulting Observer.
+  Alternative: double fault = kill the faulting Observer. D18 adds a trigger:
+  endpoint destroy with pending deferred faults — those Observers need cleanup.
 - **Root/bootstrap fault handling.** D12 requires every Observer to have a fault
   handler, but the initial Observer has no userspace pager yet. The archive used
   "kernel as root fault handler" — the one place the kernel does internal
@@ -1020,17 +1066,15 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   → resume) vs. (resume-with-mapping) shapes the pager's syscall pattern.
 - **D7 classification of fault traffic.** D12 says fault notifications go to
   pager Observers. D13 says all information delivery uses queued endpoints.
-  Fault delivery is through normal IPC endpoints (kernel-as-sender). Remaining:
-  the specific mechanism by which the kernel enqueues fault messages.
-- **Endpoint overflow policy.** D13 defers: what happens when the queue is full?
-  Error to sender (archive), overwrite-oldest (ring buffer / coalescing), fault
-  the sender? Per-endpoint policy at creation? Determines whether the coalescing
-  gap (journal/013) is solvable within the queued model.
-- **Coalescing / notification mechanism.** D13 documents a three-way tension:
-  queued endpoints + capacity-1 overwrite + shared endpoints = cross-source data
-  loss. May require a separate lightweight primitive, per-badge slots, one
-  endpoint per source, or acceptance of the tension. Connected to overflow
-  policy.
+  Fault delivery is through normal IPC endpoints (kernel-as-sender). D18 settles
+  the overflow case (deferred via pending list). Remaining: the specific
+  mechanism by which the kernel enqueues fault messages in the normal (non-full)
+  case, and fault message contents.
+- ~~**Endpoint overflow policy.**~~ Settled by D18: error-to-sender, deferred
+  fault delivery for kernel-as-sender. No per-endpoint policy modes.
+- ~~**Coalescing / notification mechanism.**~~ Dissolved by D18: no overwrite
+  means no cross-source data loss. Coalescing lives in shared memory + signaling
+  (D9/D10), not in the endpoint mechanism.
 - **Multi-endpoint wait.** How does an Observer wait on multiple endpoints
   simultaneously? Port aggregator (Zircon), multi-receive syscall, notification
   binding to Observer? D15's many-to-many model reduces urgency (one endpoint
@@ -1041,10 +1085,10 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   detail, 64-bit default), send-once exemption encoding (consumed-by-use vs.
   closed-without-use — deferred with D16's send-once right encoding), badge on
   D16 kernel-created send-once caps (Call() badge assignment), max-badge-count /
-  capacity semantics for tracked endpoints, badge-closure message format,
-  badge-closure × overflow policy interaction, per-badge tracking × coalescing
-  interaction (D13 tension — per-badge slots may serve as both tracking
-  infrastructure and coalescing mechanism).
+  capacity semantics for tracked endpoints, badge-closure message format.
+  (Badge-closure × overflow: resolved by D18 — dropped on full queue. Per-badge
+  tracking × coalescing: dissolved by D18 — coalescing is not an endpoint
+  mechanism; per-badge map serves tracking only.)
 - **Fault handler representation.** D17 surfaces a connection between fault
   handler attachment (D12 downstream) and badge lifecycle: if the fault handler
   reference is a cap-table entry in the faulting Observer's table, then child
@@ -1160,6 +1204,13 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   need it, but those that do should not fall back to polling); five tensions
   accepted for tracked endpoints; archive convergence on representation and
   assignment, mint right and lifecycle tracking are new.
+- `018-endpoint-overflow-policy.md` — reasoning for D18: workload decomposition
+  shows only error-to-sender is irreducible; coalescing is reducible to shared
+  memory + signaling (landscape §3.2 standard pattern); D13 coalescing tension
+  dissolves (no overwrite = no cross-source data loss); kernel-as-sender (D12)
+  fault delivery via deferred pending list (intrusive linked list through
+  Observer objects, zero allocation); badge-closure dropped on full queue
+  (receiver discovers staleness lazily); archive convergence on error-to-sender.
 
 ---
 
