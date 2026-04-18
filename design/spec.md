@@ -736,13 +736,13 @@ capability-distributed topology — diverse patterns served by one mechanism wit
 capability-mediated access.
 
 Request-reply requires explicit reply-cap transfer per RPC (well-understood
-cost, amortizable with one-shot reply cap optimization). Peer disconnection
-detection requires a badge-closure notification mechanism (deferred to
-badge-semantics exploration).
+cost; D16 settles the mechanism as send-once cap on a pre-allocated reply
+endpoint). Peer disconnection detection requires a badge-closure notification
+mechanism (deferred to badge-semantics exploration).
 
 Does NOT settle: badge semantics (per-capability sender identification,
-badge-closure notifications), reply-cap mechanism (one-shot vs. persistent),
-overflow policy, multi-endpoint wait, message format, endpoint naming.
+badge-closure notifications), overflow policy, multi-endpoint wait, message
+format, endpoint naming. (Reply-cap mechanism settled by D16.)
 
 - **Rests on:** D4 (send/receive as independent authorities — confused deputy
   forecloses undifferentiated access), D8 (flat table with rights mask —
@@ -762,6 +762,61 @@ overflow policy, multi-endpoint wait, message format, endpoint naming.
   the unidirectional model (would reopen bidirectional's peer-closure
   advantage).
 - **Journal:** `journal/015-endpoint-shape.md`.
+
+### D16 — Reply via pre-allocated reply endpoint with send-once cap
+
+RPC reply routing uses a pre-allocated reply endpoint per Observer (a regular
+endpoint, D15) combined with a send-once capability right in D8's rights mask.
+On Call(), the kernel creates a send-once cap to the caller's reply endpoint,
+includes it in the request message, and blocks the caller on its reply endpoint.
+The server sends the reply to the send-once cap; the cap is consumed on use. The
+reply endpoint persists across RPCs; the cap is ephemeral. No new kernel type —
+the reply endpoint is a standard endpoint.
+
+Send-once is a general-purpose use-limited attenuation right, not
+reply-specific. It extends D4's attenuation hierarchy: a send-once cap is
+consumed after one send operation. Independent applications include one-shot
+notifications, single-use authorization tokens, and edge-triggered interrupt
+delivery. Prior art: Mach send-once rights on ports; EROS resume keys
+(effectively send-once).
+
+The kernel is free to optimize the reply fast path behind the endpoint interface
+(bypassing the queue structure when the sole waiter is the known caller). This
+is an implementation optimization, not an object-model commitment.
+
+Structurally parallel with D14's fault handling: both deliver a caller-specific
+response capability in the message. The mechanism families differ per D7 — IPC
+reply is send-to-endpoint; fault resume is resume(observer_handle) — but the
+message shape is consistent.
+
+A dedicated Reply kernel type (seL4 MCS) was considered and rejected: the
+fast-path bypass it enables is an optimization achievable behind the endpoint
+interface, not a structural necessity. A persistent send cap without send-once
+(archive's approach) was refined: send-once prevents post-reply capability
+retention. Badge-based reply was foreclosed by D4 (ambient addressing, not
+capability designation).
+
+Does NOT settle: Call()/ReplyRecv() syscall details (part of specific syscall
+surface), reply endpoint allocation policy (pre-allocated at creation vs. lazy),
+send-once right encoding in D8's rights mask, shared reply endpoint with badge
+disambiguation (depends on badge semantics), message format interaction.
+
+- **Rests on:** D15 (unidirectional endpoints require reply-cap transfer — the
+  cost this mechanism pays), D14 (fault resume settled separately — decouples
+  IPC reply from fault resume; structural parallel in message shape), D7 (split
+  model — IPC reply must be in IPC mechanism family), D8 (flat cap table with
+  rights mask — send-once extends the mask), D4 (capability-based authority —
+  badge-based reply foreclosed), D13 (queued endpoints with direct-switch fast
+  path — kernel can optimize reply path), D11 (base revocation — send-once is
+  auto-revoked on use; close semantics), `design/research/endpoint-shape.md`
+  (Mach send-once rights, seL4 reply cap, EROS resume key),
+  `design/research/syscall-landscape.md` §1.1 (seL4 MCS reply object fix).
+- **Status:** settled — revisit if D15 is revised (different endpoint shape
+  changes the reply-cap constraint), if the send-once right proves insufficient
+  for reply semantics (e.g., server needs to reply multiple times), or if the
+  fast-path optimization behind the endpoint interface proves unachievable
+  without a dedicated Reply type.
+- **Journal:** `journal/016-reply-cap-mechanism.md`.
 
 ### Entry template
 
@@ -932,19 +987,15 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   creator-specified), and badge-closure notifications (event-driven peer
   disconnection detection — the gap D15 documents) are open. Connected to D11's
   deferred revocation add-ons.
-- **Reply-cap mechanism.** D15's unidirectional model requires reply-cap
-  transfer per RPC. One-shot (kernel mints during call, auto-revoked after reply
-  — seL4 pattern, near-zero fast-path cost) vs. persistent (client creates reply
-  endpoint, transfers send cap explicitly — more general, higher per-request
-  cost). Affects fast-path design and cap table pressure.
 - **Message format.** Size, slot count, capability transfer encoding, badge
   placement. The archive chose 4 slots (32 bytes), cap_mask bitmask, badge from
-  capability. Interacts with D8 (cap transfer from table to table) and D15
-  (badge and reply-cap must fit in message).
-- **Reply routing.** Reply cap in message (archive for IPC), resume() syscall
-  (archive for faults). D15 confirms unidirectional endpoints require reply-cap
-  transfer for RPC. Does D7's split model require the IPC/fault distinction in
-  reply mechanism?
+  capability. Interacts with D8 (cap transfer from table to table), D15 (badge
+  must fit in message), and D16 (send-once reply cap must fit in message cap
+  slots; Call() must encode "include my reply cap in slot N").
+- **Send-once right encoding.** D16 introduces send-once as a general-purpose
+  right in D8's rights mask. How it is represented (a right bit, a modifier on
+  the send right, or a separate field) is an entry-layout detail deferred with
+  D8's open entry-layout questions.
 - **IPC fast-path conditions.** When does direct process switch occur? Receiver
   waiting? Priority check? seL4 fastpath requires no higher-priority runnable.
 - **Specific syscall surface.** D7 settles two mechanism families but not the
@@ -1029,6 +1080,12 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   aggregation requirement weakening D13; QNX constrained model dominated; peer
   disconnection gap addressable via badge-closure notifications (deferred to
   badge semantics).
+- `016-reply-cap-mechanism.md` — reasoning for D16: pre-allocated reply endpoint
+  (regular endpoint) with send-once cap; D14 decouples fault resume from IPC
+  reply, removing archive's unification argument; send-once is general-purpose
+  use-limited attenuation (Mach precedent), not reply-specific; dedicated Reply
+  type rejected (optimization achievable behind endpoint interface); archive
+  convergence on same object model, refined with send-once.
 
 ---
 

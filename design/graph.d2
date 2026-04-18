@@ -8,10 +8,10 @@
 # Intentionally absent (pending derivation): specific syscall surface, Observer
 # minimum schema, Observer creation API and rights model (D14 downstream),
 # endpoint details (overflow, coalescing, multi-wait, message format, badge
-# semantics, reply-cap mechanism — D13/D15 downstream), revocation add-ons
-# (generation, CDT, badges — base settled in D11; badges explorable now that
-# D15 exists), fault handler attachment (Observer vs. address space — D12
-# downstream), per-physical-core concerns (power, thermal, shared cache/TLB).
+# semantics — D13/D15 downstream), revocation add-ons (generation, CDT,
+# badges — base settled in D11; badges explorable now that D15 exists), fault
+# handler attachment (Observer vs. address space — D12 downstream),
+# per-physical-core concerns (power, thermal, shared cache/TLB).
 # See spec.md#Open questions.
 #
 # Render with: d2 --layout elk graph.d2
@@ -107,13 +107,16 @@ kernel: {
     style.multiple: true
     # D13: queued endpoints with direct-switch fast path (tentative).
     # D15: unidirectional, many-to-many, send/receive as object-rights.
+    # D16: reply via pre-allocated reply endpoint with send-once cap.
     # Single kernel object: bounded queue + waiters list.
     # Topology via capability distribution (not kernel-enforced).
-    # Rights: send (enqueue), receive (dequeue) — independently
+    # Rights: send (enqueue), receive (dequeue), send-once (D16:
+    # use-limited send, consumed after one use) — independently
     # grantable through D8 rights mask.
     # All information delivery (IPC, faults, interrupts) through
     # the same mechanism. Kernel is a sender for fault/interrupt
-    # messages (D12).
+    # messages (D12). Each Observer has a pre-allocated reply
+    # endpoint; Call() creates a send-once cap for RPC reply.
     # Badge, overflow, coalescing, multi-wait, message format TBD.
   }
 
