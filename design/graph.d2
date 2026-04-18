@@ -1,17 +1,18 @@
 # Kernel structural map.
 #
-# Populated from design/spec.md derivations D1-D6, D8-D14, observations O2-O3,
+# Populated from design/spec.md derivations D1-D6, D8-D15, observations O2-O3,
 # and Vocabulary (Space, Time, Observer, Coordinate System). Every box and edge
 # has a corresponding spec.md entry; items labeled "TBD" await downstream
 # derivation.
 #
 # Intentionally absent (pending derivation): specific syscall surface, Observer
 # minimum schema, Observer creation API and rights model (D14 downstream),
-# endpoint shape details (overflow, coalescing, multi-wait, message format —
-# D13 downstream cluster), revocation add-ons (generation, CDT, badges — base
-# settled in D11; badges explorable now that D13 exists), fault handler
-# attachment (Observer vs. address space — D12 downstream), per-physical-core
-# concerns (power, thermal, shared cache/TLB). See spec.md#Open questions.
+# endpoint details (overflow, coalescing, multi-wait, message format, badge
+# semantics, reply-cap mechanism — D13/D15 downstream), revocation add-ons
+# (generation, CDT, badges — base settled in D11; badges explorable now that
+# D15 exists), fault handler attachment (Observer vs. address space — D12
+# downstream), per-physical-core concerns (power, thermal, shared cache/TLB).
+# See spec.md#Open questions.
 #
 # Render with: d2 --layout elk graph.d2
 
@@ -101,6 +102,21 @@ kernel: {
     }
   }
 
+  endpoint: {
+    label: Endpoint
+    style.multiple: true
+    # D13: queued endpoints with direct-switch fast path (tentative).
+    # D15: unidirectional, many-to-many, send/receive as object-rights.
+    # Single kernel object: bounded queue + waiters list.
+    # Topology via capability distribution (not kernel-enforced).
+    # Rights: send (enqueue), receive (dequeue) — independently
+    # grantable through D8 rights mask.
+    # All information delivery (IPC, faults, interrupts) through
+    # the same mechanism. Kernel is a sender for fault/interrupt
+    # messages (D12).
+    # Badge, overflow, coalescing, multi-wait, message format TBD.
+  }
+
   address-space: {
     label: Coordinate System
     style.multiple: true
@@ -158,6 +174,7 @@ kernel.core-manager -> kernel.address-space: TTBR load (hot path)
 # are authorized to use.
 kernel.observer.capabilities -> kernel.memory-object: designate (D4, D9)
 kernel.observer.capabilities -> kernel.address-space: designate (D4, D10)
+kernel.observer.capabilities -> kernel.endpoint: send/receive (D4, D15)
 kernel.observer.capabilities -> kernel.observer: lifecycle ops (D4, D14)
 # D10: Observer binds to address space (one binding per Observer; many Observers per AS).
 kernel.observer -> kernel.address-space: binds to (D10)
@@ -176,11 +193,12 @@ kernel.observer.capabilities -> kernel.core-manager.time-manager: Time capabilit
 # trust-model asymmetry: kernel is exception handler (A4),
 # not a peer.
 userspace -> kernel.core-manager: kernel op syscalls (D7, capability-mediated)
-# D13: Queued endpoints with direct-switch fast path (tentative).
+# D13+D15: Queued endpoints, unidirectional, many-to-many.
 # Bounded queue, non-blocking send, direct process switch when
 # receiver waiting. One mechanism for IPC, faults, interrupts.
-# Endpoint shape details (overflow, coalescing, multi-wait) TBD.
-userspace -> userspace: IPC via queued endpoints (D7+D13, capability-mediated)
+# Send/receive rights via D8 capability rights mask.
+# Endpoint details (overflow, coalescing, multi-wait, badge) TBD.
+userspace -> userspace: IPC via queued endpoints (D7+D13+D15, capability-mediated)
 # D12: All page faults delegated to userspace pager Observers.
 # Kernel provides dispatch only (detect, notify, resume).
 # Pager Observers handle policy (eviction, prefetch, page source).

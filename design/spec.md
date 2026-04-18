@@ -660,9 +660,9 @@ Queue memory charged to creator's Space budget (D8 pattern). Fixed capacity at
 creation. Memory per queued message ~48 bytes (register-sized).
 
 Does NOT settle: overflow policy (error/overwrite/fault), coalescing mechanism,
-multi-endpoint wait, endpoint shape (uni/bidirectional, topology), message
-format, reply routing, queue capacity policy, IPC fast-path conditions, D11
-badge semantics, D12 fault delivery specifics.
+multi-endpoint wait, message format, reply routing, queue capacity policy, IPC
+fast-path conditions, D11 badge semantics, D12 fault delivery specifics.
+(Endpoint shape settled by D15.)
 
 - **Rests on:** A3 (generic — both sync and async patterns required; independent
   path), A4 (purely reactive — no kernel message broker; IPC dispatch within
@@ -717,6 +717,51 @@ per-address-space), Time reclamation on destroy, Observer minimum schema.
   mechanism family) or if D12 is revised (removing fault delegation removes the
   structural demand for resume, though D4 and D6 provide independent support).
 - **Journal:** `journal/014-observer-is-capability-held.md`.
+
+### D15 — Unidirectional, many-to-many endpoints with send/receive rights
+
+An endpoint is a single kernel object: bounded queue + waiters list.
+Capabilities to the same endpoint carry different rights in the D8 rights mask:
+send (enqueue), receive (dequeue), or both. Topology is emergent from capability
+distribution — the kernel does not enforce sender/receiver counts. Three usage
+patterns arise by convention: server inbox (many:1), worker pool (many:many),
+dedicated pipe (1:1).
+
+Three convergent paths: (1) D8 + D11 structural consistency — standard entry
+format, symmetric destroy; bidirectional would require structural exceptions to
+both; (2) D12 + D13 many-to-one composition — fault delivery, interrupt
+delivery, and server patterns are many-to-one; bidirectional requires per-source
+channels + aggregation, weakening D13's "one mechanism" commitment; (3) A3 +
+capability-distributed topology — diverse patterns served by one mechanism with
+capability-mediated access.
+
+Request-reply requires explicit reply-cap transfer per RPC (well-understood
+cost, amortizable with one-shot reply cap optimization). Peer disconnection
+detection requires a badge-closure notification mechanism (deferred to
+badge-semantics exploration).
+
+Does NOT settle: badge semantics (per-capability sender identification,
+badge-closure notifications), reply-cap mechanism (one-shot vs. persistent),
+overflow policy, multi-endpoint wait, message format, endpoint naming.
+
+- **Rests on:** D4 (send/receive as independent authorities — confused deputy
+  forecloses undifferentiated access), D8 (flat table with rights mask —
+  standard entry format; bidirectional would require structural exception), D11
+  (symmetric destroy — bidirectional requires asymmetric peer-closure
+  signaling), D12 + D13 (kernel-as-sender in many-to-one fault/interrupt
+  delivery; one endpoint per receiver, no aggregation needed), A3 (generic —
+  diverse topology patterns required; kernel-enforced fixed topology foreclosed;
+  QNX constrained model dominated), D7 (creation returns one capability,
+  consistent with all other kernel object types), `design/landscape.md` §3.3
+  (IPC object model survey: Mach ports, seL4 endpoints, Zircon channels; Zircon
+  is the sole bidirectional model among surveyed systems).
+- **Status:** settled — revisit if D13 is revised (different IPC model may
+  change the many-to-one composition argument), if D8 is revised (non-uniform
+  entry format would remove one convergent path), or if the badge-semantics
+  exploration reveals that peer disconnection detection cannot be solved within
+  the unidirectional model (would reopen bidirectional's peer-closure
+  advantage).
+- **Journal:** `journal/015-endpoint-shape.md`.
 
 ### Entry template
 
@@ -788,13 +833,15 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   D6). Remaining: formalize the vocabulary's "one or more" — does an Observer
   hold multiple Space claims, or is it one claim subdivided?
 - **Revocation add-ons.** D11 settles the base primitive (close-only + destroy
-  - ABA slot tag). D13 (queued endpoints) now enables exploring: badges
-    (per-capability, attached by kernel to messages — natural fit for queued
-    model); endpoint rotation via destroy (D11 provides destroy; endpoint
-    lifecycle needed); generation-as-revocation (O(1) mass invalidation;
-    alternative is endpoint rotation). Still deferred: CDT (selective revocation
-    of a subtree); who authorizes destroy; strong vs. weak cross-core
-    prompt-effect policy; destroy cleanup protocol (inline vs. preemptible).
+  - ABA slot tag). D13 (queued endpoints) + D15 (unidirectional, many-to-many)
+    now enable exploring: badges (per-capability, attached by kernel to messages
+    — natural fit for D15's model; badge-closure notifications address D15's
+    peer disconnection gap); endpoint rotation via destroy (D11 provides
+    destroy; endpoint lifecycle needed); generation-as-revocation (O(1) mass
+    invalidation; alternative is endpoint rotation). Still deferred: CDT
+    (selective revocation of a subtree); who authorizes destroy; strong vs. weak
+    cross-core prompt-effect policy; destroy cleanup protocol (inline vs.
+    preemptible).
 - **Observer minimum schema.** D6 settles that an Observer is a single execution
   unit. D14 settles that Observer is a capability-held kernel object type. The
   concrete field set (register state, TTBR, capability table pointer, Time
@@ -876,15 +923,28 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   policy.
 - **Multi-endpoint wait.** How does an Observer wait on multiple endpoints
   simultaneously? Port aggregator (Zircon), multi-receive syscall, notification
-  binding to Observer? The "select/epoll" problem for the queued model.
-- **Endpoint shape.** Unidirectional vs. bidirectional. Many-to-many vs.
-  constrained topology. The archive chose unidirectional, many-to-many, topology
-  via capabilities. Send/receive as object-rights.
+  binding to Observer? D15's many-to-many model reduces urgency (one endpoint
+  serves many sources), but the problem persists for Observers handling multiple
+  distinct endpoints (e.g., pager with fault endpoint + user-request endpoint).
+- **Badge semantics.** D15 settles unidirectional many-to-many with send/receive
+  rights. Per-capability badge (kernel-attached to messages) enables receiver to
+  identify sender source. Encoding, assignment (kernel-minted vs.
+  creator-specified), and badge-closure notifications (event-driven peer
+  disconnection detection — the gap D15 documents) are open. Connected to D11's
+  deferred revocation add-ons.
+- **Reply-cap mechanism.** D15's unidirectional model requires reply-cap
+  transfer per RPC. One-shot (kernel mints during call, auto-revoked after reply
+  — seL4 pattern, near-zero fast-path cost) vs. persistent (client creates reply
+  endpoint, transfers send cap explicitly — more general, higher per-request
+  cost). Affects fast-path design and cap table pressure.
 - **Message format.** Size, slot count, capability transfer encoding, badge
   placement. The archive chose 4 slots (32 bytes), cap_mask bitmask, badge from
-  capability. Interacts with D8 (cap transfer from table to table).
+  capability. Interacts with D8 (cap transfer from table to table) and D15
+  (badge and reply-cap must fit in message).
 - **Reply routing.** Reply cap in message (archive for IPC), resume() syscall
-  (archive for faults). Does D7's split model require the distinction?
+  (archive for faults). D15 confirms unidirectional endpoints require reply-cap
+  transfer for RPC. Does D7's split model require the IPC/fault distinction in
+  reply mechanism?
 - **IPC fast-path conditions.** When does direct process switch occur? Receiver
   waiting? Priority check? seL4 fastpath requires no higher-priority runnable.
 - **Specific syscall surface.** D7 settles two mechanism families but not the
@@ -962,6 +1022,13 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   settles fault resume as resume(observer_handle) typed syscall; six downstream
   questions opened (creation API, rights, clonability, suspend, fault handler
   attachment, Time reclamation).
+- `015-endpoint-shape.md` — reasoning for D15: three convergent paths (D8+D11
+  structural consistency, D12+D13 many-to-one composition, A3+capability
+  topology) settle unidirectional many-to-many with send/receive rights;
+  bidirectional (Zircon) rejected for structural exceptions to D8+D11 and
+  aggregation requirement weakening D13; QNX constrained model dominated; peer
+  disconnection gap addressable via badge-closure notifications (deferred to
+  badge semantics).
 
 ---
 
