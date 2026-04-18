@@ -93,8 +93,36 @@ under "Rests on"; it exists so later sections can be precise.
   own logical core — not as a single Frame with multiple Times. This keeps the
   one-Time commitment intact across SMT and non-SMT hardware.
 
+_Term categories:_ The vocabulary has two shapes of term. **Substance names**
+(Space, Time) name a bounded substance; a Frame possesses specific,
+identifiable portions of it — each an object with identity. Naming the
+substance names the possession. **Framework names** (Coordinate System, the
+address-space object of D10) name an instance of a framework that generates
+references — coordinates — by which substance portions are located. A Frame
+possesses the framework instance, not a portion of it. The substance/framework
+split is a categorical difference in what the name refers to, not a style
+inconsistency. Some framework-shaped concepts have no terse single-word
+English name that fits precisely; in those cases the vocabulary accepts a
+two-word proper noun over reaching for an obscure technical term (e.g.,
+"Chart" from differential geometry).
+
+_Capitalized-vs-lowercase convention:_ Capitalized terms (Space, Time, Frame,
+Coordinate System) are kernel proper nouns — names of specific concepts in
+this kernel's design, with the semantics defined here. Lowercase equivalents
+from broader OS literature (memory object, address space) refer to the same
+kind of thing but without claiming this kernel's specific semantics. The two
+are interchangeable in prose; capitalization signals "speaking of our
+concept" vs. "speaking of the general concept." This convention also
+disambiguates the Frame definition's metaphor — "each Frame is an
+independent coordinate system" uses the lowercase general concept, while
+"Coordinate System" (capitalized) refers specifically to the address-space
+object a Frame binds to.
+
 _Naming note:_ these terms are for internal thinking and will not necessarily
-appear in public API names. Public naming is deferred until v0.1.
+appear in public API names. Public naming is deferred until v0.1. D10's
+working name "address space" is the lowercase common-term equivalent of the
+proper-noun candidate "Coordinate System"; final choice deferred with the
+rest of public naming.
 
 ---
 
