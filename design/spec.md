@@ -628,6 +628,59 @@ schema (though fault handler field is now confirmed structurally required).
   accommodated without unacceptable IPC complexity.
 - **Journal:** `journal/012-fault-delegation.md`.
 
+### D13 — Queued endpoints with direct-switch fast path
+
+The primary IPC mechanism is bounded queued endpoints. Messages accumulate in a
+per-endpoint queue. Sender deposits and continues (non-blocking; behavior on
+queue-full is a downstream endpoint-shape question). When the receiver is
+already waiting, direct process switch bypasses the queue entirely at rendezvous
+speed (~400 cycles ARM64). All information delivery — peer IPC, fault
+notifications (D12), interrupt signals, system events — uses the same mechanism.
+
+Sync-only was foreclosed: A3 requires event-driven workload support, and D12
+requires the kernel to deposit fault messages without blocking. The queued model
+subsumes both patterns: sync (send + block-on-reply endpoint) and async (send +
+continue). The archive's "strictly dominates" argument: queued endpoints achieve
+rendezvous speed for the same-core, receiver-waiting case AND provide async
+fallback — sync rendezvous cannot handle the async case at all.
+
+Sync rendezvous + bitmap notifications (seL4 model) was not foreclosed but not
+chosen: sender-always-blocks limitation breaks fan-out patterns; the archive
+independently rejected it for the same reason. Sync + queued notifications
+(QNX-like) also not chosen: still has sender-blocks, plus two mechanisms.
+
+A coalescing tension exists for shared endpoints with overwrite-oldest overflow:
+cross-source data loss when multiple sources share a capacity-1 overwrite
+endpoint. Resolution deferred to endpoint-shape exploration. The tension is
+documented in journal/013 so it is not rediscovered.
+
+Queue memory charged to creator's Space budget (D8 pattern). Fixed capacity at
+creation. Memory per queued message ~48 bytes (register-sized).
+
+Does NOT settle: overflow policy (error/overwrite/fault), coalescing mechanism,
+multi-endpoint wait, endpoint shape (uni/bidirectional, topology), message
+format, reply routing, queue capacity policy, IPC fast-path conditions, D11
+badge semantics, D12 fault delivery specifics.
+
+- **Rests on:** A3 (generic — both sync and async patterns required; independent
+  path), A4 (purely reactive — no kernel message broker; IPC dispatch within
+  syscall handlers), D1 (hot-path — direct-switch fast path achieves D1's
+  minimal per-core hot-path requirement), D7 (split model — IPC as a dedicated
+  mechanism family; D7 notes "couples naturally with async"), D12 (fault traffic
+  is IPC — kernel-as-sender requires non-blocking deposit), D4 (capability-
+  mediated — endpoints designated by capabilities), D3 + D8 (queue memory
+  budgeted to Space through typed-memory-backing pattern), `design/landscape.md`
+  §3.1 (sync vs. async survey), §3.2 ("every production microkernel converges on
+  hybrid"), §3.4 (fast-path data), `design/research/syscall-landscape.md` §10
+  (IPC as pivot point, performance data, lessons from removals).
+- **Status:** tentative — accepted to enable derivation of the downstream
+  endpoint-shape cluster (overflow, coalescing, notification, multi-wait,
+  message format). Revisit if: the coalescing gap cannot be solved without a
+  full second primitive (undermining the "one mechanism" value); bounded queue
+  capacity creates unsolvable priority inversion or deadlock patterns; the
+  multi-endpoint wait problem has no clean solution.
+- **Journal:** `journal/013-ipc-model.md`.
+
 ### Entry template
 
 Each derivation entry names three things: what rests on what, how settled the
@@ -698,14 +751,13 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   D6). Remaining: formalize the vocabulary's "one or more" — does an Observer
   hold multiple Space claims, or is it one claim subdivided?
 - **Revocation add-ons.** D11 settles the base primitive (close-only + destroy
-  - ABA slot tag). Deferred jointly with IPC model: whether to add
-    generation-as-revocation (O(1) mass invalidation; alternative is endpoint
-    rotation via destroy, which requires endpoint-like kernel objects); whether
-    to add CDT (selective revocation of a subtree); whether to add badges
-    (IPC-carried discrimination for service-mediated selective revocation); who
-    authorizes destroy; strong vs. weak cross-core prompt-effect policy; destroy
-    cleanup protocol (inline vs. preemptible). Each add-on's value-vs-cost
-    depends on what IPC-level mechanisms exist.
+  - ABA slot tag). D13 (queued endpoints) now enables exploring: badges
+    (per-capability, attached by kernel to messages — natural fit for queued
+    model); endpoint rotation via destroy (D11 provides destroy; endpoint
+    lifecycle needed); generation-as-revocation (O(1) mass invalidation;
+    alternative is endpoint rotation). Still deferred: CDT (selective revocation
+    of a subtree); who authorizes destroy; strong vs. weak cross-core
+    prompt-effect policy; destroy cleanup protocol (inline vs. preemptible).
 - **Observer minimum schema.** D6 settles that an Observer is a single execution
   unit. The concrete field set (register state, TTBR, capability table pointer,
   Time binding, scheduling state, fault handler) needs formal derivation in the
@@ -752,16 +804,31 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   operation (Zircon), or something shaped by this kernel's IPC model. Tightly
   coupled with IPC design.
 - **D7 classification of fault traffic.** D12 says fault notifications go to
-  pager Observers. Under D7's split model, is this IPC (kernel-as-sender) or a
-  dedicated kernel mechanism? Shapes IPC design.
-- **IPC model.** D7 settles the split interaction model but not the IPC
-  mechanism itself. Synchronous register-based (L4/seL4 tradition) vs.
-  asynchronous buffered (Mach/Zircon tradition) vs. hybrid. Determines message
-  format, channel structure, blocking behavior, multiplexing, and the specific
-  IPC syscall surface. Tightly coupled with D7 — async IPC was a factor in the
-  split decision. D12 adds a constraint: fault traffic (kernel-as-sender,
-  reply-resume semantics, potentially high-frequency under memory pressure) is a
-  first-class IPC workload.
+  pager Observers. D13 says all information delivery uses queued endpoints.
+  Fault delivery is through normal IPC endpoints (kernel-as-sender). Remaining:
+  the specific mechanism by which the kernel enqueues fault messages.
+- **Endpoint overflow policy.** D13 defers: what happens when the queue is full?
+  Error to sender (archive), overwrite-oldest (ring buffer / coalescing), fault
+  the sender? Per-endpoint policy at creation? Determines whether the coalescing
+  gap (journal/013) is solvable within the queued model.
+- **Coalescing / notification mechanism.** D13 documents a three-way tension:
+  queued endpoints + capacity-1 overwrite + shared endpoints = cross-source data
+  loss. May require a separate lightweight primitive, per-badge slots, one
+  endpoint per source, or acceptance of the tension. Connected to overflow
+  policy.
+- **Multi-endpoint wait.** How does an Observer wait on multiple endpoints
+  simultaneously? Port aggregator (Zircon), multi-receive syscall, notification
+  binding to Observer? The "select/epoll" problem for the queued model.
+- **Endpoint shape.** Unidirectional vs. bidirectional. Many-to-many vs.
+  constrained topology. The archive chose unidirectional, many-to-many, topology
+  via capabilities. Send/receive as object-rights.
+- **Message format.** Size, slot count, capability transfer encoding, badge
+  placement. The archive chose 4 slots (32 bytes), cap_mask bitmask, badge from
+  capability. Interacts with D8 (cap transfer from table to table).
+- **Reply routing.** Reply cap in message (archive for IPC), resume() syscall
+  (archive for faults). Does D7's split model require the distinction?
+- **IPC fast-path conditions.** When does direct process switch occur? Receiver
+  waiting? Priority check? seL4 fastpath requires no higher-priority runnable.
 - **Specific syscall surface.** D7 settles two mechanism families but not the
   exact set. The archive's 10-syscall design is a data point. Depends on IPC
   model, Observer lifecycle, and D9 (memory objects).
@@ -824,6 +891,12 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   policy-configuration interface) converge on delegation; self-paging foreclosed
   by A5; kernel-internal foreclosed by A4+A3; hybrid boundary is
   workload-dependent policy (A3); archive convergence on full delegation.
+- `013-ipc-model.md` — reasoning for D13: sync-only foreclosed by A3+D12; queued
+  endpoints with direct-switch fast path subsume both sync and async patterns;
+  archive convergence on same model via independent paths (Time transfer,
+  message unification); coalescing tension documented; tentative pending
+  downstream cluster (overflow, coalescing, notification, multi-wait, message
+  format).
 
 ---
 
