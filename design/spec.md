@@ -610,8 +610,8 @@ Does NOT settle: ~~fault handler attachment (Observer vs. address space)~~
 (settled by D20: per-Observer), pager unavailability protocol (chains vs.
 double-fault-kill), root/bootstrap case mechanism, fault message contents, pager
 reply/resume mechanism, D7 classification of fault traffic (IPC vs. dedicated
-mechanism), Observer minimum schema (though fault handler field is now confirmed
-structurally required).
+mechanism), Observer minimum schema (fault handler confirmed structurally
+required by D12; representation settled by D21 as cap-table entry).
 
 - **Rests on:** A4 (no kernel thread → no background paging; independent path),
   A3 (generic → no single policy; independent path), A5 (net: dispatch interface
@@ -850,10 +850,10 @@ constructed); D14 Observer destroy cascade.
 
 Does NOT settle: badge size (implementation detail, 64-bit default), send-once
 exemption encoding, badge on D16 kernel-created send-once caps, max-badge-count
-semantics, fault handler representation (cap-table entry vs. kernel-internal —
-determines whether badge-closure covers child Observer destruction), badge-
-closure message format, badge-closure × overflow policy interaction, per-badge
-tracking × coalescing interaction.
+semantics, ~~fault handler representation~~ (settled by D21: cap-table entry —
+badge-closure covers child Observer destruction automatically), badge- closure
+message format, badge-closure × overflow policy interaction, per-badge tracking
+× coalescing interaction.
 
 - **Rests on:** D15 (many-to-one patterns create the structural need for sender
   identification; send/receive rights pattern extended with mint), D8 (flat cap
@@ -945,11 +945,10 @@ interface surface, branching, mixed cascades, and inconsistent badge-closure
 coverage. Per-region (Coyotos GPT model) was foreclosed by D9 + D5 (kernel hides
 address space structure).
 
-Does NOT settle: fault handler representation (cap-table entry vs.
-kernel-internal field — derivation strongly indicates cap-table entry for D17
-badge-closure lifecycle visibility, but not formally settled), fault handler
-mutability (part of Observer rights model), fault handler in Observer creation
-API shape, pager unavailability protocol, root/bootstrap fault handling.
+Does NOT settle: fault handler mutability (part of Observer rights model), fault
+handler in Observer creation API shape, pager unavailability protocol,
+root/bootstrap fault handling. (Fault handler representation settled by D21:
+cap-table entry.)
 
 - **Rests on:** D6 (no kernel grouping — per-address-space re-introduces
   grouping through the side door; independent path), D4 (designation = authority
@@ -974,6 +973,57 @@ API shape, pager unavailability protocol, root/bootstrap fault handling.
   reveals that per-Observer configuration creates essential complexity that a
   userspace library cannot absorb.
 - **Journal:** `journal/020-fault-handler-attachment.md`.
+
+### D21 — Fault handler is a cap-table entry
+
+The per-Observer fault handler reference (D20) is a regular capability in the
+Observer's D8 flat table at a kernel-reserved slot index. The entry carries send
+rights to the handler endpoint, the per-Observer badge, and a generational slot
+tag (D11). On fault, the kernel reads the entry at the known index and delivers
+a fault message to the designated endpoint with the stored badge.
+
+Three independent arguments converge: (1) D11 authoritative destroy of the
+handler endpoint must invalidate the reference — the cap-table walk handles this
+automatically; kernel-internal requires a parallel tracking structure; (2) D17
+badge-closure on Observer destroy fires generically via cap-close — kernel-
+internal requires explicit coupling between Observer-destroy and badge-closure;
+(3) D8 ABA slot-tag protection prevents stale references after endpoint destroy
+
+- slot reuse — kernel-internal requires separate dangling-pointer prevention.
+
+The archive chose kernel-internal ("(wormhole_ref, badge) pair, not a handle").
+This divergence is explained by the archive's absence of D17 opt-in per-badge
+lifecycle tracking — without badge-closure, the strongest cap-table argument did
+not exist.
+
+The sole cost is one extra dependent memory access on the fault path (Observer
+struct → cap table → entry at known index). This is marginal relative to the IPC
+delivery that follows (~400 cycles ARM64).
+
+Does NOT settle: reserved slot index value (implementation detail), rights on
+the handler cap (likely send-only; checked at configuration, not fault time),
+address space binding representation (parallel question — same D11/D8 arguments
+apply but different access frequency), pager unavailability protocol (D21 makes
+detection clear: dead cap-table entry).
+
+- **Rests on:** D11 (destroy-invalidation: cap-table walk finds and invalidates
+  the handler entry automatically; kernel-internal requires parallel tracking
+  structure — don't rebuild what the existing system handles), D17
+  (badge-closure lifecycle visibility: Observer destroy closes the cap,
+  triggering notification generically; kernel-internal requires explicit
+  coupling — D17 journal: "no equivalent substitute"), D8 (ABA slot-tag
+  protection: prevents stale handler references; flat table makes cap-table
+  entry cheap — one slot, O(1) lookup, no structural management cost), D4 (the
+  handler participates in the capability system uniformly; kernel-internal is a
+  special case), D20 (per-Observer attachment provides the per-Observer
+  cap-table slot), D1 (one extra memory access on fault path — tension,
+  accepted: marginal relative to IPC delivery cost).
+- **Status:** settled — revisit if D11 is revised (changes the
+  destroy-invalidation mechanism that provides the strongest structural
+  argument), if D17 is revised (removing badge-closure removes the
+  lifecycle-visibility advantage), or if D8 is revised (changes cap-table entry
+  cost or structure).
+- **Journal:** `journal/021-fault-handler-representation.md`.
 
 ### Entry template
 
@@ -1055,14 +1105,16 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
     amplifies this question).
 - **Observer minimum schema.** D6 settles that an Observer is a single execution
   unit. D14 settles that Observer is a capability-held kernel object type. D20
-  settles per-Observer fault handler (endpoint reference + badge). The concrete
-  field set (register state, TTBR, capability table pointer, Time binding,
-  scheduling state, fault handler endpoint + badge, pending-list linkage (D18),
-  Observer state: runnable/blocked/faulted) needs formal derivation in the
-  current chain. Archive journal/004 derived a first-principles minimum. D12
-  confirms the fault handler field is structurally required. D14 confirms
-  lifecycle state tracking is required. D20 confirms per-Observer fault handler
-  storage.
+  settles per-Observer fault handler. D21 settles the handler as a cap-table
+  entry (not a separate Observer struct field). The concrete field set (register
+  state, TTBR, capability table pointer, Time binding, scheduling state,
+  pending-list linkage (D18), Observer state: runnable/blocked/faulted) needs
+  formal derivation in the current chain. Note: the fault handler is NOT in this
+  list — it lives in the cap table at a reserved slot, not the Observer struct.
+  Archive journal/004 derived a first-principles minimum. D12 confirms the fault
+  handler is structurally required. D14 confirms lifecycle state tracking is
+  required. D20 confirms per-Observer attachment. D21 confirms cap-table
+  representation.
 - **Address space binding mutability.** D10 settles the address space as a
   first-class object that Observers bind to. Open: is the binding immutable (set
   at Observer creation) or rebindable at runtime? If rebindable, what happens to
@@ -1149,15 +1201,12 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   (Badge-closure × overflow: resolved by D18 — dropped on full queue. Per-badge
   tracking × coalescing: dissolved by D18 — coalescing is not an endpoint
   mechanism; per-badge map serves tracking only.)
-- **Fault handler representation.** D20 settles per-Observer attachment; D17
-  surfaces a connection to badge lifecycle. If the fault handler reference is a
-  cap-table entry in the Observer's table, child destruction closes that cap,
-  triggering badge-closure on the handler's tracked endpoint — lifecycle
-  visibility for free. If a kernel-internal reference, badge-closure doesn't
-  cover child destruction and a separate mechanism is needed. D20's journal
-  notes the derivation strongly indicates cap-table entry (D17 badge-closure has
-  no equivalent substitute; kernel-internal requires manual cleanup outside the
-  capability system). Not formally settled.
+- ~~**Fault handler representation.**~~ Settled by D21: cap-table entry. The
+  handler is a regular capability in the Observer's D8 flat table at a
+  kernel-reserved slot index. D11 destroy-invalidation, D17 badge-closure, and
+  D8 ABA protection all operate automatically. Archive divergence: archive chose
+  kernel-internal, explained by absence of D17 badge-closure in the archive's
+  derivation context.
 - **Message format.** Size, slot count, capability transfer encoding, badge
   placement. The archive chose 4 slots (32 bytes), cap_mask bitmask, badge from
   capability. Interacts with D8 (cap transfer from table to table), D15 (badge
@@ -1284,6 +1333,13 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   kernel grouping D6 rejected); per-region foreclosed by D9+D5; representation
   (cap-table entry vs. kernel-internal) strongly indicated toward cap-table
   entry by D17 badge-closure but not formally settled; archive convergence.
+- `021-fault-handler-representation.md` — reasoning for D21: three convergent
+  arguments (D11 destroy-invalidation via cap-table walk, D17 badge-closure via
+  generic cap-close, D8 ABA slot-tag protection) settle the fault handler as a
+  cap-table entry at a kernel-reserved slot index; kernel-internal rejected
+  (requires parallel tracking structure, explicit badge-closure coupling,
+  dangling-pointer prevention — rebuilds what the capability system provides);
+  archive divergence explained by absence of D17 in archive's chain.
 
 ---
 

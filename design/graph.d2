@@ -1,17 +1,15 @@
 # Kernel structural map.
 #
-# Populated from design/spec.md derivations D1-D6, D8-D18, observations O2-O3,
+# Populated from design/spec.md derivations D1-D6, D8-D21, observations O2-O3,
 # and Vocabulary (Space, Time, Observer, Coordinate System). Every box and edge
 # has a corresponding spec.md entry; items labeled "TBD" await downstream
 # derivation.
 #
 # Intentionally absent (pending derivation): specific syscall surface, Observer
 # minimum schema, Observer creation API and rights model (D14 downstream),
-# endpoint details (multi-wait, message format — D13/D15 downstream;
-# overflow settled by D18), revocation add-ons (generation, CDT — base settled
-# in D11; badges settled in D17), fault handler representation (cap-table entry
-# vs. kernel-internal — strongly indicated toward cap-table by D20+D17, not
-# formally settled), per-physical-core concerns (power, thermal, shared
+# endpoint details (multi-wait, message format — D13/D15 downstream; overflow
+# settled by D18), revocation add-ons (generation, CDT — base settled in D11;
+# badges settled in D17), per-physical-core concerns (power, thermal, shared
 # cache/TLB). See spec.md#Open questions.
 #
 # Render with: d2 --layout elk graph.d2
@@ -85,6 +83,8 @@ kernel: {
     # address space object). "Process" is a userspace
     # convention (group of Observers sharing an address space).
     # D20: per-Observer fault handler (endpoint ref + badge).
+    # D21: fault handler is a cap-table entry at reserved slot
+    # (not a separate Observer struct field). D11/D17/D8 apply.
     # Minimum schema, creation API, rights model TBD.
 
     capabilities: {
