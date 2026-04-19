@@ -9,10 +9,10 @@
 # minimum schema, Observer creation API and rights model (D14 downstream),
 # endpoint details (multi-wait, message format — D13/D15 downstream;
 # overflow settled by D18), revocation add-ons (generation, CDT — base settled
-# in D11; badges settled in D17), fault handler attachment and representation
-# (Observer vs. address space, cap-table entry vs. kernel-internal — D12/D17
-# downstream), per-physical-core concerns (power, thermal, shared cache/TLB).
-# See spec.md#Open questions.
+# in D11; badges settled in D17), fault handler representation (cap-table entry
+# vs. kernel-internal — strongly indicated toward cap-table by D20+D17, not
+# formally settled), per-physical-core concerns (power, thermal, shared
+# cache/TLB). See spec.md#Open questions.
 #
 # Render with: d2 --layout elk graph.d2
 
@@ -84,6 +84,7 @@ kernel: {
     # one address space binding (D10: binds to first-class
     # address space object). "Process" is a userspace
     # convention (group of Observers sharing an address space).
+    # D20: per-Observer fault handler (endpoint ref + badge).
     # Minimum schema, creation API, rights model TBD.
 
     capabilities: {
@@ -216,7 +217,7 @@ userspace -> userspace: IPC via queued endpoints (D7+D13+D15, capability-mediate
 # D12: All page faults delegated to userspace pager Observers.
 # Kernel provides dispatch only (detect, notify, resume).
 # Pager Observers handle policy (eviction, prefetch, page source).
-# Fault handler attachment (Observer vs. address space) TBD.
+# D20: fault handler attaches per-Observer (endpoint ref + badge).
 # D14: Resume via resume(observer_handle) typed kernel syscall.
 # Observer handle delivered in fault message via cap transfer (D13).
-kernel -> userspace: fault delegation (D12+D14, pager notification + resume)
+kernel -> userspace: fault delegation (D12+D14+D20, pager notification + resume)
