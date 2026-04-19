@@ -659,10 +659,11 @@ documented in journal/013 so it is not rediscovered.
 Queue memory charged to creator's Space budget (D8 pattern). Fixed capacity at
 creation. Memory per queued message ~48 bytes (register-sized).
 
-Does NOT settle: overflow policy (error/overwrite/fault), coalescing mechanism,
-multi-endpoint wait, message format, reply routing, queue capacity policy, IPC
-fast-path conditions, D11 badge semantics, D12 fault delivery specifics.
-(Endpoint shape settled by D15.)
+Does NOT settle: message format, queue capacity policy, IPC fast-path
+conditions, D12 fault delivery specifics. (Endpoint shape settled by D15.
+Overflow policy settled by D18. Coalescing dissolved by D18. Reply routing
+settled by D16. Badge semantics settled by D17. Multi-endpoint wait resolved by
+D19.)
 
 - **Rests on:** A3 (generic — both sync and async patterns required; independent
   path), A4 (purely reactive — no kernel message broker; IPC dispatch within
@@ -676,11 +677,11 @@ fast-path conditions, D11 badge semantics, D12 fault delivery specifics.
   hybrid"), §3.4 (fast-path data), `design/research/syscall-landscape.md` §10
   (IPC as pivot point, performance data, lessons from removals).
 - **Status:** tentative — D18 resolves trigger #1 (coalescing gap dissolved — no
-  second primitive needed) and settles overflow policy. Remaining triggers:
-  bounded queue capacity creates unsolvable priority inversion or deadlock
-  patterns; the multi-endpoint wait problem has no clean solution. Revisit
-  trigger #2 is a downstream concern of priority/scheduling interaction (D2);
-  trigger #3 is its own open question.
+  second primitive needed) and settles overflow policy. D19 resolves trigger #3
+  (multi-endpoint wait — badge fan-in via D15+D17 covers common patterns;
+  multi-receive syscall deferred, not foreclosed). Remaining trigger: bounded
+  queue capacity creates unsolvable priority inversion or deadlock patterns
+  (trigger #2, a downstream concern of priority/scheduling interaction, D2).
 - **Journal:** `journal/013-ipc-model.md`.
 
 ### D14 — Observer is a capability-held kernel object type
@@ -1075,11 +1076,12 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
 - ~~**Coalescing / notification mechanism.**~~ Dissolved by D18: no overwrite
   means no cross-source data loss. Coalescing lives in shared memory + signaling
   (D9/D10), not in the endpoint mechanism.
-- **Multi-endpoint wait.** How does an Observer wait on multiple endpoints
-  simultaneously? Port aggregator (Zircon), multi-receive syscall, notification
-  binding to Observer? D15's many-to-many model reduces urgency (one endpoint
-  serves many sources), but the problem persists for Observers handling multiple
-  distinct endpoints (e.g., pager with fault endpoint + user-request endpoint).
+- ~~**Multi-endpoint wait.**~~ Resolved by D19: badge fan-in (D15+D17) covers
+  the common multi-source patterns (clients, faults, timers, replies on one
+  endpoint). Residual cases (structurally distinct endpoints) use
+  thread-per-source. A stateless multi-receive syscall is explicitly not
+  foreclosed — Observer wait-state internals should accommodate N-endpoint
+  blocking for future addition.
 - **Badge downstream details.** D17 settles badge semantics (minter-assigned,
   mint right, opt-in per-badge tracking). Remaining: badge size (implementation
   detail, 64-bit default), send-once exemption encoding (consumed-by-use vs.
@@ -1211,6 +1213,12 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   fault delivery via deferred pending list (intrusive linked list through
   Observer objects, zero allocation); badge-closure dropped on full queue
   (receiver discovers staleness lazily); archive convergence on error-to-sender.
+- `019-multi-endpoint-wait.md` — resolves D13 trigger #3: badge fan-in (D15+D17)
+  covers common multi-source patterns (clients, faults, timers, replies
+  consolidated onto one endpoint); four mechanisms evaluated (no primitive, port
+  set, multi-receive, endpoint binding); no kernel primitive needed now;
+  multi-receive syscall explicitly not foreclosed; Observer wait-state should
+  accommodate N-endpoint blocking for future addition.
 
 ---
 
