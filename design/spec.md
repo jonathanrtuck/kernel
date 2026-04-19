@@ -1174,7 +1174,10 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
 
 - **Time migration across cores.** When an Observer migrates to a less-loaded
   core, does its Time allocation transfer, or is it re-allocated on the
-  destination? Affects D2's migration story.
+  destination? Affects D2's migration story. (Journal 023 notes that
+  time-as-capability — seL4 MCS, S3K — would make migration a capability
+  transfer: close on source core, create on destination. See also Time
+  reclamation.)
 - **Minimum abstract scheduling properties on an Observer.** D2 says Observers
   carry abstract scheduling properties, but the minimum set (priority? deadline?
   IO-bound flag? period?) is not fixed.
@@ -1228,7 +1231,9 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   externally-suspended). Use cases: debugging, checkpointing, resource pressure.
 - **Time reclamation on Observer destroy.** Observer holds one Time (D6). On
   destroy: return to destroyer? To creator? Destroy the Time? Interacts with
-  Time's non-clonable property.
+  Time's non-clonable property. (Journal 023 notes that time-as-capability — D4
+  consistency — would dissolve this: close returns to delegator via D11
+  semantics.)
 - **Can Observers share capability tables?** D8 settles per-Observer tables with
   no sharing. D10 settles first-class address spaces with multi-Observer binding
   — same-address-space Observer groups are now a supported pattern. Revisit as a
@@ -1318,7 +1323,10 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   placement. The archive chose 4 slots (32 bytes), cap_mask bitmask, badge from
   capability. Interacts with D8 (cap transfer from table to table), D15 (badge
   must fit in message), and D16 (send-once reply cap must fit in message cap
-  slots; Call() must encode "include my reply cap in slot N").
+  slots; Call() must encode "include my reply cap in slot N"). (Journal 023
+  flags ownership-transfer IPC — PLOS 2023 — as timing-sensitive: if the format
+  is settled without considering Rust ownership transfer for zero-copy, the
+  invariant is expensive to retrofit. Evaluate before settling.)
 - **Send-once right encoding.** D16 introduces send-once as a general-purpose
   right in D8's rights mask. How it is represented (a right bit, a modifier on
   the send right, or a separate field) is an entry-layout detail deferred with
@@ -1456,6 +1464,14 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   revision eliminating a proposed type by applying D4/D13/D16 more thoroughly;
   every identified downside traces to a parent decision; archive convergence on
   unification principle ("all information delivery is one mechanism").
+- `023-research-implications.md` — analysis of 2022–2026 bleeding-edge OS
+  research against settled decisions. Not a derivation. Identifies: framekernel
+  pattern (Asterinas) as systematic realization of A1 trust boundaries;
+  verification readiness (Verus/Flux) enabled by framekernel; ownership-transfer
+  IPC (PLOS 2023) as timing-sensitive input to message format; capability graph
+  completeness (TreeSLS) as architectural discipline; time-as-capability (seL4
+  MCS, S3K) as frame for open Time questions. Records explicit non-fits
+  (Theseus, MnemOS, Hubris, io_uring) and research validation of D5, D13, D18.
 
 ---
 
