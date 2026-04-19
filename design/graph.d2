@@ -1,6 +1,6 @@
 # Kernel structural map.
 #
-# Populated from design/spec.md derivations D1-D6, D8-D21, observations O2-O3,
+# Populated from design/spec.md derivations D1-D6, D8-D22, observations O2-O3,
 # and Vocabulary (Space, Time, Observer, Coordinate System). Every box and edge
 # has a corresponding spec.md entry; items labeled "TBD" await downstream
 # derivation.
@@ -122,6 +122,9 @@ kernel: {
     # All information delivery (IPC, faults, interrupts, badge-closure
     # notifications on tracked endpoints) through the same mechanism.
     # Kernel is a sender for fault/interrupt/closure messages (D12, D17).
+    # D22: interrupts are endpoint traffic — no separate IRQ type.
+    # Kernel routes hardware IRQs to endpoints, delivers with badge +
+    # send-once ack cap (D16). Split/combine for IRQ range delegation.
     # Each Observer has a pre-allocated reply endpoint; Call() creates
     # a send-once cap for RPC reply (D16).
     # D18: overflow = error-to-sender. Deferred fault delivery via
@@ -149,6 +152,13 @@ hardware: {
   shape: parallelogram
 
   memory
+  gic: {
+    label: GIC
+    # A2: GICv3 interrupt controller.
+    # D22: kernel programs GIC for interrupt masking, EOI, routing.
+    # CPU Interface (ICC_* regs) is per-core (D1 hot path).
+    # Distributor (GICD_*) is shared (D1 cold path).
+  }
   mmu: {
     label: MMU
     # D5: per-core, programs TTBR to current Observer's page tables.
@@ -167,6 +177,7 @@ hardware: {
 kernel.core-manager -> kernel.core-manager: IPI
 
 # Hardware -> kernel (A2, O3)
+hardware.gic -> kernel.core-manager: device interrupts (D22, routed to endpoints)
 hardware.core -> kernel.core-manager: exceptions (incl. SGI)
 
 # Kernel -> hardware
@@ -199,6 +210,9 @@ kernel.space-manager -> kernel.address-space: page table backing
 # D9 + D10: Memory objects are mapped into address spaces, not Observers directly.
 kernel.memory-object -> kernel.address-space: mapped into (D9, D10)
 kernel.observer.capabilities -> kernel.core-manager.time-manager: Time capabilities
+# D22: Interrupts delivered through endpoints (no separate IRQ type).
+# Kernel routes hardware IRQs to endpoints internally.
+# Ack via D16 send-once cap in interrupt message.
 
 # External interface: two mechanism families (D7).
 # 1. Typed kernel operation syscalls (Observer -> Kernel, always synchronous).
@@ -221,3 +235,7 @@ userspace -> userspace: IPC via queued endpoints (D7+D13+D15, capability-mediate
 # D14: Resume via resume(observer_handle) typed kernel syscall.
 # Observer handle delivered in fault message via cap transfer (D13).
 kernel -> userspace: fault delegation (D12+D14+D20, pager notification + resume)
+# D22: Device interrupts delegated to userspace driver Observers.
+# Kernel dispatches (mask, enqueue to endpoint with badge + send-once ack cap, EOI).
+# Driver handles + acks via send-once. No separate IRQ type — all endpoint traffic.
+kernel -> userspace: interrupt delegation (D22, via endpoints + D16 send-once ack)

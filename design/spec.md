@@ -896,10 +896,11 @@ overwrite semantics) dissolves: no overwrite means no cross-source data loss.
 D13 revisit trigger #1 does not fire — coalescing is achieved through
 composition of existing primitives, not through a second IPC primitive.
 
-Does NOT settle: interrupt delivery mechanism (must account for error-on-full
-via masking), pager unavailability protocol (endpoint destroy with pending
-faults adds a trigger), multi-endpoint wait (D13 revisit trigger #3), Observer
-minimum schema (pending-list linkage field).
+Does NOT settle: ~~interrupt delivery mechanism (must account for error-on-full
+via masking)~~ (settled by D22: delegation with mask-on-delivery; D18 trigger
+does not fire — no unsolvable delivery gaps), pager unavailability protocol
+(endpoint destroy with pending faults adds a trigger), multi-endpoint wait (D13
+revisit trigger #3), Observer minimum schema (pending-list linkage field).
 
 - **Rests on:** A3 (generic — different workloads, but only error is
   irreducible; coalescing is reducible to shared memory + signaling), A4 (purely
@@ -1025,6 +1026,95 @@ detection clear: dead cap-table entry).
   cost or structure).
 - **Journal:** `journal/021-fault-handler-representation.md`.
 
+### D22 — Device interrupt delegation through endpoints
+
+The kernel delegates device interrupt handling to userspace driver Observers.
+The kernel's role is interrupt dispatch: detect the interrupt (read GIC IAR),
+mask it, enqueue a message to the driver Observer's endpoint with a
+per-interrupt badge (D17) and a send-once ack cap (D16), send EOI, return. The
+driver does everything else. Three independent paths converge, paralleling D12
+(fault delegation): (1) A4 forecloses background interrupt processing; (2) A3
+forecloses a single hardcoded interrupt policy; (3) A5 — the dispatch interface
+(mask, signal, EOI) is smaller than a policy-configuration interface.
+
+No separate IRQ kernel object type. The interrupt namespace maps onto the
+endpoint namespace. The kernel maintains an internal IRQ→endpoint routing table.
+At boot, device interrupts (discovered from device tree / GIC configuration)
+route to a root interrupt endpoint. The initial Observer receives this endpoint
+(same mechanism as initial Space distribution — one unsettled boot protocol, one
+answer for both). To delegate, the holder splits the endpoint by IRQ range: a
+new endpoint receives the subset, the original loses it. The new endpoint cap is
+transferred to a driver Observer. Dynamically-discovered interrupts (LPIs via
+ITS) are added to the appropriate endpoint by the kernel.
+
+The driver handles interrupts identically to IPC: receive a message, do work,
+respond. Each interrupt message carries a badge (identifying the IRQ) and a
+send-once ack cap (D16). Using the ack cap unmasks the interrupt. The cap is
+consumed on use (D16 send-once semantics). If the driver crashes and the cap is
+closed without use, the interrupt stays masked (D18 safety). No IRQ-specific
+operations — the driver uses receive() and send-once, exactly like RPC.
+
+Both delivery and ack are IPC-family under D7: delivery is kernel-as-sender
+depositing to endpoint; ack is driver using a send-once cap. No typed kernel
+operations specific to interrupts.
+
+Scope: SPIs (32–1019), LPIs (8192+), and delegatable PPIs. The preemption timer
+is kernel-internal (D2 scheduling mechanism). IPIs are kernel-internal (O2
+cross-core coordination). Landscape §5.1 confirms: "No microkernel delegates the
+preemption timer."
+
+Two endpoint operations emerge: split (create new endpoint, move IRQ routes to
+it) and combine (merge N endpoints into one receiving all sources). Both are
+cold-path. Both are potentially general endpoint operations — split for
+structured load distribution, combine as an alternative to multi-wait (D19).
+Details downstream of the endpoint model.
+
+An IRQ object type (parallel to Space) and a factory model (IRQControl, seL4
+precedent) were both considered and rejected. Every concern identified with the
+endpoint-only model — send-once performance, crash recovery, split/combine
+complexity — traces to a parent decision (D16, general lifecycle, D13/D15) and
+is not introduced by D22.
+
+Does NOT settle: endpoint split semantics (automatic return on destroy for crash
+recovery? generalization to badge-range partitioning?), endpoint combine
+semantics (transparent forwarding vs. dead handles for existing send caps), boot
+distribution of IRQ authority, interrupt priority exposure (GICv3 8-bit priority
+— deferred), IRQ routing policy (which core receives a given SPI — deferred),
+userspace timer mechanism, GICv4 forward-compatibility (direct virtual
+injection).
+
+- **Rests on:** A4 (no background interrupt processing; independent path), A3
+  (no single interrupt policy; independent path), A5 (net: dispatch interface
+  smaller than policy-configuration interface; confirms delegation's interface
+  economics), D12 (structural precedent — three convergent paths parallel
+  exactly), D13 (all information delivery through queued endpoints — interrupt
+  delivery committed; the endpoint IS the delivery mechanism, no additional type
+  needed), D16 (send-once ack cap — D16 explicitly lists "edge-triggered
+  interrupt delivery" as an application; the ack mechanism already exists), D17
+  (badges identify which interrupt fired; fan-in onto one endpoint), D18
+  (overflow settled: mask-on-delivery, GIC holds pending state; D18 revisit
+  trigger does not fire — no unsolvable delivery gaps), D4 (capability-mediated
+  authority — endpoint receive cap IS the authority over its interrupt sources;
+  integer IRQ IDs and file-descriptor models foreclosed), D7 (both delivery and
+  ack are IPC-family; no interrupt-specific typed kernel operations), D8 (flat
+  table accommodates send-once ack caps per interrupt message), D11 (endpoint
+  destroy masks associated IRQs; dead-handle semantics), D1 (hot path: GIC CPU
+  interface registers are per-core; no shared mutable state on interrupt
+  handling path; routing configuration and split/combine are cold-path), O3
+  (interrupts taken on targeted core), `design/landscape.md` §5.1 (four
+  interrupt ownership patterns surveyed; universal kernel-internal: masking,
+  EOI, preemption timer), §5.2 (six interrupt object models surveyed), §5.6
+  (microkernels dissolve deferred processing), §5.7 (GICv3/v4 specifics),
+  `design/research/syscall-landscape.md` (seL4 IRQControl/IRQHandler, Zircon
+  interrupt objects, L4Re IRQ objects, EROS IrqCtl/IrqWait).
+- **Status:** settled — revisit if D13 is revised (different IPC model changes
+  the delivery mechanism), if D16 is revised (changes the send-once mechanism
+  that provides ack), or if a downstream derivation reveals that the
+  endpoint-only model creates essential complexity that a separate IRQ type
+  would not (e.g., split/combine prove unimplementable without per-endpoint IRQ
+  state that breaks D15 uniformity).
+- **Journal:** `journal/022-interrupt-model.md`.
+
 ### Entry template
 
 Each derivation entry names three things: what rests on what, how settled the
@@ -1145,9 +1235,26 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   D8 downstream: does same-address-space sharing create sufficient pressure for
   shared capability tables, or is per-Observer authority (with explicit
   capability transfer) sufficient?
-- **Interrupt model (device interrupts, not exceptions).** Who owns device
-  interrupts? Per-core or routed? Kernel-handled or delegated to userspace
-  drivers?
+- ~~**Interrupt model (device interrupts, not exceptions).**~~ Settled by D22:
+  delegation to userspace driver Observers through endpoints. No separate IRQ
+  object type — the interrupt namespace maps onto the endpoint namespace. The
+  kernel routes hardware interrupts to endpoints; authority = receive cap. Ack
+  via D16 send-once cap in each interrupt message. Split/combine endpoint
+  operations for IRQ range delegation. Preemption timer and IPIs excluded
+  (kernel-internal).
+- **Endpoint split semantics.** D22 introduces split-by-IRQ-range: create a new
+  endpoint, move IRQ routes to it. Open: does the parent endpoint retain a
+  reference for automatic return on destroy (crash recovery)? Does split
+  generalize to badge-range partitioning for IPC sources?
+- **Endpoint combine semantics.** D22 introduces combine: merge N endpoints into
+  one. Open: what happens to existing send caps on the originals? Transparent
+  forwarding, dead handles (D11), or explicit migration?
+- **Interrupt priority and routing.** D22 defers both. GICv3 8-bit priority:
+  kernel-managed vs. exposed. SPI routing: kernel-managed vs. exposed. Both are
+  kernel-internal GIC configuration, not tied to any object model.
+- **Userspace timers.** Preemption timer is kernel-internal (D2). Userspace
+  timer callbacks: kernel programs timer on behalf of Observer and deposits
+  message when it fires. Connects to D2 scheduling model and D13 delivery.
 - **Page size exposure.** D5 settles MMU-backed virtual memory; D9 settles
   variable-size kernel-managed memory objects. Open: expose page granularity to
   userspace (proven, universal) or hide it behind byte-addressed objects
@@ -1340,6 +1447,15 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   (requires parallel tracking structure, explicit badge-closure coupling,
   dangling-pointer prevention — rebuilds what the capability system provides);
   archive divergence explained by absence of D17 in archive's chain.
+- `022-interrupt-model.md` — reasoning for D22: three convergent paths (A4 no
+  background processing, A3 no single policy, A5 dispatch < policy interface)
+  parallel D12 exactly; no separate IRQ object type — interrupts are endpoint
+  traffic; D13 commits delivery, D16 provides ack via send-once, D17 provides
+  badge identification; endpoint split/combine for IRQ range delegation;
+  derivation trail: IRQControl factory → IRQ objects → endpoints-only, each
+  revision eliminating a proposed type by applying D4/D13/D16 more thoroughly;
+  every identified downside traces to a parent decision; archive convergence on
+  unification principle ("all information delivery is one mechanism").
 
 ---
 
