@@ -704,9 +704,9 @@ capability system makes the execution unit a capability-held object type.
 
 Does NOT settle: creation API shape (create-then-configure vs. all-params),
 Observer rights model beyond resume and destroy (suspend, inspect, configure),
-Observer handle clonability, ~~fault handler attachment (per-Observer vs.
-per-address-space)~~ (settled by D20: per-Observer), Time reclamation on
-destroy, Observer minimum schema.
+~~Observer handle clonability~~ (settled by D23: clonable), ~~fault handler
+attachment (per-Observer vs. per-address-space)~~ (settled by D20:
+per-Observer), Time reclamation on destroy, Observer minimum schema.
 
 - **Rests on:** D12 (resume must exist — suspended Observer can't receive IPC;
   independent path), D7 (lifecycle ops are typed kernel syscalls; provides
@@ -1115,6 +1115,52 @@ injection).
   state that breaks D15 uniformity).
 - **Journal:** `journal/022-interrupt-model.md`.
 
+### D23 — Observer capabilities are clonable
+
+Observer handles follow uniform capability rules: clone, attenuate, transfer —
+identically to every other kernel object type (endpoints, address spaces, memory
+objects). Multiple entities can hold capabilities to the same Observer, each
+with independent rights masks. No type-specific exceptions in D8's table
+management.
+
+Non-clonable was rejected on five convergent structural arguments: D4
+attenuation requires cloning (foreclosed), D8 uniformity requires no
+type-specific exceptions (broken), D12/D20 fault delivery requires cap-copy
+(requires new mechanism), D11 close creates orphan risk (requires new
+mechanism), and type consistency (Observer would be the sole non-clonable type
+among five). Non-clonable's sole benefit — kernel-enforced single-manager — is
+achievable through capability discipline under clonable.
+
+The archive's "handle = handler unification" concept (if non-clonable, the
+handle holder is necessarily the fault handler) is dissolved by D20/D21: the
+fault handler is a separate endpoint cap at a reserved slot, not the Observer
+handle holder.
+
+A duplicate-control right (Zircon's ZX_RIGHT_DUPLICATE model) can be added later
+as a rights-mask extension without affecting this decision. Deferred to the
+Observer rights model derivation.
+
+Does NOT settle: Observer rights model (which rights go in the mask), Observer
+creation API shape, Observer minimum schema, whether the duplicate-control right
+is adopted. These are one level down.
+
+- **Rests on:** D4 (attenuation requires cloning — foreclosed by non-clonable;
+  independent path), D8 (uniform flat table — non-clonable breaks uniformity
+  with type-specific enforcement; independent path), D12 + D20 (fault messages
+  include Observer cap via cap transfer — non-clonable requires new mechanism;
+  independent path), D11 (close under non-clonable creates orphan risk — alive
+  Observer unreachable through cap graph; independent path), D10 + D15 + D9
+  (type consistency — all other kernel object types are clonable; Observer would
+  be sole exception), `design/research/execution-unit.md` (100% landscape
+  convergence — all surveyed capability systems make execution-unit handles
+  clonable), `design/research/authority-models.md` §4 (seL4 CNode_Copy, Zircon
+  handle_duplicate — uniform capability copying for all object types).
+- **Status:** settled — revisit if D11 is revised (changes the refcount/destroy
+  model that makes multi-holder safe), if D20/D21 are revised (reopens handle =
+  handler unification), or if the Observer rights model derivation reveals that
+  clonability creates essential complexity that non-clonable would have avoided.
+- **Journal:** `journal/024-observer-handle-clonability.md`.
+
 ### Entry template
 
 Each derivation entry names three things: what rests on what, how settled the
@@ -1218,14 +1264,19 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   one syscall). Minimum inputs: Space, Time, address space (D10), fault handler
   endpoint + badge (D12, D20). Open: initial PC/SP, initial capabilities, create
   vs. start as separate operations.
-- **Observer rights model.** D14 settles resume and destroy as minimum. Open:
+- **Observer rights model.** D14 settles resume and destroy as minimum. D23
+  settles clonability, enabling rights separation across multiple caps. Open:
   suspend (external pause), inspect register state (debugging), modify
   scheduling properties (D2), change fault handler (D20 — per-Observer, so this
   is an Observer-cap right), change address space binding (D10 binding
-  mutability). Each right = a typed kernel syscall under D7.
-- **Observer handle clonability.** Clonable: multiple independent lifecycle
-  managers, flexible delegation (parent delegates kill to sibling). Non-clonable
-  (like Time): exactly one manager, enables handle=handler unification.
+  mutability), duplicate-control right (Zircon ZX_RIGHT_DUPLICATE model,
+  deferred from D23). Each right = a typed kernel syscall under D7.
+- ~~**Observer handle clonability.**~~ Settled by D23: clonable. Observer
+  handles follow uniform capability rules (clone, attenuate, transfer)
+  identically to all other kernel object types. Non-clonable rejected on five
+  convergent structural arguments. Archive's "handle = handler unification"
+  dissolved by D20/D21. Duplicate-control right deferred to Observer rights
+  model.
 - **Suspend as distinct from faulted.** Is there external suspension (not caused
   by fault)? If yes, Observer state has four values (runnable, blocked, faulted,
   externally-suspended). Use cases: debugging, checkpointing, resource pressure.
@@ -1472,6 +1523,12 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   completeness (TreeSLS) as architectural discipline; time-as-capability (seL4
   MCS, S3K) as frame for open Time questions. Records explicit non-fits
   (Theseus, MnemOS, Hubris, io_uring) and research validation of D5, D13, D18.
+- `024-observer-handle-clonability.md` — reasoning for D23: five convergent
+  structural arguments (D4 attenuation, D8 uniformity, D12/D20 fault delivery,
+  D11 orphan risk, type consistency) settle Observer handles as clonable;
+  non-clonable rejected on structural costs exceeding narrow benefit; archive's
+  handle=handler unification dissolved by D20/D21; duplicate-control right
+  deferred to Observer rights model; landscape convergence (100%).
 
 ---
 

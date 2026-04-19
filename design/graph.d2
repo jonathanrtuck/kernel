@@ -1,6 +1,6 @@
 # Kernel structural map.
 #
-# Populated from design/spec.md derivations D1-D6, D8-D22, observations O2-O3,
+# Populated from design/spec.md derivations D1-D6, D8-D23, observations O2-O3,
 # and Vocabulary (Space, Time, Observer, Coordinate System). Every box and edge
 # has a corresponding spec.md entry; items labeled "TBD" await downstream
 # derivation.
@@ -85,6 +85,9 @@ kernel: {
     # D20: per-Observer fault handler (endpoint ref + badge).
     # D21: fault handler is a cap-table entry at reserved slot
     # (not a separate Observer struct field). D11/D17/D8 apply.
+    # D23: Observer handles are clonable — uniform with all
+    # other kernel object types. Rights separation via multiple
+    # caps with different masks.
     # Minimum schema, creation API, rights model TBD.
 
     capabilities: {
