@@ -88,13 +88,15 @@ under "Rests on"; it exists so later sections can be precise.
   condition under which compute (Time) executes instructions within specific
   memory (Space). Each Observer is an independent perspective in which a
   specific computation unfolds. An Observer holds capabilities to one or more
-  Spaces and exactly one Time. Memory is accessed through capability-addressed
-  (Space, offset) pairs; the kernel manages the underlying virtual address
-  mapping (D26). The Observer never chooses or manages virtual addresses.
-  SMT-concurrent workloads, when hardware supports them, are expressed as
-  multiple Observers sharing a Space, each with its own Time on its own logical
-  core — not as a single Observer with multiple Times. This keeps the one-Time
-  commitment intact across SMT and non-SMT hardware.
+  Spaces and one or more Times (D30). Memory is accessed through
+  capability-addressed (Space, offset) pairs; the kernel manages the underlying
+  virtual address mapping (D26). The Observer never chooses or manages virtual
+  addresses. Multiple Time caps on the same core are additive — the kernel
+  maintains a cached scheduling aggregate. SMT-concurrent workloads, when
+  hardware supports them, are expressed as multiple Observers sharing a Space,
+  each with its own Time(s) on its own logical core — not as a single Observer
+  with multiple execution points. The Observer always has one register state,
+  one PC, one execution stream regardless of how many Time caps it holds.
 
 _Capitalized-vs-lowercase convention:_ Capitalized terms (Space, Time, Observer)
 are kernel proper nouns — names of specific concepts in this kernel's design,
@@ -288,12 +290,14 @@ future complementary enforcement layer.
 ### D6 — An Observer is a single schedulable execution unit
 
 An Observer is a single schedulable execution unit: one register state, one
-program counter, one Time, one capability table. The kernel has no "process"
-concept — "process" is a userspace convention (a group of Observers sharing
-Space caps). Multi-threaded execution in shared memory is multiple Observers
-holding caps to the same Space, each with its own Time. Green threads and
-cooperative concurrency are internal to an Observer (userspace, invisible to
-kernel).
+program counter, one or more Time caps (D30), one capability table. The kernel
+has no "process" concept — "process" is a userspace convention (a group of
+Observers sharing Space caps). Multi-threaded execution in shared memory is
+multiple Observers holding caps to the same Space, each with its own Time(s).
+Green threads and cooperative concurrency are internal to an Observer
+(userspace, invisible to kernel). Note: D6 originally said "one Time"
+(vocabulary assumption). D30 settles multi-Time as additive resource claims —
+the Observer still has one execution stream.
 
 The kernel provides no Observer-grouping mechanism. Grouping is neither
 essential complexity (D4 capabilities handle Observer lifecycle without the
@@ -307,13 +311,14 @@ rights model, suspend, clonability), whether Observers can share capability
 tables. (D8 settled capability table structure; D14 settled Observer as
 capability-held object type with resume and destroy as minimum operations.)
 
-- **Rests on:** Observer vocabulary (one Time per Observer; SMT paragraph
-  explicitly models concurrency as multi-Observer), D2 (scheduler selects
-  Observers — one-level selection), D4 (per-Observer capability table; destroy
-  capability works without target cooperation), A3 (generic — no workload
-  assumes or requires kernel-level grouping), `design/landscape.md` §4.4, §6.1
-  (seL4 validates no-kernel-process; all surveyed systems schedule thread-level
-  entities).
+- **Rests on:** Observer vocabulary (SMT paragraph explicitly models concurrency
+  as multi-Observer, not multi-execution-point; D30 revised Time cardinality
+  from "exactly one" to "one or more" without affecting the execution-stream
+  commitment), D2 (scheduler selects Observers — one-level selection), D4
+  (per-Observer capability table; destroy capability works without target
+  cooperation), A3 (generic — no workload assumes or requires kernel-level
+  grouping), `design/landscape.md` §4.4, §6.1 (seL4 validates no-kernel-process;
+  all surveyed systems schedule thread-level entities).
 - **Status:** settled — revisit if a downstream derivation (Observer lifecycle)
   reveals that the absence of kernel grouping forces essential complexity into
   userspace that capabilities alone cannot cover. (D8 settled capability table
@@ -1410,10 +1415,11 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
 ### D29 — Time is a capability-held kernel object type
 
 Time is a kernel object type designated by capabilities, joining Space,
-endpoint, and Observer as the fourth type. The Observer's Time reference is a
-capability in the Observer's D8 flat table at a reserved slot (D21 pattern).
-Time objects represent claims to scheduling allocation on a specific logical
-core.
+endpoint, and Observer as the fourth type. Time capabilities are regular entries
+in the Observer's D8 flat table (D30 settles multi-Time, so the D21
+reserved-slot pattern does not apply — Time caps use regular slots like Space
+caps). Time objects represent claims to scheduling allocation on a specific
+logical core.
 
 Three convergent paths: (1) D4 — Time is "a claim to a portion of a specific
 logical core's scheduling time," a bounded resource. D4 requires capability
@@ -1428,24 +1434,22 @@ destroy closes the Time cap (D11 close semantics). Time migration across cores:
 close Time cap on source core, acquire Time cap on destination (cold-path
 capability operation, D1-consistent).
 
-Does NOT settle: Time cardinality (one or many per Observer — vocabulary's
-"exactly one Time" is an unexamined assumption, not derived; the Space parallel
-under D27 suggests multi-Time may be consistent), Time parameters
-(budget/period, fraction, or claim-to-participate), Time clonability (D23
-uniformity suggests clonable but not derived), Time creation authority (per-core
-Time manager), Time donation mechanism (seL4 MCS pattern — deferred), D2
-scheduling property split (which abstract properties live on Time vs. Observer).
+Does NOT settle: ~~Time cardinality~~ (settled by D30: one or more), Time
+parameters (budget/period, fraction, or claim-to-participate), Time clonability
+(D23 uniformity suggests clonable but not derived), Time creation authority
+(per-core Time manager), Time donation mechanism (seL4 MCS pattern — deferred),
+D2 scheduling property split (which abstract properties live on Time vs.
+Observer).
 
 - **Rests on:** D4 (designation = authority — Time is a bounded resource;
   ambient scheduling privilege foreclosed; independent path), D21 (cap-table
   entry precedent — D11 destroy-invalidation, D17 badge-closure, D8 ABA
   protection apply identically to Time reference; independent path), journal 023
   (cap-graph completeness — Time as kernel-internal would be the sole hole;
-  independent path), D8 (flat cap table — Time cap at reserved slot, O(1)
-  lookup), D11 (close semantics dissolve Time reclamation), D6 (one Time per
-  Observer — vocabulary commitment carried forward; cardinality not yet
-  re-examined), `design/landscape.md` §4.4 (scheduling parameters on thread
-  object vs. separate first-class capability — seL4 MCS scheduling contexts),
+  independent path), D8 (flat cap table — Time caps in regular slots; D30
+  settles multi-Time), D11 (close semantics dissolve Time reclamation),
+  `design/landscape.md` §4.4 (scheduling parameters on thread object vs.
+  separate first-class capability — seL4 MCS scheduling contexts),
   `design/research/syscall-landscape.md` (seL4 MCS SchedContext/SchedControl).
 - **Status:** settled — revisit if D4 is revised (removing designation =
   authority removes the primary path), if D21 is revised (removing cap-table
@@ -1453,6 +1457,53 @@ scheduling property split (which abstract properties live on Time vs. Observer).
   derivation (Time cardinality, Time parameters) reveals that capability-held
   Time creates essential complexity that kernel-internal would not.
 - **Journal:** `journal/030-time-is-capability-held.md`.
+
+### D30 — Multi-Time: an Observer holds one or more Time capabilities
+
+An Observer holds one or more Time capabilities in its D8 flat capability table
+as regular entries (not reserved slots). Each Time cap represents a portion of
+scheduling allocation on a specific logical core. Multiple Time caps on the same
+core are additive — the kernel maintains a cached per-Observer scheduling
+aggregate, updated on Time cap acquisition/loss (cold-path, O(1) per mutation).
+The per-core scheduler reads the cached aggregate (hot-path, O(1)).
+
+The D27 parallel (flat Space cardinality) is suggestive but not mechanically
+forcing: Space is not fungible (each Space is a distinct object), while Time is
+fungible within a core (additive, not independently useful). The deciding
+argument is the server multi-client scenario: a server receiving Time caps from
+clients A and B holds both simultaneously and returns each to the correct client
+on reply. Under single-Time, this requires either kernel-internal donation
+(breaks cap-graph completeness), explicit merge/unmerge protocol (pushes
+coordination complexity to userspace — A5 tension), or a replace-on-receive
+mechanism (new kernel machinery). Multi-Time absorbs multi-source delegation
+automatically.
+
+D6's rejected alternative "Multi-Time Observers" addressed multiple execution
+streams (the SMT paragraph). Multi-Time as additive resource claims on a single
+execution stream is a different concern. The Observer still has one register
+state, one PC, one execution stream.
+
+Does NOT settle: Time parameters (what a Time object carries), Time clonability,
+Time creation authority, Time donation mechanism, cross-core Time holding
+semantics (reservation for migration).
+
+- **Rests on:** A5 (kernel absorbs complexity — single-Time pushes multi-source
+  coordination to userspace; multi-Time absorbs it via cached aggregate), D29
+  (Time is capability-held — cardinality is a downstream question), D8 (flat cap
+  table — Time caps are regular entries like Space caps; no inter-entry
+  hierarchy; additive aggregation is a kernel-internal materialization, not a
+  structural inter-entry relationship), D27 (suggestive parallel — flat Space
+  cardinality established the pattern of multiple independent resource caps per
+  Observer), D11 (close removes one Time cap, reducing the aggregate — no
+  cascade), D1 (cached aggregate is O(1) on hot path; aggregate update is
+  cold-path), `design/research/time-as-kernel-object.md` (no surveyed system
+  provides multi-time per execution unit — novel position, justified by server
+  scenario).
+- **Status:** settled — revisit if D8 is revised (changes cap-table entry
+  model), if a downstream derivation (Time parameters) reveals that additive
+  aggregation is structurally incompatible with the chosen parameter model, or
+  if the cached-aggregate approach proves unimplementable without hot-path cost.
+- **Journal:** `journal/031-time-cardinality.md`.
 
 ---
 
@@ -1483,17 +1534,18 @@ scheduling property split (which abstract properties live on Time vs. Observer).
 - **Observer minimum schema.** D6 settles that an Observer is a single execution
   unit. D14 settles that Observer is a capability-held kernel object type. D20
   settles per-Observer fault handler. D21 settles the handler as a cap-table
-  entry (not a separate Observer struct field). D29 settles Time as a cap-table
-  entry at a reserved slot (same D21 pattern). The concrete field set (register
-  state, L0 page table pointer, capability table pointer, scheduling state,
-  pending-list linkage (D18), Observer state: runnable/blocked/faulted) needs
-  formal derivation in the current chain. Note: neither the fault handler NOR
-  the Time reference are in this list — both live in the cap table at reserved
-  slots, not in the Observer struct. Archive journal/004 derived a
-  first-principles minimum. D12 confirms the fault handler is structurally
-  required. D14 confirms lifecycle state tracking is required. D20 confirms
-  per-Observer attachment. D21 confirms cap-table representation. D29 confirms
-  Time cap-table representation.
+  entry (not a separate Observer struct field). D29 settles Time as capability-
+  held; D30 settles multi-Time in regular cap-table slots (not reserved). The
+  concrete field set (register state, L0 page table pointer, capability table
+  pointer, cached scheduling aggregate (D30), scheduling state, pending-list
+  linkage (D18), Observer state: runnable/blocked/faulted) needs formal
+  derivation in the current chain. Note: the fault handler lives in the cap
+  table at a reserved slot (D21). Time caps live in regular cap-table slots
+  (D30), but the cached scheduling aggregate is an Observer struct field.
+  Archive journal/004 derived a first-principles minimum. D12 confirms the fault
+  handler is structurally required. D14 confirms lifecycle state tracking is
+  required. D20 confirms per-Observer attachment. D21 confirms cap-table
+  representation. D29 confirms Time cap-table representation.
 - ~~**Address space binding mutability.**~~ Dissolved by D26: no address space
   object, no binding. Observers access Spaces through capabilities; the page
   table is updated automatically as caps are acquired and lost.
@@ -1523,15 +1575,12 @@ scheduling property split (which abstract properties live on Time vs. Observer).
   semantics). If this was the last reference, the Time object is destroyed and
   its scheduling allocation returns to the per-core pool. If other caps exist
   (e.g., the creator retained a reference), the object persists.
-- **Time cardinality.** D29 settles Time as capability-held but does NOT settle
-  whether an Observer holds one or many Time caps. The vocabulary's "exactly one
-  Time" (D6) is an unexamined assumption, not derived from axioms. The Space
-  parallel (D27 — flat cardinality, multiple independent Space caps) suggests
-  multi-Time may be the consistent position: each Time cap represents a portion
-  of scheduling allocation, the total is the sum. Observer's abstract scheduling
-  properties (D2) are hints about how the total allocation should be
-  distributed. Requires its own exploration. Interacts with Time parameters and
-  D2.
+- ~~**Time cardinality.**~~ Settled by D30: one or more. An Observer holds
+  multiple independent Time caps in regular cap-table slots. Additive on same
+  core — kernel maintains cached aggregate. Vocabulary revised from "exactly one
+  Time" to "one or more Times." D6's "Multi-Time Observers" rejection was about
+  execution streams, not resource accumulation — superseded for this
+  interpretation.
 - **Time parameters.** What does a Time object carry? Budget/period (seL4 MCS
   sporadic server model — hard-RT capable), a fraction of core scheduling
   capacity (vocabulary-literal), or just a claim-to-participate with quantity
@@ -1546,10 +1595,11 @@ scheduling property split (which abstract properties live on Time vs. Observer).
   (graph.d2 already has this box). Parallels D3 (one logical Space manager). How
   is initial Time distributed at boot?
 - **Time donation on IPC.** seL4 MCS donates scheduling context during IPC for
-  priority inversion prevention. If adopted, likely a kernel-internal
-  optimization on Call() paralleling D16's reply-cap injection. The caller is
-  blocked (doesn't need Time); the server uses the caller's Time. Compatible
-  with D6's constraint at any instant. Deferred.
+  priority inversion prevention. Under D30 (multi-Time), donation via explicit
+  cap transfer is natural: the caller's Time cap appears in the server's table,
+  the server holds it alongside other clients' Time caps, and returns it on
+  reply. Kernel-internal donation on Call() (D16 parallel) remains an option.
+  Deferred.
 - **Can Observers share capability tables?** D8 settles per-Observer tables with
   no sharing. Under D26, Observers sharing Spaces hold independent caps to the
   same Spaces. Revisit as a D8 downstream: does the
@@ -1867,6 +1917,15 @@ scheduling property split (which abstract properties live on Time vs. Observer).
   an unexamined assumption, not derived — flagged for exploration. Archive
   convergence: archive treated Time as first-class object with dynamic bindings
   and Time donation via IPC.
+- `031-time-cardinality.md` — reasoning for D30: multi-Time (one or more Time
+  caps per Observer). Fungibility breaks the D27 mechanical parallel, but the
+  server multi-client scenario decides: a server holding Time from clients A and
+  B returns each correctly without merge protocol. Costs minimal (cached
+  aggregate on Observer struct, cold-path O(1) bookkeeping). D6's "Multi-Time
+  Observers" rejection addressed execution streams, not resource accumulation —
+  superseded. Vocabulary revised. D29 reserved-slot revised to regular slots.
+  Archive convergence: archive explicitly considered "multiple Time fragments."
+  Novel position (no surveyed system provides multi-time per execution unit).
 
 ---
 

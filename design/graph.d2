@@ -1,6 +1,6 @@
 # Kernel structural map.
 #
-# Populated from design/spec.md derivations D1-D6, D8-D29, observations O2-O3,
+# Populated from design/spec.md derivations D1-D6, D8-D30, observations O2-O3,
 # and Vocabulary (Space, Time, Observer). Every box and edge has a corresponding
 # spec.md entry; items labeled "TBD" await downstream derivation.
 #
@@ -83,7 +83,8 @@ kernel: {
     # D14: capability-held kernel object type (fourth type).
     # Lifecycle operations (resume, destroy, potentially more)
     # are typed kernel syscalls (D7) taking Observer handles.
-    # One register state, Time cap(s) at reserved slot (D29), one capability table.
+    # One register state, one or more Time caps in regular slots (D29+D30),
+    # one capability table. Cached scheduling aggregate on Observer struct (D30).
     # Accesses Spaces via (cap, offset) — D26.
     # "Process" is a userspace convention (group of Observers
     # sharing Space caps).
@@ -118,14 +119,14 @@ kernel: {
     label: Time
     style.multiple: true
     # D29: capability-held kernel object type (fourth type).
+    # D30: one or more per Observer, in regular cap-table slots.
     # A claim to a portion of a specific logical core's
     # scheduling allocation. Designated by capabilities.
-    # Observer holds Time cap(s) at reserved slot(s) in
-    # its D8 flat table (D21 pattern).
+    # Multiple Time caps on same core are additive — kernel
+    # maintains cached aggregate per Observer (D30).
     # Time objects are per-core (vocabulary: "fraction of a
     # specific logical core's scheduling allocation").
-    # Cardinality (one or many per Observer), parameters,
-    # clonability, creation authority TBD.
+    # Parameters, clonability, creation authority TBD.
   }
 
   endpoint: {
