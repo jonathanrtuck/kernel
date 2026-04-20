@@ -1161,6 +1161,85 @@ is adopted. These are one level down.
   clonability creates essential complexity that non-clonable would have avoided.
 - **Journal:** `journal/024-observer-handle-clonability.md`.
 
+### D24 — Cap-mapping invariant: no cap → no mapping
+
+The kernel maintains synchronization between capability ownership and MMU
+mappings. When an Observer's last capability to a mapped memory object is
+removed (via close, move, or destroy), the kernel automatically unmaps that
+object from the Observer's address space. Map is explicit (Observer chooses
+address); unmap is both explicit (Observer can unmap while retaining the cap)
+and automatic (last- cap-close triggers unmap).
+
+The invariant strengthens D4: the capability table is the source of truth for
+memory access. An Observer cannot access memory it has no capability for — the
+MMU state follows the cap state. The two-step model (D9: create, then bind) is
+preserved for mapping creation; the invariant adds automatic cleanup on the
+removal side.
+
+Ownership-transfer IPC (the PLOS 2023 concept flagged by journal 023) is not a
+separate mechanism. It falls out naturally: "move" is clone-to-receiver +
+close-on-sender. The close triggers auto-unmap. No IPC-level changes, no
+message-format changes, no D7 classification ambiguity.
+
+The exploration evaluated four IPC-level ownership-transfer mechanisms (full,
+dedicated syscall, optional, none) and found that all IPC-level approaches place
+page-table work on the IPC hot path. The reframe: the safety property (sender
+can't access after send) is better achieved as a cap-system invariant at the
+cold-path cap-close layer than as an IPC mechanism at the hot-path send layer.
+
+For single-Observer address spaces (common case under D6), auto-unmap is always
+local to the Observer's own core — no cross-core broadcast needed. For shared
+address spaces (D10), the broadcast cost is identical to explicit unmap().
+
+The invariant requires per-(address-space, memory-object) cap counting and a
+per-memory-object reverse mapping list (the latter likely needed regardless for
+destroy cleanup). In shared address spaces, Observers that use a mapped memory
+object must each hold their own cap — piggybacking on another Observer's mapping
+without holding a cap is explicitly disallowed.
+
+IPC-level ownership transfer was rejected: the invariant provides the same
+safety property with strictly less cost (cold-path vs. hot-path, no IPC changes,
+no DoS vector from sender-controlled page-table work in the send path, no D13
+queue cost disruption). No invariant (cap-table/MMU independence, the standard
+model) was rejected for inconsistency with D4's "designation = authority"
+commitment.
+
+Does NOT settle: explicit unmap() semantics (likely available — unmap while
+retaining cap for later remap), sub-page packing strategy (kernel-internal
+implementation concern — the invariant makes it load-bearing), Space budget
+transfer on cap move, D9 memory object operations.
+
+- **Rests on:** D4 (designation = authority — the invariant extends D4 to MMU
+  access; the MMU mapping is a form of authority that should be governed by the
+  capability system), D9 (variable-size kernel-managed memory objects — the
+  invariant operates on D9 objects; two-step create/bind preserved), D10
+  (first-class address spaces — shared address spaces create the cascade
+  behavior; per-AS cap counting needed), D8 (flat cap table — cap-table
+  mutations trigger the counter updates; the implementation cost is per-mutation
+  bookkeeping), D11 (base revocation — close triggers auto-unmap as a new
+  consequence; destroy of a memory object still requires cross-AS mapping
+  cleanup regardless of invariant), D5 (MMU-backed virtual memory — the
+  invariant synchronizes the two enforcement layers; CHERI forward-compatible —
+  on CHERI hardware, capability pointers could replace MMU enforcement, and the
+  invariant's interface is not page-table-specific), A1 (Rust ownership — the
+  invariant makes the kernel's external interface consistent with Rust's "if you
+  don't own it, you can't use it" model; not a mandate from A1 but a natural
+  alignment), `design/research/bleeding-edge-os-landscape.md` §9 (PLOS 2023
+  ownership-transfer IPC, Singularity linear types, LionsOS data/metadata
+  separation — prior art on the safety property this invariant provides),
+  `design/landscape.md` §2.7 (page size exposure survey), §3.2 (shared memory as
+  universal data plane — the invariant does not replace this pattern; shared
+  memory + signaling remains the data plane, with the invariant providing
+  automatic cleanup).
+- **Status:** settled — revisit if D4 is revised (weakening "designation =
+  authority" removes the strongest motivation), if D9 is revised (different
+  memory object model may change the cap/mapping relationship), if the sub-page
+  packing question reveals that the invariant creates unacceptable internal
+  fragmentation for small objects, or if a downstream derivation reveals that
+  "cap without mapping" patterns (resource managers holding caps they don't map)
+  are insufficient and "mapping without cap" is structurally needed.
+- **Journal:** `journal/025-cap-mapping-invariant.md`.
+
 ### Entry template
 
 Each derivation entry names three things: what rests on what, how settled the
@@ -1374,10 +1453,10 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   placement. The archive chose 4 slots (32 bytes), cap_mask bitmask, badge from
   capability. Interacts with D8 (cap transfer from table to table), D15 (badge
   must fit in message), and D16 (send-once reply cap must fit in message cap
-  slots; Call() must encode "include my reply cap in slot N"). (Journal 023
-  flags ownership-transfer IPC — PLOS 2023 — as timing-sensitive: if the format
-  is settled without considering Rust ownership transfer for zero-copy, the
-  invariant is expensive to retrofit. Evaluate before settling.)
+  slots; Call() must encode "include my reply cap in slot N"). ~~Journal 023's
+  ownership-transfer timing concern is dissolved by D24: ownership transfer is a
+  cap-system invariant, not an IPC mechanism, so the message format is fully
+  independent.~~
 - **Send-once right encoding.** D16 introduces send-once as a general-purpose
   right in D8's rights mask. How it is represented (a right bit, a modifier on
   the send right, or a separate field) is an entry-layout detail deferred with
@@ -1393,6 +1472,22 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   Interacts with revocation model.
 - **Boot / bring-up model.** BSP-then-APs vs symmetric bring-up. Touches A2 but
   not derived.
+- **Explicit unmap() semantics.** D24 settles auto-unmap on last-cap-close.
+  Open: does explicit unmap() still exist? Likely yes — remap at a different
+  address requires unmap + map while retaining the cap. The cap is not affected
+  by explicit unmap; only the mapping moves. The invariant's auto-unmap is a
+  supplement to explicit unmap, not a replacement.
+- **Sub-page packing under D24.** D24's auto-unmap operates at page granularity
+  (the MMU works in pages). If the kernel packs multiple small memory objects
+  onto one physical page, closing the last cap to one object can't unmap the
+  shared page without affecting the other. Resolution options: no packing (each
+  object gets its own page — internal fragmentation), copy co-located objects on
+  unmap (expensive), or accept that sub-page objects don't benefit from auto-
+  unmap. Kernel-internal implementation concern, but D24 makes it load-bearing.
+- **Space budget transfer on cap move.** When a memory-object cap is moved from
+  one Observer to another, does the budget charge for the object's physical
+  backing transfer to the receiver's Space? Stay with the original creator?
+  Interacts with D3 (one logical Space manager) and D8 (typed-memory backing).
 
 ---
 
@@ -1529,6 +1624,17 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   non-clonable rejected on structural costs exceeding narrow benefit; archive's
   handle=handler unification dissolved by D20/D21; duplicate-control right
   deferred to Observer rights model; landscape convergence (100%).
+- `025-cap-mapping-invariant.md` — reasoning for D24: exploration started as "is
+  ownership-transfer IPC in scope?" and reframed to cap-system invariant. Four
+  IPC-level ownership-transfer mechanisms evaluated and rejected (all place
+  page-table work on IPC hot path or require IPC changes). The invariant (no cap
+  → no mapping) achieves the same safety property at the cold-path cap-close
+  layer. Performance analysis: shared memory is already zero-copy, ownership
+  transfer adds cost, benefit is safety not performance. Cross-core analysis:
+  single-Observer address space requires no broadcast. Novel position: no
+  surveyed system auto-unmaps on cap close; justified by D4's "designation =
+  authority" commitment. Archive divergence: archive proposed IPC-level
+  ownership transfer; this derivation dominates it.
 
 ---
 
