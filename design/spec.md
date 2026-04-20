@@ -86,56 +86,26 @@ under "Rests on"; it exists so later sections can be precise.
 
 - **Observer.** A schedulable execution unit coupling Space and Time — the
   condition under which compute (Time) executes instructions within specific
-  memory (Space). Borrowed from physics: in physics a reference frame bundles
-  observer + coordinate system; this kernel unbundles them, so Observer is the
-  executing entity and Coordinate System is the chart it binds to. Each Observer
-  is an independent perspective in which a specific computation unfolds, binding
-  to a Coordinate System within which its Spaces are located. An Observer
-  correlates one or more Spaces but exactly one Time. SMT-concurrent workloads,
-  when hardware supports them, are expressed as multiple Observers sharing a
-  Space, each with its own Time on its own logical core — not as a single
-  Observer with multiple Times. This keeps the one-Time commitment intact across
-  SMT and non-SMT hardware.
+  memory (Space). Each Observer is an independent perspective in which a
+  specific computation unfolds. An Observer holds capabilities to one or more
+  Spaces and exactly one Time. Memory is accessed through capability-addressed
+  (Space, offset) pairs; the kernel manages the underlying virtual address
+  mapping (D26). The Observer never chooses or manages virtual addresses.
+  SMT-concurrent workloads, when hardware supports them, are expressed as
+  multiple Observers sharing a Space, each with its own Time on its own logical
+  core — not as a single Observer with multiple Times. This keeps the one-Time
+  commitment intact across SMT and non-SMT hardware.
 
-- **Coordinate System.** An instance of the framework by which portions of
-  memory (Spaces) are located within an Observer's computation — the page table
-  tree of D10. Unlike Space and Time, a Coordinate System is not a claim on a
-  bounded substance; it is a framework instance, and multiple Observers can bind
-  to the same one, sharing its mappings, TTBR value, and ASID. An Observer binds
-  to exactly one Coordinate System. Spaces are mapped into a Coordinate System;
-  the same Space may be mapped into multiple Coordinate Systems at different
-  coordinates. Working name; common-term equivalent from broader OS literature
-  is "address space" (D10). No short form — "Coordinate System" stands as-is.
-
-_Term categories:_ The vocabulary has two shapes of term. **Substance names**
-(Space, Time) name a bounded substance; an Observer possesses specific,
-identifiable portions of it — each an object with identity. Naming the substance
-names the possession. **Framework names** (Coordinate System, the address-space
-object of D10) name an instance of a framework that generates references —
-coordinates — by which substance portions are located. An Observer possesses the
-framework instance, not a portion of it. The substance/framework split is a
-categorical difference in what the name refers to, not a style inconsistency.
-Some framework-shaped concepts have no terse single-word English name that fits
-precisely; in those cases the vocabulary accepts a two-word proper noun over
-reaching for an obscure technical term (e.g., "Chart" from differential
-geometry).
-
-_Capitalized-vs-lowercase convention:_ Capitalized terms (Space, Time, Observer,
-Coordinate System) are kernel proper nouns — names of specific concepts in this
-kernel's design, with the semantics defined here. Lowercase equivalents from
-broader OS literature (memory object, address space, thread) refer to the same
-kind of thing but without claiming this kernel's specific semantics. The two are
-interchangeable in prose; capitalization signals "speaking of our concept" vs.
-"speaking of the general concept." Practical effect: lowercase "coordinate
-system" and "reference frame" refer to the physics/general concepts; "Coordinate
-System" (capitalized) refers specifically to the D10 address-space object that
-Observers bind to.
+_Capitalized-vs-lowercase convention:_ Capitalized terms (Space, Time, Observer)
+are kernel proper nouns — names of specific concepts in this kernel's design,
+with the semantics defined here. Lowercase equivalents from broader OS
+literature (memory object, thread) refer to the same kind of thing but without
+claiming this kernel's specific semantics. The two are interchangeable in prose;
+capitalization signals "speaking of our concept" vs. "speaking of the general
+concept."
 
 _Naming note:_ these terms are for internal thinking and will not necessarily
-appear in public API names. Public naming is deferred until v0.1. D10's working
-name "address space" is the lowercase common-term equivalent of the proper-noun
-candidate "Coordinate System"; final choice deferred with the rest of public
-naming.
+appear in public API names. Public naming is deferred until v0.1.
 
 ---
 
@@ -283,24 +253,25 @@ close-only + destroy + ABA tag — add-ons deferred with IPC model.)
   simultaneously (either alone leaves at least one derivation path intact).
 - **Journal:** `journal/004-capability-based-authority.md`.
 
-### D5 — MMU-backed virtual memory with per-Observer address spaces
+### D5 — MMU-backed virtual memory for Space isolation
 
 The kernel requires the ARM64 MMU to be enabled and uses it for inter-Observer
-memory isolation. Each Observer has its own address space (page table tree); the
-MMU enforces that an Observer can only access physical memory mapped into its
-page tables. Three independent paths converge: (1) A2 hardware requires MMU
-enabled for cached memory access — page tables must exist; (2) A3 + A5 require
-hardware-enforced inter-Observer isolation, and the MMU is the only such
-mechanism on ARM64; (3) philosophy "use what the hardware provides." Every
+memory isolation. The MMU enforces that an Observer can only access Spaces it
+holds capabilities to. Each Observer has a per-Observer page table (L0 root);
+page table subtrees for individual Spaces are shared across Observers holding
+the same Space cap (D26). Three independent paths converge: (1) A2 hardware
+requires MMU enabled for cached memory access — page tables must exist; (2) A3 +
+A5 require hardware-enforced inter-Observer isolation, and the MMU is the only
+such mechanism on ARM64; (3) philosophy "use what the hardware provides." Every
 alternative (physical-only, language-safety isolation, CHERI-only, SFI) is
 foreclosed by axioms or hardware facts.
 
-Does NOT settle: address space structure sharing between Observers, page size
-exposure vs. hiding, memory object model (what capabilities designate as
-memory), fault delegation (kernel-internal vs. userspace pager), or CHERI
-forward-compatibility. These are one level down. The memory interface should be
-shaped around objects and permissions, not page-table-specific concepts, to
-avoid foreclosing CHERI as a future complementary enforcement layer.
+Does NOT settle: page size exposure vs. hiding (settled by D25: exposed), memory
+object model (what capabilities designate as memory), fault delegation
+(kernel-internal vs. userspace pager), or CHERI forward-compatibility. These are
+one level down. The memory interface should be shaped around objects and
+permissions, not page-table-specific concepts, to avoid foreclosing CHERI as a
+future complementary enforcement layer.
 
 - **Rests on:** A2 (MMU must be enabled for cached operation — hardware fact,
   not design choice), A3 + A5 (generic workloads require hardware isolation;
@@ -317,10 +288,10 @@ avoid foreclosing CHERI as a future complementary enforcement layer.
 ### D6 — An Observer is a single schedulable execution unit
 
 An Observer is a single schedulable execution unit: one register state, one
-program counter, one Time, one capability table, one address space binding. The
-kernel has no "process" concept — "process" is a userspace convention (a group
-of Observers sharing a Space). Multi-threaded execution in shared memory is
-multiple Observers sharing a Space, each with its own Time. Green threads and
+program counter, one Time, one capability table. The kernel has no "process"
+concept — "process" is a userspace convention (a group of Observers sharing
+Space caps). Multi-threaded execution in shared memory is multiple Observers
+holding caps to the same Space, each with its own Time. Green threads and
 cooperative concurrency are internal to an Observer (userspace, invisible to
 kernel).
 
@@ -331,11 +302,10 @@ groups). Userspace builds grouping policy from capabilities; the kernel provides
 the mechanism.
 
 Does NOT settle: Observer minimum schema (concrete fields need formal
-derivation), Observer-Space binding model (when/how binding occurs), Observer
-lifecycle operations beyond the D14 minimum (creation API, rights model,
-suspend, clonability), whether Observers can share capability tables. (D8
-settled capability table structure; D14 settled Observer as capability-held
-object type with resume and destroy as minimum operations.)
+derivation), Observer lifecycle operations beyond the D14 minimum (creation API,
+rights model, suspend, clonability), whether Observers can share capability
+tables. (D8 settled capability table structure; D14 settled Observer as
+capability-held object type with resume and destroy as minimum operations.)
 
 - **Rests on:** Observer vocabulary (one Time per Observer; SMT paragraph
   explicitly models concurrency as multi-Observer), D2 (scheduler selects
@@ -347,8 +317,8 @@ object type with resume and destroy as minimum operations.)
 - **Status:** settled — revisit if a downstream derivation (Observer lifecycle)
   reveals that the absence of kernel grouping forces essential complexity into
   userspace that capabilities alone cannot cover. (D8 settled capability table
-  structure with per-Observer tables; D10 settled first-class address spaces as
-  the sharing mechanism — no grouping pressure found.)
+  structure with per-Observer tables; D26 settled capability-addressed memory
+  with Space sharing through caps — no grouping pressure found.)
 - **Journal:** `journal/006-observer-is-execution-unit.md`.
 
 ### D7 — Split interaction model: IPC + typed kernel operations
@@ -409,8 +379,7 @@ pushed to userspace as interface complexity. Per-core replicated tables
 (Composite) were rejected on D5 + A2 grounds.
 
 Each Observer always has its own table. Table sharing between Observers is
-deferred to the Observer-Space binding model — it is not a table-structure
-question.
+deferred — it is not a table-structure question.
 
 Does NOT settle: handle numbering/ABA prevention, entry layout (type tag, badge,
 generation counter), revocation model, table-full fault protocol, or maximum
@@ -431,22 +400,22 @@ policy remain open.)
   Zircon flat table; namespace shape comparison), `design/landscape.md` §1.1
   (capability representation survey).
 - **Status:** settled — revisit if D7 is revised (unified model would
-  re-motivate CNode dispatch), if Observer-Space binding reveals that
-  per-Observer tables force essential sharing complexity into userspace, or if
-  the revocation model requires CDT and the absence of tree structure makes it
-  impractical.
+  re-motivate CNode dispatch), if the capability-addressed memory model (D26)
+  reveals that per-Observer tables force essential sharing complexity into
+  userspace, or if the revocation model requires CDT and the absence of tree
+  structure makes it impractical.
 - **Journal:** `journal/008-capability-table-structure.md`.
 
 ### D9 — Variable-size kernel-managed memory objects
 
 The capability-designated memory resource is a variable-size, kernel-managed
-memory object. Observers hold capabilities to memory objects; the kernel
-allocates physical pages behind them and maps them into address spaces
-internally. Memory objects exist independently of any address space binding
-(two-step: create, then bind). Sharing is through capability transfer — multiple
-Observers holding capabilities to the same object. Physical backing is drawn
-from the Observer's Space; which physical pages back an object is a
-kernel-internal concern.
+memory object (Space). Observers hold capabilities to Spaces; the kernel
+allocates physical pages behind them and manages the MMU mappings that make them
+accessible. An Observer accesses a Space through capability-addressed (Space,
+offset) pairs (D26) — holding a Space cap is sufficient for access. Sharing is
+through capability transfer — multiple Observers holding capabilities to the
+same Space. Physical backing is drawn from the Space's budget; which physical
+pages back a Space is a kernel-internal concern.
 
 The seL4 untyped-memory model (userspace manages physical allocation and
 constructs page tables) was rejected: A5 forecloses pushing memory management
@@ -457,10 +426,10 @@ capability per hardware page) were rejected: they force page size exposure,
 violate D5's CHERI forward-compatibility note, and cause capability
 proliferation.
 
-Does NOT settle: page size exposure (byte-addressed vs. page-addressed
-interface), specific operations on memory objects (create, bind, COW/clone,
-resize), object-rights, fault delegation, or precise Space-to-memory-object
-accounting relationship. (Observer-Space binding model settled by D10.)
+Does NOT settle: ~~page size exposure (byte-addressed vs. page-addressed
+interface)~~ (settled by D25: exposed; hiding rejected), specific operations on
+Spaces (create, COW/clone, resize), Space rights, fault delegation, or precise
+parent-Space-to-child-Space accounting relationship.
 
 - **Rests on:** A5 (kernel absorbs complexity — same argument that rejected
   CNode trees in D8 applies to memory management), D5 (MMU-backed virtual
@@ -473,56 +442,25 @@ accounting relationship. (Observer-Space binding model settled by D10.)
   families surveyed; two-step create/map dominant).
 - **Status:** settled — revisit if A5 is revised (would re-open
   userspace-managed models), or if D5's CHERI note is dropped (would re-open
-  page-specific interfaces). (Observer-Space binding model settled by D10 — no
-  sharing pattern issues found.)
+  page-specific interfaces). (Capability-addressed memory model settled by D26 —
+  Space access through caps, no binding step.)
 - **Journal:** `journal/009-memory-object-model.md`.
 
-### D10 — The address space is a first-class kernel object
+### ~~D10 — The address space is a first-class kernel object~~
 
-The address space (page table tree) is a capability-designated kernel object,
-separate from the Observer. Observers bind to an address space; multiple
-Observers can bind to the same one, sharing the page table tree, TTBR value, and
-ASID. Memory objects (D9) are mapped into the address space, not into the
-Observer directly. The address space creator's Space budget pays for the page
-table memory (D8 pattern).
+**Superseded by D26** (capability-addressed memory). The address space is no
+longer a user-visible kernel object type. The page table is a kernel-internal
+mechanism that materializes each Observer's Space cap holdings for the MMU.
 
-The vocabulary's "Space" remains the budget/resource-claim concept. The address
-space is a distinct object type. Working name: "address space" — final naming
-deferred to public API.
+D10's three original derivation paths (A5 mapping consistency, D1 TLB pressure,
+D4 independent delegation) are all satisfied by the capability-addressed model:
+Space caps provide consistent access (A5), per-Space VA bases enable shared page
+table subtrees (D1), and Space caps are the delegation unit (D4). The concerns
+that motivated D10 are real; the response is different — Space caps replace the
+address space object.
 
-The emergent model (address space as an Observer attribute, no separate object)
-was rejected on three independent paths: A5 (mapping consistency for co-located
-Observers is essential complexity pushed to userspace), D1 (TLB capacity
-pressure from per-Observer ASIDs), and D4 (cannot delegate address-space access
-independently of Observer access). The kernel needs to track shared address
-spaces internally regardless (for TLB shootdown); exposing the concept at the
-interface is simpler than inferring it.
-
-API design intent (not settled as interface): Observer creation requires an
-explicit address space capability; creating a new address space has equal
-friction to reusing an existing one; no "share by default."
-
-Does NOT settle: binding mutability (rebindable?), address space lifecycle
-(destruction semantics), Observer creation API, capability table sharing (D8
-downstream, now reopenable), or address space naming.
-
-- **Rests on:** A5 (mapping consistency is essential complexity; same A5
-  argument pattern as D8 and D9 — userspace rebuilds the concept if the kernel
-  omits it), D1 (TLB capacity pressure from per-Observer ASIDs on co-located
-  workloads; shared TTBR eliminates hot-path cost for same-address-space
-  switching), D4 (independent delegation of address-space access vs. Observer
-  access), D6 ("binding" language; "sharing a Space" = multiple Observers bound
-  to the same object), D5 (CHERI note: address space object abstracts the page
-  table), D8 (typed-memory-backing precedent for budget), vocabulary cardinality
-  ("one or more Spaces" fits Space-as-budget, not Space-as-address-space),
-  `design/landscape.md` §6.5 (all surveyed systems use first-class address
-  spaces), `design/research/execution-unit.md` §2 (thread↔address-space
-  cardinality across systems).
-- **Status:** settled — revisit if A5 is revised (re-opens whether mapping
-  consistency belongs in userspace), if D1's hot/cold split is revised (removes
-  TLB argument, though A5 and D4 remain), or if a downstream derivation reveals
-  that first-class address spaces force essential complexity into userspace.
-- **Journal:** `journal/010-address-space-is-first-class.md`.
+- **Original journal:** `journal/010-address-space-is-first-class.md`.
+- **Supersession journal:** `journal/027-capability-addressed-memory.md`.
 
 ### D11 — Base revocation primitive: close-only + authoritative destroy
 
@@ -536,11 +474,11 @@ ABA defense, not revocation: it does not invalidate live capabilities.
 Close-only alone (Base-A) was rejected. Four structural workload patterns under
 A3 — adversarial targets, failure-mode targets, pressure response, and
 structural cascade — require terminate-by-force. For kernel-owned resources
-(Observers, address spaces, memory objects), close-only cannot express this; the
-userspace construction that would substitute cannot interpose at the MMU level
-and must route through a kernel mechanism that is itself a form of authoritative
-destroy under another name. Forcing this construction into userspace violates A5
-via O4 (a).
+(Observers, Spaces, endpoints), close-only cannot express this; the userspace
+construction that would substitute cannot interpose at the MMU level and must
+route through a kernel mechanism that is itself a form of authoritative destroy
+under another name. Forcing this construction into userspace violates A5 via O4
+(a).
 
 Add-on mechanisms for mass invalidation (generation-as-revocation) and selective
 revocation (CDT, badges) are deferred. Their value depends on the IPC model:
@@ -573,8 +511,8 @@ revocation interaction.
 - **Status:** settled — revisit when the IPC model decision reveals whether
   Base-B plus IPC-level mechanisms (endpoint rotation, badges) cover the
   workloads that would otherwise justify generation-as-revocation or CDT, or if
-  a downstream lifecycle derivation (Observer, address space) reveals the base
-  primitive is structurally insufficient.
+  a downstream lifecycle derivation (Observer, Space) reveals the base primitive
+  is structurally insufficient.
 - **Journal:** `journal/011-base-revocation-primitive.md`.
 
 ### D12 — Fault delegation to userspace pager Observers
@@ -688,11 +626,10 @@ D19.)
 ### D14 — Observer is a capability-held kernel object type
 
 Observer is a kernel object type designated by capabilities, joining Space,
-Time, Coordinate System (D10), and endpoint (D13) as the fifth type. Lifecycle
-operations — at minimum resume and destroy — are typed kernel syscalls (D7)
-taking Observer capability handles. The capability's rights mask governs
-permitted operations. D11's destroy provides termination; outstanding
-capabilities become dead handles.
+Time, and endpoint (D13) as the fourth type. Lifecycle operations — at minimum
+resume and destroy — are typed kernel syscalls (D7) taking Observer capability
+handles. The capability's rights mask governs permitted operations. D11's
+destroy provides termination; outstanding capabilities become dead handles.
 
 The derivation is forced by a chain of settled decisions: D12 requires resume as
 a kernel operation on a suspended Observer (can't participate in IPC); D7
@@ -881,8 +818,9 @@ message format, badge-closure × overflow policy interaction, per-badge tracking
 
 When a send to a queued endpoint finds the queue at capacity, the kernel returns
 an error. No per-endpoint policy modes, no overwrite, no kernel-level
-coalescing. Coalescing workloads use shared memory + signaling (D9/D10 +
-capacity-1 endpoints) — the standard microkernel architecture (landscape §3.2).
+coalescing. Coalescing workloads use shared memory + signaling (D9 shared Space
+caps + capacity-1 endpoints) — the standard microkernel architecture (landscape
+§3.2).
 
 For the kernel-as-sender (D12 fault messages), deferred delivery: the kernel
 links the faulting Observer into a per-endpoint pending list. The next receive()
@@ -910,12 +848,12 @@ revisit trigger #3), Observer minimum schema (pending-list linkage field).
   (bounded queue, fixed capacity — overflow is the question this answers; one
   mechanism — deferred delivery stays within the endpoint, not a second
   primitive), D1 (overflow is cold-path; deferred delivery check on receive is
-  cold-path), D9 + D10 (shared memory for coalescing — the existing primitives
-  that make kernel-level coalescing reducible), D17 (badge-closure dropped on
-  full — not a correctness issue; per-badge tracking × coalescing interaction
-  dissolved), `design/landscape.md` §3.2 (every production microkernel converges
-  on shared memory + IPC signaling for data-plane communication), §5.1
-  (mask-on-delivery for interrupt coalescing).
+  cold-path), D9 (shared memory for coalescing — sharing Space caps makes
+  kernel-level coalescing reducible), D17 (badge-closure dropped on full — not a
+  correctness issue; per-badge tracking × coalescing interaction dissolved),
+  `design/landscape.md` §3.2 (every production microkernel converges on shared
+  memory + IPC signaling for data-plane communication), §5.1 (mask-on-delivery
+  for interrupt coalescing).
 - **Status:** settled — revisit if D13 is revised (different IPC model may
   change overflow semantics), if a downstream derivation reveals that dropped
   badge-closure notifications create a correctness issue (not just a timeliness
@@ -925,44 +863,31 @@ revisit trigger #3), Observer minimum schema (pending-list linkage field).
 
 ### D20 — Per-Observer fault handler attachment
 
-The fault handler attaches to the Observer, not the address space. Each Observer
-stores a fault handler endpoint reference and a badge. On fault, the kernel
-reads both from the faulting Observer's struct and delivers a fault notification
-to the handler endpoint with the stored badge, plus the faulting Observer's
-capability handle via cap transfer (D14).
+The fault handler attaches to the Observer. Each Observer stores a fault handler
+endpoint reference and a badge. On fault, the kernel reads both from the
+faulting Observer's struct and delivers a fault notification to the handler
+endpoint with the stored badge, plus the faulting Observer's capability handle
+via cap transfer (D14).
 
 Every Observer creation must supply a fault handler endpoint and badge (D12
 invariant enforced at creation time). Redundant configuration when N Observers
 want the same handler is a userspace ergonomics cost, not kernel complexity — a
 library function absorbs it.
 
-Per-address-space attachment was rejected on five independent tensions: D6
-(implicit grouping the kernel rejected), D4 (authority coupling), D17
-(badge-closure doesn't provide per-Observer lifecycle visibility), D11 (handler
-destroy cascades to all bound Observers), D1 (split storage on fault path).
-Per-both (Mach/Zircon hierarchical model) was rejected because the hierarchical
-model composes with kernel-level grouping that D6 explicitly rejected; it adds
-interface surface, branching, mixed cascades, and inconsistent badge-closure
-coverage. Per-region (Coyotos GPT model) was foreclosed by D9 + D5 (kernel hides
-address space structure).
-
 Does NOT settle: fault handler mutability (part of Observer rights model), fault
 handler in Observer creation API shape, pager unavailability protocol,
 root/bootstrap fault handling. (Fault handler representation settled by D21:
 cap-table entry.)
 
-- **Rests on:** D6 (no kernel grouping — per-address-space re-introduces
-  grouping through the side door; independent path), D4 (designation = authority
-  — per-Observer allows independent delegation of fault handler configuration
-  authority; fault handler control separable from address space authority;
-  independent path), D17 (badge-closure lifecycle visibility works only with
-  per-Observer reference; fault handler badge is structurally required
-  per-Observer regardless of endpoint attachment; independent path), D12 (every
-  Observer must have a fault handler — maps to local invariant with
-  per-Observer; indirect and fragile invariant with per-address-space), D14
+- **Rests on:** D6 (no kernel grouping — per-Observer is the natural attachment
+  level; independent path), D4 (designation = authority — per-Observer allows
+  independent delegation of fault handler configuration authority; independent
+  path), D17 (badge-closure lifecycle visibility works only with per-Observer
+  reference; fault handler badge is structurally required per-Observer
+  regardless of endpoint attachment; independent path), D12 (every Observer must
+  have a fault handler — maps to local invariant with per-Observer), D14
   (Observer as capability-held type — provides the natural configuration noun),
-  D10 (first-class address space provides the alternative attachment point; D20
-  rejects attaching to it), D1 (hot-path simplicity — single cache-line access),
+  D1 (hot-path simplicity — single cache-line access),
   `design/research/execution-unit.md` §4 (fault handling across systems),
   `design/research/page-fault-routing.md` §3 (seL4 per-TCB fault handler),
   `design/landscape.md` §5.3 (fault delivery mechanisms — seL4 per-endpoint,
@@ -1003,9 +928,7 @@ delivery that follows (~400 cycles ARM64).
 
 Does NOT settle: reserved slot index value (implementation detail), rights on
 the handler cap (likely send-only; checked at configuration, not fault time),
-address space binding representation (parallel question — same D11/D8 arguments
-apply but different access frequency), pager unavailability protocol (D21 makes
-detection clear: dead cap-table entry).
+pager unavailability protocol (D21 makes detection clear: dead cap-table entry).
 
 - **Rests on:** D11 (destroy-invalidation: cap-table walk finds and invalidates
   the handler entry automatically; kernel-internal requires parallel tracking
@@ -1118,17 +1041,16 @@ injection).
 ### D23 — Observer capabilities are clonable
 
 Observer handles follow uniform capability rules: clone, attenuate, transfer —
-identically to every other kernel object type (endpoints, address spaces, memory
-objects). Multiple entities can hold capabilities to the same Observer, each
-with independent rights masks. No type-specific exceptions in D8's table
-management.
+identically to every other kernel object type (Spaces, endpoints). Multiple
+entities can hold capabilities to the same Observer, each with independent
+rights masks. No type-specific exceptions in D8's table management.
 
 Non-clonable was rejected on five convergent structural arguments: D4
 attenuation requires cloning (foreclosed), D8 uniformity requires no
 type-specific exceptions (broken), D12/D20 fault delivery requires cap-copy
 (requires new mechanism), D11 close creates orphan risk (requires new
 mechanism), and type consistency (Observer would be the sole non-clonable type
-among five). Non-clonable's sole benefit — kernel-enforced single-manager — is
+among four). Non-clonable's sole benefit — kernel-enforced single-manager — is
 achievable through capability discipline under clonable.
 
 The archive's "handle = handler unification" concept (if non-clonable, the
@@ -1149,9 +1071,9 @@ is adopted. These are one level down.
   with type-specific enforcement; independent path), D12 + D20 (fault messages
   include Observer cap via cap transfer — non-clonable requires new mechanism;
   independent path), D11 (close under non-clonable creates orphan risk — alive
-  Observer unreachable through cap graph; independent path), D10 + D15 + D9
-  (type consistency — all other kernel object types are clonable; Observer would
-  be sole exception), `design/research/execution-unit.md` (100% landscape
+  Observer unreachable through cap graph; independent path), D15 + D9 (type
+  consistency — all other kernel object types are clonable; Observer would be
+  sole exception), `design/research/execution-unit.md` (100% landscape
   convergence — all surveyed capability systems make execution-unit handles
   clonable), `design/research/authority-models.md` §4 (seL4 CNode_Copy, Zircon
   handle_duplicate — uniform capability copying for all object types).
@@ -1163,82 +1085,165 @@ is adopted. These are one level down.
 
 ### D24 — Cap-mapping invariant: no cap → no mapping
 
-The kernel maintains synchronization between capability ownership and MMU
-mappings. When an Observer's last capability to a mapped memory object is
-removed (via close, move, or destroy), the kernel automatically unmaps that
-object from the Observer's address space. Map is explicit (Observer chooses
-address); unmap is both explicit (Observer can unmap while retaining the cap)
-and automatic (last- cap-close triggers unmap).
+Under capability-addressed memory (D26), the cap-mapping invariant is a
+structural property, not an enforced invariant. An Observer's page table
+contains entries only for Spaces it holds capabilities to. When an Observer
+loses its last capability to a Space (via close, move, or destroy), the kernel
+removes the corresponding page table entries. The Observer cannot access memory
+it has no capability for — the MMU state is a materialized view of the cap
+state.
 
-The invariant strengthens D4: the capability table is the source of truth for
-memory access. An Observer cannot access memory it has no capability for — the
-MMU state follows the cap state. The two-step model (D9: create, then bind) is
-preserved for mapping creation; the invariant adds automatic cleanup on the
-removal side.
+There is no separate map() or unmap() operation. Holding a Space cap is
+sufficient for access (D26); losing the cap removes access. Both directions are
+driven by capability state.
 
 Ownership-transfer IPC (the PLOS 2023 concept flagged by journal 023) is not a
 separate mechanism. It falls out naturally: "move" is clone-to-receiver +
-close-on-sender. The close triggers auto-unmap. No IPC-level changes, no
-message-format changes, no D7 classification ambiguity.
+close-on-sender. The close removes the sender's page table entries for that
+Space. No IPC-level changes, no message-format changes, no D7 classification
+ambiguity. The safety property (sender can't access after send) is achieved as a
+cap-system structural property at the cold-path cap-close layer rather than as
+an IPC mechanism at the hot-path send layer.
 
-The exploration evaluated four IPC-level ownership-transfer mechanisms (full,
-dedicated syscall, optional, none) and found that all IPC-level approaches place
-page-table work on the IPC hot path. The reframe: the safety property (sender
-can't access after send) is better achieved as a cap-system invariant at the
-cold-path cap-close layer than as an IPC mechanism at the hot-path send layer.
+Per-Space VA bases (D26) mean that page table subtree cleanup on cap loss is
+local to the losing Observer's page table — no cross-core broadcast needed. The
+kernel maintains per-Observer Space cap reference counts; when the count for a
+Space reaches zero, the page table subtree for that Space is detached from the
+Observer's L0 table.
 
-For single-Observer address spaces (common case under D6), auto-unmap is always
-local to the Observer's own core — no cross-core broadcast needed. For shared
-address spaces (D10), the broadcast cost is identical to explicit unmap().
-
-The invariant requires per-(address-space, memory-object) cap counting and a
-per-memory-object reverse mapping list (the latter likely needed regardless for
-destroy cleanup). In shared address spaces, Observers that use a mapped memory
-object must each hold their own cap — piggybacking on another Observer's mapping
-without holding a cap is explicitly disallowed.
-
-IPC-level ownership transfer was rejected: the invariant provides the same
-safety property with strictly less cost (cold-path vs. hot-path, no IPC changes,
-no DoS vector from sender-controlled page-table work in the send path, no D13
-queue cost disruption). No invariant (cap-table/MMU independence, the standard
-model) was rejected for inconsistency with D4's "designation = authority"
-commitment.
-
-Does NOT settle: explicit unmap() semantics (likely available — unmap while
-retaining cap for later remap), sub-page packing strategy (kernel-internal
-implementation concern — the invariant makes it load-bearing), Space budget
-transfer on cap move, D9 memory object operations.
+Does NOT settle: sub-page packing strategy (kernel-internal implementation
+concern), Space budget transfer on cap move, D9 Space operations.
 
 - **Rests on:** D4 (designation = authority — the invariant extends D4 to MMU
-  access; the MMU mapping is a form of authority that should be governed by the
-  capability system), D9 (variable-size kernel-managed memory objects — the
-  invariant operates on D9 objects; two-step create/bind preserved), D10
-  (first-class address spaces — shared address spaces create the cascade
-  behavior; per-AS cap counting needed), D8 (flat cap table — cap-table
-  mutations trigger the counter updates; the implementation cost is per-mutation
-  bookkeeping), D11 (base revocation — close triggers auto-unmap as a new
-  consequence; destroy of a memory object still requires cross-AS mapping
-  cleanup regardless of invariant), D5 (MMU-backed virtual memory — the
-  invariant synchronizes the two enforcement layers; CHERI forward-compatible —
-  on CHERI hardware, capability pointers could replace MMU enforcement, and the
-  invariant's interface is not page-table-specific), A1 (Rust ownership — the
-  invariant makes the kernel's external interface consistent with Rust's "if you
-  don't own it, you can't use it" model; not a mandate from A1 but a natural
-  alignment), `design/research/bleeding-edge-os-landscape.md` §9 (PLOS 2023
-  ownership-transfer IPC, Singularity linear types, LionsOS data/metadata
-  separation — prior art on the safety property this invariant provides),
-  `design/landscape.md` §2.7 (page size exposure survey), §3.2 (shared memory as
-  universal data plane — the invariant does not replace this pattern; shared
-  memory + signaling remains the data plane, with the invariant providing
-  automatic cleanup).
+  access; the MMU mapping is a form of authority governed by the capability
+  system), D26 (capability-addressed memory — the page table is a materialized
+  view of cap holdings; the invariant is structural rather than enforced), D9
+  (variable-size kernel-managed Spaces — the invariant operates on D9 Spaces),
+  D8 (flat cap table — cap-table mutations drive page table updates), D11 (base
+  revocation — close triggers page table cleanup; destroy of a Space requires
+  cleanup across all holders), D5 (MMU-backed virtual memory — the invariant
+  synchronizes the two enforcement layers; CHERI forward-compatible), A1 (Rust
+  ownership — the invariant makes the kernel's external interface consistent
+  with Rust's "if you don't own it, you can't use it" model; not a mandate from
+  A1 but a natural alignment), `design/research/bleeding-edge-os-landscape.md`
+  §9 (PLOS 2023 ownership-transfer IPC, Singularity linear types, LionsOS
+  data/metadata separation — prior art on the safety property this invariant
+  provides), `design/landscape.md` §3.2 (shared memory as universal data plane —
+  the invariant does not replace this pattern; shared Space caps + signaling
+  remains the data plane, with the invariant providing automatic cleanup).
 - **Status:** settled — revisit if D4 is revised (weakening "designation =
   authority" removes the strongest motivation), if D9 is revised (different
-  memory object model may change the cap/mapping relationship), if the sub-page
+  memory model may change the cap/mapping relationship), or if the sub-page
   packing question reveals that the invariant creates unacceptable internal
-  fragmentation for small objects, or if a downstream derivation reveals that
-  "cap without mapping" patterns (resource managers holding caps they don't map)
-  are insufficient and "mapping without cap" is structurally needed.
-- **Journal:** `journal/025-cap-mapping-invariant.md`.
+  fragmentation for small Spaces.
+- **Journal:** `journal/025-cap-mapping-invariant.md`,
+  `journal/027-capability-addressed-memory.md`.
+
+### D25 — Page size is exposed to userspace
+
+Observers can query the page size and must account for page granularity in
+memory operations. Full hiding (byte-addressed memory objects with no page
+concept in the interface) is rejected.
+
+The exploration began with four axioms (A2, A3, A5, D5 CHERI note) pushing
+toward hiding and one settled decision (D24 cap-mapping invariant) pushing
+toward exposure. A concrete scenario resolved the tension: two separate 4KB
+Spaces on 16KB hardware. Every hiding strategy fails — through unpredictable
+errors, security violations (sub-page packing lets an Observer access memory it
+has no cap for — D4 and D24 violation), or hardware-dependent behavior.
+
+Page-size knowledge is essential complexity (O4). Hiding it does not eliminate
+it — it converts predictable constraints into unpredictable, hardware-dependent
+failures. The Observer is better served by knowing the constraint.
+
+The A2/A3/D5 tensions under exposure are bounded: page size is a queryable
+runtime constant (not hard-coded), code that queries and aligns is portable
+across 4K/16K/64K hardware, and the query interface survives on CHERI hardware
+(the value changes to capability alignment granularity, the interface shape
+persists).
+
+Does NOT settle: whether the interface is fully page-addressed (all operations
+require page-aligned inputs) or implicitly rounded (operations accept byte
+values, kernel rounds, PAGE_SIZE queryable for Observers that want to optimize).
+This is one level down.
+
+- **Rests on:** D4 (designation = authority — sub-page packing under hiding
+  creates unauthorized access, the decisive security argument), D24 (cap-mapping
+  invariant — auto-unmap at page granularity makes sub-page packing
+  load-bearing; hiding + D24 is structurally incompatible for shared objects),
+  D9 (variable-size memory objects — the interface granularity depends on this;
+  D9 deferred it as "one level down"), D5 (MMU-backed virtual memory — the MMU
+  operates in pages; CHERI note tension accepted as bounded), A2 (ARM64 supports
+  4K/16K/64K — multi-granule is the hardware reality that hiding attempts to
+  absorb), A3 (generic — queryable page size is portable; hidden page size
+  creates hardware-dependent failures), O4 (essential complexity — page-size
+  knowledge cannot be eliminated by hiding, only made worse),
+  `design/landscape.md` §2.7 (page size hiding appears nowhere in surveyed
+  systems — universal exposure is not coincidence but a consequence of the same
+  essential-complexity argument).
+- **Status:** settled — revisit if D24 is revised (removing auto-unmap
+  eliminates the sub-page packing argument, though D4 security argument
+  remains), if the CHERI note in D5 is strengthened to require byte-granularity
+  interfaces (would reopen the tension), or if a downstream derivation reveals
+  that the implicit-rounding model (deferred) effectively re-hides page size in
+  practice.
+- **Journal:** `journal/026-page-size-exposure.md`.
+
+### D26 — Capability-addressed memory
+
+Observers access memory through (Space, offset) pairs. Holding a Space
+capability is sufficient for access; the kernel manages all virtual address
+assignment and page table maintenance internally. There is no separate map() or
+unmap() operation. The Observer never chooses, manages, or observes virtual
+addresses.
+
+The kernel assigns each Space a VA base at creation time. The base is a property
+of the Space — all holders see the same Space at the same VA. Each Observer has
+its own L0 page table (root, pointed to by TTBR0) containing entries only for
+Spaces it holds caps to. Page table subtrees (L1/L2/L3) for individual Spaces
+are shared across Observers holding the same Space cap (reference-counted). This
+provides O(Observers + Spaces) page table memory rather than O(Observers ×
+Spaces).
+
+On the hardware bridge: ARM64 instructions use flat virtual addresses. The
+Observer stores a per-Space-cap base VA (provided by the kernel on cap
+acquisition). Memory access is `base_of(Space) + offset` — one table load, one
+add. The base table is small (one u64 per Space cap) and L1-hot. Per-access
+overhead is ~2–5 cycles, negligible against memory latency and strictly cheaper
+than the map() syscall the model eliminates.
+
+Supersedes D10. The page table is no longer a user-visible concept; it is a
+kernel-internal mechanism that materializes Space cap holdings for the MMU.
+D24's cap-mapping invariant becomes a structural property of this model rather
+than an enforced invariant.
+
+Does NOT settle: base table management (kernel-maintained read-only page vs.
+Observer-managed), cap rights for memory access (separate "access" right?),
+demand fault vs. eager page table population, page table memory budget
+ownership, VA base reclamation policy for long-lived systems.
+
+- **Rests on:** D4 (designation = authority — holding a Space cap IS the
+  authority; the model eliminates the gap between holding authority and
+  exercising it), D5 (MMU-backed virtual memory — the MMU is the enforcement
+  mechanism; the model uses it without exposing it), A3 (generic — runtime base
+  lookup imposes no workload limits; the fixed bit-partition alternative was
+  rejected as an A3 violation), A5 (kernel absorbs complexity — VA management
+  moves into the kernel; Observers work with the simpler (cap, offset)
+  abstraction), D8 (flat cap table — Space caps in the cap table drive page
+  table state; cap mutations trigger page table updates), D9 (variable-size
+  kernel-managed Spaces — the objects that get VA assignments), D24 (cap-mapping
+  invariant — strengthened from enforced to structural), D12 (fault delegation —
+  demand faults carry Space identity + offset to the pager, giving richer
+  semantic information), `design/journal/027-capability-addressed-memory.md`
+  (full exploration of the model, alternatives considered, hardware bridge
+  analysis, performance data, impact analysis across all settled decisions).
+- **Status:** settled — revisit if A3 is revised (removing generic-workload
+  requirement would allow fixed bit-partition addressing), if D5 is revised to
+  include CHERI (CHERI hardware capabilities could replace the runtime base
+  lookup with hardware-native capability addressing), or if a downstream
+  derivation reveals that the absence of explicit map()/unmap() creates
+  essential complexity that the (cap, offset) model cannot absorb.
+- **Journal:** `journal/027-capability-addressed-memory.md`.
 
 ### Entry template
 
@@ -1307,11 +1312,10 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   carry abstract scheduling properties, but the minimum set (priority? deadline?
   IO-bound flag? period?) is not fixed.
 - **Observer-Space cardinality formalization.** The Vocabulary section describes
-  Observers as correlating "one or more Spaces." D10 confirms Space (vocabulary)
-  and address space are distinct: Space is a budget concept (one or more per
-  Observer); the address space is a first-class object (one per Observer, per
-  D6). Remaining: formalize the vocabulary's "one or more" — does an Observer
-  hold multiple Space claims, or is it one claim subdivided?
+  Observers as holding capabilities to "one or more Spaces." Under D26, each
+  Space cap grants access to one contiguous memory region. Remaining: formalize
+  the "one or more" — does an Observer hold multiple Space caps directly, or is
+  it one parent Space subdivided into child Spaces?
 - **Revocation add-ons.** D11 settles the base primitive (close-only + destroy
   - ABA slot tag). D17 settles badge semantics (minter-assigned, opt-in
     per-badge tracking with closure notifications). Remaining add-ons: endpoint
@@ -1325,31 +1329,29 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   unit. D14 settles that Observer is a capability-held kernel object type. D20
   settles per-Observer fault handler. D21 settles the handler as a cap-table
   entry (not a separate Observer struct field). The concrete field set (register
-  state, TTBR, capability table pointer, Time binding, scheduling state,
-  pending-list linkage (D18), Observer state: runnable/blocked/faulted) needs
-  formal derivation in the current chain. Note: the fault handler is NOT in this
-  list — it lives in the cap table at a reserved slot, not the Observer struct.
-  Archive journal/004 derived a first-principles minimum. D12 confirms the fault
-  handler is structurally required. D14 confirms lifecycle state tracking is
-  required. D20 confirms per-Observer attachment. D21 confirms cap-table
-  representation.
-- **Address space binding mutability.** D10 settles the address space as a
-  first-class object that Observers bind to. Open: is the binding immutable (set
-  at Observer creation) or rebindable at runtime? If rebindable, what happens to
-  TLB entries when an Observer changes address space?
+  state, L0 page table pointer, capability table pointer, Time binding,
+  scheduling state, pending-list linkage (D18), Observer state:
+  runnable/blocked/faulted) needs formal derivation in the current chain. Note:
+  the fault handler is NOT in this list — it lives in the cap table at a
+  reserved slot, not the Observer struct. Archive journal/004 derived a
+  first-principles minimum. D12 confirms the fault handler is structurally
+  required. D14 confirms lifecycle state tracking is required. D20 confirms
+  per-Observer attachment. D21 confirms cap-table representation.
+- ~~**Address space binding mutability.**~~ Dissolved by D26: no address space
+  object, no binding. Observers access Spaces through capabilities; the page
+  table is updated automatically as caps are acquired and lost.
 - **Observer creation API shape.** D14 settles Observer as capability-held but
   not the creation interface. Create-then-configure (seL4 — inert Observer,
   configured via cap ops, started separately) vs. all-params-upfront (archive —
-  one syscall). Minimum inputs: Space, Time, address space (D10), fault handler
-  endpoint + badge (D12, D20). Open: initial PC/SP, initial capabilities, create
-  vs. start as separate operations.
+  one syscall). Minimum inputs: Space, Time, fault handler endpoint + badge
+  (D12, D20). Open: initial PC/SP, initial capabilities, create vs. start as
+  separate operations.
 - **Observer rights model.** D14 settles resume and destroy as minimum. D23
   settles clonability, enabling rights separation across multiple caps. Open:
   suspend (external pause), inspect register state (debugging), modify
   scheduling properties (D2), change fault handler (D20 — per-Observer, so this
-  is an Observer-cap right), change address space binding (D10 binding
-  mutability), duplicate-control right (Zircon ZX_RIGHT_DUPLICATE model,
-  deferred from D23). Each right = a typed kernel syscall under D7.
+  is an Observer-cap right), duplicate-control right (Zircon ZX_RIGHT_DUPLICATE
+  model, deferred from D23). Each right = a typed kernel syscall under D7.
 - ~~**Observer handle clonability.**~~ Settled by D23: clonable. Observer
   handles follow uniform capability rules (clone, attenuate, transfer)
   identically to all other kernel object types. Non-clonable rejected on five
@@ -1365,11 +1367,11 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   consistency — would dissolve this: close returns to delegator via D11
   semantics.)
 - **Can Observers share capability tables?** D8 settles per-Observer tables with
-  no sharing. D10 settles first-class address spaces with multi-Observer binding
-  — same-address-space Observer groups are now a supported pattern. Revisit as a
-  D8 downstream: does same-address-space sharing create sufficient pressure for
-  shared capability tables, or is per-Observer authority (with explicit
-  capability transfer) sufficient?
+  no sharing. Under D26, Observers sharing Spaces hold independent caps to the
+  same Spaces. Revisit as a D8 downstream: does the
+  multi-Observer-sharing-Spaces pattern create sufficient pressure for shared
+  capability tables, or is per-Observer authority (with explicit capability
+  transfer) sufficient?
 - ~~**Interrupt model (device interrupts, not exceptions).**~~ Settled by D22:
   delegation to userspace driver Observers through endpoints. No separate IRQ
   object type — the interrupt namespace maps onto the endpoint namespace. The
@@ -1390,17 +1392,14 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
 - **Userspace timers.** Preemption timer is kernel-internal (D2). Userspace
   timer callbacks: kernel programs timer on behalf of Observer and deposits
   message when it fires. Connects to D2 scheduling model and D13 delivery.
-- **Page size exposure.** D5 settles MMU-backed virtual memory; D9 settles
-  variable-size kernel-managed memory objects. Open: expose page granularity to
-  userspace (proven, universal) or hide it behind byte-addressed objects
-  (archive's novel position, no precedent in surveyed systems)? Determines the
-  memory object's interface granularity and the Space manager's external
-  interface.
+- ~~**Page size exposure.**~~ Settled by D25: page size is exposed. Hiding
+  rejected — creates unpredictable hardware-dependent failures and security
+  violations under sub-page packing. Remaining: whether the interface is fully
+  page-addressed (all operations require page-aligned inputs) or implicitly
+  rounded (byte values accepted, kernel rounds, PAGE_SIZE queryable). One level
+  down from D25.
 - ~~**Fault handler attachment.**~~ Settled by D20: per-Observer. Each Observer
-  stores its own fault handler endpoint reference and badge. Per-address-space
-  rejected (D6 grouping tension, D4 authority coupling, D17 badge-closure
-  doesn't work, D11 cascade, D1 split storage). Per-both rejected (composes with
-  kernel grouping D6 rejected).
+  stores its own fault handler endpoint reference and badge.
 - **Pager unavailability protocol.** What happens when a pager Observer is
   destroyed, blocked, or unresponsive while an Observer is faulting? Archive
   used fault handler chains (Observer → handler → … → kernel as root).
@@ -1415,8 +1414,8 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   the pager via capability transfer in the fault message (D13). Remaining: how
   does the pager signal that it has resolved the fault and prepared the address
   space? Is resume() alone sufficient, or does the pager also need to perform
-  memory operations (map page, etc.) before calling resume()? The sequence (map
-  → resume) vs. (resume-with-mapping) shapes the pager's syscall pattern.
+  memory operations (provide physical backing for the faulting Space) before
+  calling resume()? The sequence shapes the pager's syscall pattern.
 - **D7 classification of fault traffic.** D12 says fault notifications go to
   pager Observers. D13 says all information delivery uses queued endpoints.
   Fault delivery is through normal IPC endpoints (kernel-as-sender). D18 settles
@@ -1427,7 +1426,7 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   fault delivery for kernel-as-sender. No per-endpoint policy modes.
 - ~~**Coalescing / notification mechanism.**~~ Dissolved by D18: no overwrite
   means no cross-source data loss. Coalescing lives in shared memory + signaling
-  (D9/D10), not in the endpoint mechanism.
+  (D9 shared Space caps), not in the endpoint mechanism.
 - ~~**Multi-endpoint wait.**~~ Resolved by D19: badge fan-in (D15+D17) covers
   the common multi-source patterns (clients, faults, timers, replies on one
   endpoint). Residual cases (structurally distinct endpoints) use
@@ -1467,23 +1466,23 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   exact set. D14 adds resume() and confirms destroy() applies to Observers. The
   archive's 10-syscall design is a data point. Depends on IPC model, Observer
   creation API, Observer rights model, and D9 (memory objects).
-- **Address space lifecycle.** D10 introduces the address space as a kernel
-  object. When is it destroyed? Last capability dropped? Last Observer unbound?
-  Interacts with revocation model.
+- ~~**Address space lifecycle.**~~ Dissolved by D26: no address space kernel
+  object. The page table is kernel-internal; per-Observer L0 tables are
+  destroyed with the Observer; per-Space subtrees are reference-counted and
+  freed when the last holder's cap is closed.
 - **Boot / bring-up model.** BSP-then-APs vs symmetric bring-up. Touches A2 but
   not derived.
-- **Explicit unmap() semantics.** D24 settles auto-unmap on last-cap-close.
-  Open: does explicit unmap() still exist? Likely yes — remap at a different
-  address requires unmap + map while retaining the cap. The cap is not affected
-  by explicit unmap; only the mapping moves. The invariant's auto-unmap is a
-  supplement to explicit unmap, not a replacement.
-- **Sub-page packing under D24.** D24's auto-unmap operates at page granularity
-  (the MMU works in pages). If the kernel packs multiple small memory objects
-  onto one physical page, closing the last cap to one object can't unmap the
-  shared page without affecting the other. Resolution options: no packing (each
-  object gets its own page — internal fragmentation), copy co-located objects on
-  unmap (expensive), or accept that sub-page objects don't benefit from auto-
-  unmap. Kernel-internal implementation concern, but D24 makes it load-bearing.
+- ~~**Explicit unmap() semantics.**~~ Dissolved by D26: no explicit map() or
+  unmap(). The page table is managed by the kernel based on Space cap holdings.
+  Holding a cap grants access; losing a cap removes access.
+- **Sub-page packing under D24.** D24's page table cleanup operates at page
+  granularity (the MMU works in pages). If the kernel packs multiple small
+  Spaces onto one physical page, closing the last cap to one Space can't remove
+  the shared page table entry without affecting the other. Resolution options:
+  no packing (each Space gets its own page — internal fragmentation), copy
+  co-located Spaces on cleanup (expensive), or accept that sub-page Spaces don't
+  benefit from automatic cleanup. Kernel-internal implementation concern, but
+  D24 makes it load-bearing.
 - **Space budget transfer on cap move.** When a memory-object cap is moved from
   one Observer to another, does the budget charge for the object's physical
   backing transfer to the receiver's Space? Stay with the original creator?
@@ -1518,18 +1517,16 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
 - `008-capability-table-structure.md` — reasoning for D8: D7 narrows table role
   to designation/rights lookup (not dispatch), removing CNode tree
   justification; A5 confirms CNode management is interface complexity;
-  typed-memory backing for explicit accounting; table sharing deferred to
-  Observer-Space binding.
+  typed-memory backing for explicit accounting; table sharing deferred.
 - `009-memory-object-model.md` — reasoning for D9: D8 precedent (kernel-managed,
   typed-memory backing) extends to memory; A5 rejects seL4 userspace-managed
   model; page-granularity rejected on D5 CHERI note; Space vocabulary provides
   accounting; vocabulary corrected (object identity, not physical address
   binding).
-- `010-address-space-is-first-class.md` — reasoning for D10: three independent
-  paths (A5 mapping consistency, D1 TLB capacity pressure, D4 independent
-  delegation) converge on first-class address space; emergent model rejected;
-  vocabulary Space confirmed as budget concept distinct from address space; API
-  design intent (no default, equal friction) addresses "right way easy" concern.
+- `010-address-space-is-first-class.md` — original reasoning for D10 (superseded
+  by D26/journal 027): three independent paths converged on first-class address
+  space; those concerns are now satisfied by capability-addressed memory
+  instead.
 - `011-base-revocation-primitive.md` — reasoning for D11: two-level
   decomposition (base primitive vs. add-ons); four workload patterns
   (adversarial, failure-mode, pressure response, structural cascade) establish
@@ -1635,6 +1632,23 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   surveyed system auto-unmaps on cap close; justified by D4's "designation =
   authority" commitment. Archive divergence: archive proposed IPC-level
   ownership transfer; this derivation dominates it.
+- `026-page-size-exposure.md` — reasoning for D25: page size is exposed to
+  userspace. Four axioms initially favored hiding; a concrete scenario (two 4KB
+  objects adjacent on 16KB hardware) demonstrated that every hiding strategy
+  fails — unpredictable errors, D4/D24 security violations under sub-page
+  packing, or hardware-dependent behavior. O4 resolved: page-size knowledge is
+  essential complexity. Archive divergence: archive took byte-addressed (hiding)
+  position; rejected here based on D4/D24 arguments absent from archive's
+  context. Includes detour reaffirming D24's "map is explicit" (auto-map
+  rejected for D10 cascade and cap-without-mapping patterns). Note: D10 cascade
+  ground is dissolved by D26; journal 027 revisits the auto-map rejection.
+- `027-capability-addressed-memory.md` — reasoning for D26: capability-addressed
+  memory with (Space, offset) access model. Observer accesses memory by
+  presenting a Space cap and offset; the kernel manages VA assignment
+  internally. Runtime base lookup bridges to ARM64 flat-VA hardware. Per-Space
+  VA bases enable page table subtree sharing and cross-Observer pointer sharing.
+  Dissolves D10 (address space object); strengthens D24 to structural property;
+  dissolves map/unmap asymmetry. Supersedes journal 010.
 
 ---
 

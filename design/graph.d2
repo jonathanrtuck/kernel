@@ -1,9 +1,8 @@
 # Kernel structural map.
 #
-# Populated from design/spec.md derivations D1-D6, D8-D23, observations O2-O3,
-# and Vocabulary (Space, Time, Observer, Coordinate System). Every box and edge
-# has a corresponding spec.md entry; items labeled "TBD" await downstream
-# derivation.
+# Populated from design/spec.md derivations D1-D6, D8-D26, observations O2-O3,
+# and Vocabulary (Space, Time, Observer). Every box and edge has a corresponding
+# spec.md entry; items labeled "TBD" await downstream derivation.
 #
 # Intentionally absent (pending derivation): specific syscall surface, Observer
 # minimum schema, Observer creation API and rights model (D14 downstream),
@@ -60,28 +59,29 @@ kernel: {
     }
   }
 
-  memory-object: {
+  space: {
     label: Space
     style.multiple: true
-    # D9: variable-size, kernel-managed.
-    # Designated by capabilities. Exists independently of
-    # address space binding (two-step: create, then bind).
-    # Physical backing drawn from Observer's Space; which
-    # physical pages back the object is kernel-internal.
-    # Sharing: multiple Observers hold capabilities to same object.
+    # D9: variable-size, kernel-managed memory object.
+    # Designated by capabilities. Access via (Space, offset)
+    # pairs (D26) — holding the cap is sufficient for access.
+    # Each Space has a kernel-assigned VA base (per-Space,
+    # same for all holders). Physical backing is kernel-internal.
+    # Sharing: multiple Observers hold caps to same Space.
+    # D25: page size exposed — minimum Space size = page size.
   }
 
   observer: {
     label: Observer
     style.multiple: true
     # D6: single schedulable execution unit.
-    # D14: capability-held kernel object type (fifth type).
+    # D14: capability-held kernel object type (fourth type).
     # Lifecycle operations (resume, destroy, potentially more)
     # are typed kernel syscalls (D7) taking Observer handles.
-    # One register state, one Time, one capability table,
-    # one address space binding (D10: binds to first-class
-    # address space object). "Process" is a userspace
-    # convention (group of Observers sharing an address space).
+    # One register state, one Time, one capability table.
+    # Accesses Spaces via (cap, offset) — D26.
+    # "Process" is a userspace convention (group of Observers
+    # sharing Space caps).
     # D20: per-Observer fault handler (endpoint ref + badge).
     # D21: fault handler is a cap-table entry at reserved slot
     # (not a separate Observer struct field). D11/D17/D8 apply.
@@ -104,8 +104,8 @@ kernel: {
       # Revocation primitive: close-only (refcount on drop) +
       # authoritative destroy (D11). Badge-closure notifications
       # on tracked endpoints (D17).
-      # Table sharing: D10 enables same-AS Observer groups;
-      # whether they share cap tables is open (D8 downstream).
+      # Table sharing: whether Observers sharing Spaces should
+      # share cap tables is open (D8 downstream).
     }
   }
 
@@ -137,18 +137,6 @@ kernel: {
     # Multi-wait, message format TBD.
   }
 
-  address-space: {
-    label: Coordinate System
-    style.multiple: true
-    # D10: first-class, capability-designated kernel object.
-    # Contains the page table tree (virtual→physical mappings).
-    # Observers bind to an address space; multiple Observers can
-    # share one (same TTBR, same ASID, shared TLB entries).
-    # Memory objects (D9) are mapped into the address space.
-    # Creator's Space budget pays for page table memory (D8 pattern).
-    # Vocabulary "Space" is a separate concept (budget).
-    # Lifecycle, binding mutability TBD.
-  }
 }
 
 hardware: {
@@ -185,33 +173,27 @@ hardware.core -> kernel.core-manager: exceptions (incl. SGI)
 
 # Kernel -> hardware
 kernel.core-manager.time-manager -> hardware.core: timer programming
-# D5: Space manager programs page tables; MMU enforces them.
-kernel.space-manager -> hardware.mmu: page table updates
+# D5 + D26: kernel maintains page tables internally (per-Observer L0 root,
+# per-Space shared subtrees); MMU enforces them.
+kernel.space -> hardware.mmu: page table translation (D5, D26)
 hardware.mmu -> hardware.memory: translated access
 
 # D4: Core manager resolves capabilities from the running Observer's
 # table during syscall handling (hot path, per-core).
 kernel.core-manager -> kernel.observer.capabilities: resolve (hot path)
 
-# D5 + D10: Core manager loads address space TTBR on context switch (hot path).
-# Same address space → same TTBR → skip reload.
-kernel.core-manager -> kernel.address-space: TTBR load (hot path)
+# D5 + D26: Core manager loads Observer's L0 page table TTBR on context switch
+# (hot path). Observers sharing identical Space cap sets could share TTBR.
+kernel.core-manager -> hardware.mmu: TTBR load (hot path)
 
-# Capabilities designate kernel objects (Space, Time, memory objects, etc.).
+# Capabilities designate kernel objects (Space, Time, Observers, endpoints).
 # The capability table connects Observers to the resources they
-# are authorized to use.
-kernel.observer.capabilities -> kernel.memory-object: designate (D4, D9)
-kernel.observer.capabilities -> kernel.address-space: designate (D4, D10)
+# are authorized to use. Space caps grant memory access (D26).
+kernel.observer.capabilities -> kernel.space: access via (cap, offset) (D4, D9, D26)
 kernel.observer.capabilities -> kernel.endpoint: send/receive (D4, D15)
 kernel.observer.capabilities -> kernel.observer: lifecycle ops (D4, D14)
-# D10: Observer binds to address space (one binding per Observer; many Observers per AS).
-kernel.observer -> kernel.address-space: binds to (D10)
-# D9: Space manager allocates physical backing for memory objects.
-kernel.space-manager -> kernel.memory-object: physical backing
-# D10: Space manager also backs address space page tables (D8 pattern).
-kernel.space-manager -> kernel.address-space: page table backing
-# D9 + D10: Memory objects are mapped into address spaces, not Observers directly.
-kernel.memory-object -> kernel.address-space: mapped into (D9, D10)
+# D9: Space manager allocates physical backing for Spaces.
+kernel.space-manager -> kernel.space: physical backing
 kernel.observer.capabilities -> kernel.core-manager.time-manager: Time capabilities
 # D22: Interrupts delivered through endpoints (no separate IRQ type).
 # Kernel routes hardware IRQs to endpoints internally.
