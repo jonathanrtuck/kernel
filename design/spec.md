@@ -595,11 +595,11 @@ documented in journal/013 so it is not rediscovered.
 Queue memory drawn from the creator's Spaces (D8 pattern). Fixed capacity at
 creation. Memory per queued message ~48 bytes (register-sized).
 
-Does NOT settle: message format, queue capacity policy, IPC fast-path
-conditions, D12 fault delivery specifics. (Endpoint shape settled by D15.
-Overflow policy settled by D18. Coalescing dissolved by D18. Reply routing
+Does NOT settle: ~~message format~~ (settled by D28), queue capacity policy, IPC
+fast-path conditions, D12 fault delivery specifics. (Endpoint shape settled by
+D15. Overflow policy settled by D18. Coalescing dissolved by D18. Reply routing
 settled by D16. Badge semantics settled by D17. Multi-endpoint wait resolved by
-D19.)
+D19. Message format settled by D28.)
 
 - **Rests on:** A3 (generic — both sync and async patterns required; independent
   path), A4 (purely reactive — no kernel message broker; IPC dispatch within
@@ -735,7 +735,9 @@ capability designation).
 Does NOT settle: Call()/ReplyRecv() syscall details (part of specific syscall
 surface), reply endpoint allocation policy (pre-allocated at creation vs. lazy),
 send-once right encoding in D8's rights mask, shared reply endpoint with badge
-disambiguation (depends on badge semantics), message format interaction.
+disambiguation (depends on badge semantics). ~~Message format interaction~~
+settled by D28: reply cap is a kernel-injected dedicated field (not a user cap
+slot), paralleling badge.
 
 - **Rests on:** D15 (unidirectional endpoints require reply-cap transfer — the
   cost this mechanism pays), D14 (fault resume settled separately — decouples
@@ -1279,6 +1281,79 @@ orthogonal to user-facing cardinality).
   hierarchy forces essential complexity into userspace.
 - **Journal:** `journal/028-space-cardinality.md`.
 
+### D28 — Fixed-size IPC message format
+
+An IPC message is a fixed-size control packet with structurally separate fields:
+4 untyped data words (32 bytes), 1 user capability slot, a label in a dedicated
+header field, a badge in a dedicated kernel-injected field, and a reply cap in a
+dedicated kernel-injected field (present only on Call()).
+
+Sender provides: label + 4 data words + 0-1 cap handle. Receiver sees: badge +
+label + 4 data words + 0-1 remapped cap handle + reply cap (if Call). The kernel
+transforms the message in transit: injects badge from the sending capability
+(D17), translates cap handles from source table to destination table (D8), and
+injects the reply cap for Call() (D16).
+
+Data words and capability slots are structurally separate (not a shared budget).
+Cap transfer is a categorically different kernel operation from data copying
+(D8: validation, allocation, ABA tag management). Zero-cap vs. cap-bearing is
+cheaply distinguishable (one field check), gating the fast path.
+
+The reply cap is a dedicated kernel-injected field — not a user cap slot —
+because D16 settles that the kernel creates it (parallel to badge). This keeps
+the user's 1 cap slot free for payload caps during Call(), supporting the common
+"request + delegated authority" RPC pattern.
+
+Fault messages use the same format: the kernel generates label (fault type) + 4
+data words (fault descriptor: Space identity, offset, access type) + 1 cap
+(Observer handle for resume, D14). Full Observer state (registers, PC, PSTATE)
+is accessible via inspect(observer_handle) — a D7 typed kernel operation. The
+fault message carries the notification; state inspection is a separate
+operation. This decomposition follows from D7's split model: IPC is one
+mechanism family, resource operations are another.
+
+Variable-length messages (seL4 model) were rejected: two copy paths, length
+validation on every message, variable queue slot sizes — complexity serving
+workloads already better served by shared-Space bulk transfer (D26). The
+bitmask-over-unified-slots encoding (archive's cap_mask) was rejected: conflates
+data copying with cap transfer, requires mask inspection even for zero-cap
+messages.
+
+Does NOT settle: fault message content details per fault type (VM fault,
+cap-table-full, invalid syscall), badge-closure notification content, interrupt
+message content, inspect() syscall shape, sender-side syscall encoding (which
+registers carry what — A2 implementation detail), send-right gating of cap
+transfer (Grant right), IPC fast-path conditions.
+
+- **Rests on:** D13 (queued endpoints — message is what the queue holds; ~48
+  byte per-slot estimate anchors the size), D16 (reply cap mechanism — the
+  kernel creates the reply cap, motivating the dedicated field), D17 (badge is
+  kernel-injected — motivates badge as a separate field outside data words), D8
+  (flat cap table with typed entries — cap transfer is structurally distinct
+  from data copying; motivates dedicated cap fields), D12 (fault delegation —
+  kernel generates fault messages that must fit this format; fault descriptor
+  completeness establishes 4 words as the natural data size), D14 (Observer
+  handle in fault messages — requires 1 cap slot), D22 (interrupt messages carry
+  send-once ack cap — requires 1 cap slot; D16 provides the ack mechanism), D26
+  (capability-addressed memory — bulk data through shared Spaces, not
+  in-message; messages are control plane only), D7 (split model — fault message
+  is IPC notification; inspect() is typed kernel operation; label is
+  pass-through, kernel doesn't dispatch on it), D15 (unidirectional endpoints —
+  message flows one direction; badge identifies sender), D24 (cap-mapping
+  invariant — ownership-transfer IPC dissolved; message format independent),
+  `design/research/ownership-transfer-ipc.md` (message format survey across
+  Mach, Zircon, seL4, EROS, KeyKOS), `design/research/page-fault-routing.md` §3
+  (seL4 fault message: 4 MRs), `design/landscape.md` §3.2 ("IPC should never
+  carry bulk data"), §3.4 (seL4 fastpath: message in registers, ~400 cycles
+  ARM64).
+- **Status:** settled — revisit if D13 is revised (different IPC model changes
+  queue and fast-path assumptions), if D16 is revised (changes the reply-cap
+  mechanism that motivated the dedicated field), if D26 is revised (removing
+  capability-addressed memory would reopen bulk-data-in-message), or if a
+  downstream derivation reveals that 4 data words are insufficient for a
+  structurally required kernel message type.
+- **Journal:** `journal/029-message-format.md`.
+
 ### Entry template
 
 Each derivation entry names three things: what rests on what, how settled the
@@ -1482,24 +1557,27 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   D8 ABA protection all operate automatically. Archive divergence: archive chose
   kernel-internal, explained by absence of D17 badge-closure in the archive's
   derivation context.
-- **Message format.** Size, slot count, capability transfer encoding, badge
-  placement. The archive chose 4 slots (32 bytes), cap_mask bitmask, badge from
-  capability. Interacts with D8 (cap transfer from table to table), D15 (badge
-  must fit in message), and D16 (send-once reply cap must fit in message cap
-  slots; Call() must encode "include my reply cap in slot N"). ~~Journal 023's
-  ownership-transfer timing concern is dissolved by D24: ownership transfer is a
-  cap-system invariant, not an IPC mechanism, so the message format is fully
-  independent.~~
+- ~~**Message format.**~~ Settled by D28: fixed-size. 4 untyped data words + 1
+  user cap slot + label in header + badge as kernel-injected field + reply cap
+  as kernel-injected field (Call() only). Cap slots structurally separate from
+  data words. Variable-length rejected (D26 bulk-data-through-Spaces makes it
+  unnecessary). Archive's cap_mask bitmask replaced by dedicated cap fields
+  (D8's structural distinction between data copying and cap transfer).
+  Remaining: fault message content per type, badge-closure content, interrupt
+  content, inspect() shape, fast-path conditions.
 - **Send-once right encoding.** D16 introduces send-once as a general-purpose
   right in D8's rights mask. How it is represented (a right bit, a modifier on
   the send right, or a separate field) is an entry-layout detail deferred with
-  D8's open entry-layout questions.
+  D8's open entry-layout questions. D28 confirms the reply cap (a send-once cap)
+  is kernel-injected in a dedicated message field, not a user cap slot.
 - **IPC fast-path conditions.** When does direct process switch occur? Receiver
   waiting? Priority check? seL4 fastpath requires no higher-priority runnable.
 - **Specific syscall surface.** D7 settles two mechanism families but not the
-  exact set. D14 adds resume() and confirms destroy() applies to Observers. The
-  archive's 10-syscall design is a data point. Depends on IPC model, Observer
-  creation API, Observer rights model, and D9 (memory objects).
+  exact set. D14 adds resume() and confirms destroy() applies to Observers. D28
+  establishes inspect(observer_handle) as a typed kernel operation for reading
+  Observer state (fault message decomposition). The archive's 10-syscall design
+  is a data point. Depends on IPC model, Observer creation API, Observer rights
+  model, and D9 (memory objects).
 - ~~**Address space lifecycle.**~~ Dissolved by D26: no address space kernel
   object. The page table is kernel-internal; per-Observer L0 tables are
   destroyed with the Observer; per-Space subtrees are reference-counted and
@@ -1696,6 +1774,16 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   implicit authority beyond designation), D11 (cascade/orphan extends close
   semantics), A3 (tree assumption forecloses non-tree patterns). Provenance
   tracking deferred as kernel-internal optimization.
+- `029-message-format.md` — reasoning for D28: fixed-size IPC message format. 4
+  data words + 1 user cap slot + label/badge/reply-cap as dedicated fields. Data
+  word count from fault-descriptor completeness (4 words = natural fault
+  descriptor size; gap to full Observer state too large for any message to
+  bridge — inspect() provides full state). Dedicated cap fields from D8's
+  structural distinction between data copying and cap transfer. Reply cap as
+  kernel-injected field from D16's kernel-creates-it parallel to badge. Archive
+  convergence on size and fixed format; divergence on cap encoding (bitmask →
+  dedicated) and reply-cap placement (shared slot → dedicated field), explained
+  by D8 and D16 settled after archive.
 
 ---
 
