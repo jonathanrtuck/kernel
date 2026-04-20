@@ -72,17 +72,21 @@ under "Rests on"; it exists so later sections can be precise.
   different claim of the same size). Which physical pages back a claim is a
   kernel-internal concern.
 
-- **Time.** A claim to a portion of a specific logical core's scheduling time.
-  Compute flows without a finite pool, but the _rate_ of scheduling time per
-  logical core is bounded at 100%. A Time claim is a fraction of a specific
-  logical core's scheduling allocation (e.g., 10% of logical core 0). Time is
-  cumulative over wall-clock (scheduling time consumed accumulates) and fungible
-  within a logical core. Fungibility across cores is weaker — moving Time across
-  cores has structural cost, handled as migration. On hardware without SMT,
-  scheduling time and delivered compute are equivalent. On SMT hardware,
-  delivered compute additionally depends on sibling logical-core contention for
-  shared pipeline resources; the kernel guarantees scheduling allocation, not
-  physical-compute-rate delivery.
+- **Time.** A claim to a portion of the system's scheduling capacity. The total
+  scheduling capacity is bounded: each logical core provides 100% of scheduling
+  time. Time is cumulative over wall-clock (scheduling time consumed
+  accumulates) and fungible — multiple Time caps are additive. The Observer
+  holds abstract scheduling capacity without knowing which core it runs on; core
+  assignment, migration, and algorithm selection are kernel-internal concerns
+  (D31), parallel to how physical addresses and virtual addresses are
+  kernel-internal for Space (D9, D26). The Observer provides abstract scheduling
+  hints (D2: priority, CPU/IO classification, deadline); the kernel places the
+  Observer on an appropriate core. On SMT hardware, delivered compute
+  additionally depends on sibling logical-core contention for shared pipeline
+  resources; the kernel guarantees scheduling allocation, not
+  physical-compute-rate delivery. (Vocabulary revised by D31 — previously "a
+  fraction of a specific logical core's scheduling allocation." The per-core
+  framing exposed a hardware detail that A5 says the kernel should absorb.)
 
 - **Observer.** A schedulable execution unit coupling Space and Time — the
   condition under which compute (Time) executes instructions within specific
@@ -91,12 +95,13 @@ under "Rests on"; it exists so later sections can be precise.
   Spaces and one or more Times (D30). Memory is accessed through
   capability-addressed (Space, offset) pairs; the kernel manages the underlying
   virtual address mapping (D26). The Observer never chooses or manages virtual
-  addresses. Multiple Time caps on the same core are additive — the kernel
-  maintains a cached scheduling aggregate. SMT-concurrent workloads, when
-  hardware supports them, are expressed as multiple Observers sharing a Space,
-  each with its own Time(s) on its own logical core — not as a single Observer
-  with multiple execution points. The Observer always has one register state,
-  one PC, one execution stream regardless of how many Time caps it holds.
+  addresses, physical addresses, or core assignments — these are kernel-internal
+  (D9, D26, D31). Multiple Time caps are additive — the kernel maintains a
+  cached scheduling aggregate. SMT-concurrent workloads, when hardware supports
+  them, are expressed as multiple Observers sharing a Space, each with its own
+  Time(s) — not as a single Observer with multiple execution points. The
+  Observer always has one register state, one PC, one execution stream
+  regardless of how many Time caps it holds.
 
 _Capitalized-vs-lowercase convention:_ Capitalized terms (Space, Time, Observer)
 are kernel proper nouns — names of specific concepts in this kernel's design,
@@ -1418,8 +1423,8 @@ Time is a kernel object type designated by capabilities, joining Space,
 endpoint, and Observer as the fourth type. Time capabilities are regular entries
 in the Observer's D8 flat table (D30 settles multi-Time, so the D21
 reserved-slot pattern does not apply — Time caps use regular slots like Space
-caps). Time objects represent claims to scheduling allocation on a specific
-logical core.
+caps). Time objects represent claims to scheduling capacity (D31 revised the
+vocabulary: abstract, not per-core; core assignment is kernel-internal).
 
 Three convergent paths: (1) D4 — Time is "a claim to a portion of a specific
 logical core's scheduling time," a bounded resource. D4 requires capability
@@ -1430,16 +1435,18 @@ struct field. (3) Journal 023 cap-graph completeness — Time as kernel-internal
 would be the sole resource outside the capability graph.
 
 Dissolves two open questions. Time reclamation on Observer destroy: Observer
-destroy closes the Time cap (D11 close semantics). Time migration across cores:
-close Time cap on source core, acquire Time cap on destination (cold-path
-capability operation, D1-consistent).
+destroy closes the Time cap (D11 close semantics). ~~Time migration across
+cores: close Time cap on source core, acquire Time cap on destination (cold-path
+capability operation, D1-consistent).~~ Superseded by D31: Time is abstract
+scheduling capacity; core assignment is kernel-internal; migration is the kernel
+moving an Observer between cores, not a capability operation.
 
 Does NOT settle: ~~Time cardinality~~ (settled by D30: one or more), Time
 parameters (budget/period, fraction, or claim-to-participate), Time clonability
-(D23 uniformity suggests clonable but not derived), Time creation authority
-(per-core Time manager), Time donation mechanism (seL4 MCS pattern — deferred),
-D2 scheduling property split (which abstract properties live on Time vs.
-Observer).
+(D23 uniformity suggests clonable but not derived), ~~Time creation authority~~
+(settled by D31: kernel holds pool, allocates via pager chain), Time donation
+mechanism (seL4 MCS pattern — deferred), D2 scheduling property split (which
+abstract properties live on Time vs. Observer).
 
 - **Rests on:** D4 (designation = authority — Time is a bounded resource;
   ambient scheduling privilege foreclosed; independent path), D21 (cap-table
@@ -1462,10 +1469,10 @@ Observer).
 
 An Observer holds one or more Time capabilities in its D8 flat capability table
 as regular entries (not reserved slots). Each Time cap represents a portion of
-scheduling allocation on a specific logical core. Multiple Time caps on the same
-core are additive — the kernel maintains a cached per-Observer scheduling
-aggregate, updated on Time cap acquisition/loss (cold-path, O(1) per mutation).
-The per-core scheduler reads the cached aggregate (hot-path, O(1)).
+scheduling capacity (D31 revised the vocabulary: abstract, not per-core).
+Multiple Time caps are additive — the kernel maintains a cached per-Observer
+scheduling aggregate, updated on Time cap acquisition/loss (cold-path, O(1) per
+mutation). The per-core scheduler reads the cached aggregate (hot-path, O(1)).
 
 The D27 parallel (flat Space cardinality) is suggestive but not mechanically
 forcing: Space is not fungible (each Space is a distinct object), while Time is
@@ -1505,15 +1512,112 @@ semantics (reservation for migration).
   if the cached-aggregate approach proves unimplementable without hot-path cost.
 - **Journal:** `journal/031-time-cardinality.md`.
 
+### D31 — Resource acquisition through pager chain; boot architecture
+
+Observers acquire bounded resources (Space, Time) through the pager chain. A
+resource request syscall is routed by the kernel to the Observer's fault handler
+(D20/D21), using the same mechanism as page fault delivery (D12). The Observer
+does not know who its handler is — the kernel mediates. The handler can grant
+(from its own holdings), deny, or escalate (its own handler receives the
+request). The chain terminates at the kernel, which holds unallocated resources
+as a root Space (all physical memory not yet granted) and per-core root Time
+objects (scheduling capacity not yet granted). The kernel's internal pools are
+Space and Time objects subject to the same split invariants — the kernel cannot
+over-allocate.
+
+Structural objects (Endpoints, Observers) are created by presenting a Space cap
+to back them. The kernel allocates from that Space and returns a cap to the new
+object. The Space shrinks by the allocation cost. Conservation holds: physical
+bytes change purpose, not quantity. A "create" right in the Space rights mask
+(D8) distinguishes creation authority from memory access.
+
+The kernel is root pager for hand-picked root Observer(s). For resource
+requests: allocate from pool or deny (trivially simple policy — real policy
+lives in userspace pagers). For page faults on initial memory: cannot occur
+(D26 + D24 — initial Spaces are fully backed), so any fault is a bug →
+terminate.
+
+At boot, the kernel creates the root Observer with minimal resources: initial
+Space(s) (fully backed), initial Time (enough to run), interrupt endpoint (D22
+receive cap), and fault handler = kernel (D21 reserved slot). Post-boot, the
+root Observer acquires additional resources through the normal pager-chain
+mechanism. No special boot protocol.
+
+Time vocabulary revised: Time is abstract scheduling capacity. Observers do not
+see core identity; core assignment, migration, and algorithm selection are
+kernel-internal (A5 parallel with D9/D26 — Observers don't see PA/VA either).
+This dissolves the "Time migration across cores" open question (migration is the
+kernel's internal scheduling decision, not a capability operation).
+
+Two convergent paths: (1) D4 + D9 — the kernel manages physical memory (D9) and
+no authority is ambient (D4). The pager chain provides capability-mediated
+resource acquisition without factory caps or omnipotent root Observers. (2) D12
+structural reuse — resource requests use the same mechanism as page fault
+delivery. D8 already describes this pattern for cap table growth ("the kernel
+faults the Observer; the fault handler provides more memory, then retries").
+
+The split model (root Observer holds all resources, subdivides) was rejected for
+security: all resources in a userspace Observer (EL0) is a poor security
+posture. The pager-chain model puts unallocated resources in the kernel (EL1,
+behind the hardware trust boundary). Conservation is identical — the kernel's
+root Space + all granted Spaces = total physical memory, enforced by the same
+split invariants. Security is gained without losing conservation.
+
+Factory caps were rejected: D4 says "holding a cap to a resource IS the
+authority over it." Factory caps separate authority-to-create from the created
+object — an indirection D4 doesn't require. (Journal 022 rejected the same
+pattern for interrupts.)
+
+Does NOT settle: resource request fault message format (D28 downstream), Space
+"create" right encoding, pager unavailability protocol (chains committed but
+unavailability handling still open), secondary core bring-up mechanism, Observer
+creation API config parameters, Time parameters, Time clonability.
+
+- **Rests on:** D4 (designation = authority — the pager chain provides
+  capability-mediated resource acquisition; factory caps add indirection D4
+  doesn't require; ambient creation foreclosed), D9 (kernel-managed memory — the
+  kernel IS the resource manager; retaining the pool is consistent; giving
+  everything to root Observer partially undoes D9), D12 (fault delegation —
+  resource requests use the same routing mechanism; D8's cap-table-full pattern
+  generalizes; independent path), A5 (kernel absorbs complexity — resource pool
+  management, core assignment, VA/PA mapping all kernel-internal; split model
+  pushes allocation management to root Observer), D20 + D21 (per-Observer fault
+  handler at reserved slot — the routing target for resource requests), D7
+  (resource request is a typed kernel syscall), D8 (Space-backed creation —
+  typed-memory-backing pattern extended; "create" right in rights mask), D26 +
+  D24 (initial Spaces fully backed — root Observer page faults dissolved), D22
+  (interrupt endpoint at boot — same distribution mechanism), A4 (kernel goes
+  dormant after boot — all post-boot resource flow requires Observer syscalls),
+  A3 (boot creates minimal initial graph — no workload assumptions; real policy
+  in userspace pagers), `design/landscape.md` §1.7 (bootstrapping models), §2.2
+  (allocation authority), §7.2 (initial process patterns),
+  `design/research/memory-resource-capability.md` (initial distribution survey),
+  `design/research/authority-models.md` §5.6 (bootstrapping problem).
+- **Archive convergence:** Strong. Archive journal 013 derived the same model
+  independently through "supervision trees": kernel retains pools, root Context
+  gets minimal resources, faults escalate through handler chain to kernel.
+  Archive claims.toml: "Boot is not a special protocol... retains unallocated
+  resources and grants on request." Same architecture, same security argument,
+  different derivation path. Divergence: Time vocabulary revision (abstract,
+  core-agnostic) is novel — archive had per-Context core affinity bookkeeping.
+- **Status:** settled — revisit if D12 is revised (changes the fault routing
+  mechanism that resource acquisition depends on), if D9 is revised (reopening
+  userspace-managed memory changes the pool model), if D4 is revised (weakening
+  designation = authority reopens factory caps), or if a downstream derivation
+  reveals that the kernel-as-root-pager creates essential complexity that a
+  simpler boot model avoids.
+- **Journal:** `journal/032-resource-acquisition-and-boot.md`.
+
 ---
 
 ## Open questions
 
-- ~~**Time migration across cores.**~~ Dissolved by D29: Time is a
-  capability-held kernel object. Migration is a cold-path capability operation:
-  close Time cap on source core, acquire Time cap on destination. Observer's
-  abstract scheduling properties (D2) transfer; the Time object is
-  core-specific.
+- ~~**Time migration across cores.**~~ Dissolved by D31: Time is abstract
+  scheduling capacity (vocabulary revised). Core assignment is kernel-internal.
+  Migration is the kernel's internal scheduling decision — the Observer's Time
+  cap doesn't change when the kernel moves it to another core. (Previously
+  dissolved by D29 as a cap operation; D31 supersedes — migration is no longer a
+  user-visible event at all.)
 - **Minimum abstract scheduling properties on an Observer.** D2 says Observers
   carry abstract scheduling properties, but the minimum set (priority? deadline?
   IO-bound flag? period?) is not fixed.
@@ -1550,11 +1654,14 @@ semantics (reservation for migration).
   object, no binding. Observers access Spaces through capabilities; the page
   table is updated automatically as caps are acquired and lost.
 - **Observer creation API shape.** D14 settles Observer as capability-held but
-  not the creation interface. Create-then-configure (seL4 — inert Observer,
-  configured via cap ops, started separately) vs. all-params-upfront (archive —
-  one syscall). Minimum inputs: Space, Time cap (D29), fault handler endpoint +
-  badge (D12, D20). Open: initial PC/SP, initial capabilities, create vs. start
-  as separate operations.
+  not the creation interface. D31 settles that creation presents a Space cap
+  (kernel allocates Observer struct + cap table from that Space). Minimum
+  inputs: Space cap with create right (D31), fault handler endpoint + badge
+  (D12, D20). Time acquired post-creation through pager chain (D31) rather than
+  provided at creation. Create-then-configure (seL4 — inert Observer, configured
+  via cap ops, started separately) vs. all-params-upfront (archive — one
+  syscall). Open: initial PC/SP, initial capabilities, create vs. start as
+  separate operations.
 - **Observer rights model.** D14 settles resume and destroy as minimum. D23
   settles clonability, enabling rights separation across multiple caps. Open:
   suspend (external pause), inspect register state (debugging), modify
@@ -1591,9 +1698,11 @@ semantics (reservation for migration).
   argument suggests clonable (multiple references to the same scheduling
   allocation, not a second allocation). Journal 014's assumption of
   "non-clonable" was never derived.
-- **Time creation authority.** Who creates Time objects? Per-core Time manager
-  (graph.d2 already has this box). Parallels D3 (one logical Space manager). How
-  is initial Time distributed at boot?
+- ~~**Time creation authority.**~~ Settled by D31: the kernel holds unallocated
+  scheduling capacity as per-core root Time objects internally. Observers
+  acquire Time through the pager chain (resource request → fault handler → ... →
+  kernel). The kernel allocates from its per-core pools. Initial Time
+  distributed at boot as part of the root Observer's minimal resource grant.
 - **Time donation on IPC.** seL4 MCS donates scheduling context during IPC for
   priority inversion prevention. Under D30 (multi-Time), donation via explicit
   cap transfer is natural: the caller's Time cap appears in the server's table,
@@ -1635,14 +1744,16 @@ semantics (reservation for migration).
 - ~~**Fault handler attachment.**~~ Settled by D20: per-Observer. Each Observer
   stores its own fault handler endpoint reference and badge.
 - **Pager unavailability protocol.** What happens when a pager Observer is
-  destroyed, blocked, or unresponsive while an Observer is faulting? Archive
-  used fault handler chains (Observer → handler → … → kernel as root).
-  Alternative: double fault = kill the faulting Observer. D18 adds a trigger:
-  endpoint destroy with pending deferred faults — those Observers need cleanup.
-- **Root/bootstrap fault handling.** D12 requires every Observer to have a fault
-  handler, but the initial Observer has no userspace pager yet. The archive used
-  "kernel as root fault handler" — the one place the kernel does internal
-  resolution. Alternatives exist.
+  destroyed, blocked, or unresponsive while an Observer is faulting? D31 commits
+  to fault handler chains (resource escalation requires handler → handler's
+  handler → ... → kernel). Double fault = kill is no longer viable as sole
+  strategy — chains must work. Remaining: timeout/watchdog on unresponsive
+  pagers, cleanup when a pager is destroyed with pending faults (D18 trigger).
+- ~~**Root/bootstrap fault handling.**~~ Settled by D31: the kernel is root
+  pager for hand-picked root Observer(s). Initial Spaces are fully physically
+  backed (D26 + D24 — page faults can't occur on initial memory). Resource
+  requests handled by kernel allocating from its pools. The kernel's policy is
+  trivially simple (allocate-or-deny); real policy in userspace pagers.
 - **Pager reply/resume mechanism.** D14 settles the resume half:
   resume(observer_handle) as a typed kernel syscall. The Observer handle reaches
   the pager via capability transfer in the fault message (D13). Remaining: how
@@ -1707,8 +1818,11 @@ semantics (reservation for migration).
   object. The page table is kernel-internal; per-Observer L0 tables are
   destroyed with the Observer; per-Space subtrees are reference-counted and
   freed when the last holder's cap is closed.
-- **Boot / bring-up model.** BSP-then-APs vs symmetric bring-up. Touches A2 but
-  not derived.
+- **Boot / bring-up model.** D31 settles the initial capability graph (kernel
+  creates root Observer with minimal resources, acts as root pager). Remaining:
+  BSP-then-APs vs symmetric bring-up for secondary cores. Secondary core
+  activation likely a typed kernel syscall; the activated core's Time pool
+  becomes available for allocation through the pager chain (D31).
 - ~~**Explicit unmap() semantics.**~~ Dissolved by D26: no explicit map() or
   unmap(). The page table is managed by the kernel based on Space cap holdings.
   Holding a cap grants access; losing a cap removes access.
@@ -1720,12 +1834,11 @@ semantics (reservation for migration).
   co-located Spaces on cleanup (expensive), or accept that sub-page Spaces don't
   benefit from automatic cleanup. Kernel-internal implementation concern, but
   D24 makes it load-bearing.
-- **Space acquisition at runtime.** Observers cannot create Spaces from nothing;
-  they receive Spaces through capability transfer or split existing Spaces. How
-  does an Observer that needs more memory acquire it? Candidates: request from
-  fault handler Observer, request from a memory server, protocol-level
-  negotiation. Connects to D12 (fault delegation) and D3 (Space manager as
-  allocation interface).
+- ~~**Space acquisition at runtime.**~~ Settled by D31: Observers acquire Space
+  through the pager chain. A resource request syscall is routed to the
+  Observer's fault handler (D12 mechanism). The handler grants (from own
+  holdings), denies, or escalates. The chain terminates at the kernel, which
+  allocates from its internal root Space.
 - **Kernel-internal memory on cap transfer.** When an Observer acquires a Space
   cap, the kernel creates page table entries and base table entries for the new
   holder. Whose Spaces back these structures? Interacts with D8
@@ -1926,6 +2039,16 @@ semantics (reservation for migration).
   superseded. Vocabulary revised. D29 reserved-slot revised to regular slots.
   Archive convergence: archive explicitly considered "multiple Time fragments."
   Novel position (no surveyed system provides multi-time per execution unit).
+- `032-resource-acquisition-and-boot.md` — reasoning for D31: resource
+  acquisition through pager chain, boot architecture, root fault handling, Time
+  vocabulary revision. Kernel retains resource pools (root Space, per-core root
+  Time), creates root Observer with minimal resources, acts as root pager.
+  Resource requests routed through D12 fault mechanism. Structural objects
+  (Endpoints, Observers) created from Space caps. Factory caps rejected (D4
+  indirection). Split-model-with-omnipotent-root rejected (security — god object
+  at EL0). Time revised to abstract scheduling capacity (core assignment
+  kernel-internal, A5 parallel with D9/D26). Strong archive convergence: journal
+  013 derived same model independently. Time abstraction is novel.
 
 ---
 

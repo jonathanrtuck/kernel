@@ -1,6 +1,6 @@
 # Kernel structural map.
 #
-# Populated from design/spec.md derivations D1-D6, D8-D30, observations O2-O3,
+# Populated from design/spec.md derivations D1-D6, D8-D31, observations O2-O3,
 # and Vocabulary (Space, Time, Observer). Every box and edge has a corresponding
 # spec.md entry; items labeled "TBD" await downstream derivation.
 #
@@ -37,8 +37,11 @@ kernel: {
       # Scheduling algorithm is a leaf-node, swappable per core.
       # Carries algorithm-specific state; Observer carries only
       # abstract scheduling properties.
-      # D29: manages Time objects for this core. Time creation
-      # authority flows through the Time manager.
+      # D29: manages Time objects for this core.
+      # D31: retains unallocated per-core scheduling capacity.
+      # Allocates to Observers via pager chain on request.
+      # Core assignment is kernel-internal — Observers don't
+      # see which core they run on.
 
       interface: {
         shape: class
@@ -55,6 +58,8 @@ kernel: {
     # Internal strategy (partitioning, NUMA-awareness, per-core
     # caches, cross-node fallback) is a leaf-node concern below
     # this layer and intentionally not represented here.
+    # D31: retains unallocated physical memory as kernel-internal
+    # root Space. Allocates to Observers via pager chain on request.
 
     interface: {
       shape: class
@@ -120,13 +125,13 @@ kernel: {
     style.multiple: true
     # D29: capability-held kernel object type (fourth type).
     # D30: one or more per Observer, in regular cap-table slots.
-    # A claim to a portion of a specific logical core's
-    # scheduling allocation. Designated by capabilities.
-    # Multiple Time caps on same core are additive — kernel
-    # maintains cached aggregate per Observer (D30).
-    # Time objects are per-core (vocabulary: "fraction of a
-    # specific logical core's scheduling allocation").
-    # Parameters, clonability, creation authority TBD.
+    # A claim to a portion of the system's scheduling capacity.
+    # Designated by capabilities. Multiple Time caps are additive —
+    # kernel maintains cached aggregate per Observer (D30).
+    # D31: Time is abstract — core assignment is kernel-internal
+    # (A5 parallel with D9/D26). Observers don't see core identity.
+    # Kernel allocates from per-core root Time pools via pager chain.
+    # Parameters, clonability TBD.
   }
 
   endpoint: {
@@ -193,7 +198,7 @@ hardware.gic -> kernel.core-manager: device interrupts (D22, routed to endpoints
 hardware.core -> kernel.core-manager: exceptions (incl. SGI)
 
 # Kernel -> hardware
-kernel.core-manager.time-manager -> kernel.time: manages (D29, per-core)
+kernel.core-manager.time-manager -> kernel.time: manages (D29, D31 core-internal)
 kernel.core-manager.time-manager -> hardware.core: timer programming
 # D5 + D26: kernel maintains page tables internally (per-Observer L0 root,
 # per-Space shared subtrees); MMU enforces them.
@@ -242,6 +247,11 @@ userspace -> userspace: IPC via queued endpoints (D7+D13+D15+D28, capability-med
 # D14: Resume via resume(observer_handle) typed kernel syscall.
 # Observer handle delivered in fault message via cap transfer (D13).
 kernel -> userspace: fault delegation (D12+D14+D20, pager notification + resume)
+# D31: Resource requests routed through same fault mechanism.
+# Observer syscall → kernel routes to fault handler → pager resolves.
+# Chain: handler → handler's handler → ... → kernel (root pager).
+# Kernel allocates from root Space / root Time pools for direct children.
+kernel -> userspace: resource request routing (D31, via D12 fault mechanism)
 # D22: Device interrupts delegated to userspace driver Observers.
 # Kernel dispatches (mask, enqueue to endpoint with badge + send-once ack cap, EOI).
 # Driver handles + acks via send-once. No separate IRQ type — all endpoint traffic.
