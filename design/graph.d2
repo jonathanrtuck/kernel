@@ -1,6 +1,6 @@
 # Kernel structural map.
 #
-# Populated from design/spec.md derivations D1-D6, D8-D26, observations O2-O3,
+# Populated from design/spec.md derivations D1-D6, D8-D27, observations O2-O3,
 # and Vocabulary (Space, Time, Observer). Every box and edge has a corresponding
 # spec.md entry; items labeled "TBD" await downstream derivation.
 #
@@ -69,6 +69,9 @@ kernel: {
     # same for all holders). Physical backing is kernel-internal.
     # Sharing: multiple Observers hold caps to same Space.
     # D25: page size exposed — minimum Space size = page size.
+    # D27: flat cardinality — Observers hold multiple independent
+    # Space caps. No kernel-tracked parent/child hierarchy.
+    # Grouping is userspace convention (D6 parallel).
   }
 
   observer: {

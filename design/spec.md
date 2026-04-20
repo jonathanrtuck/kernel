@@ -1245,6 +1245,40 @@ long-lived systems.
   essential complexity that the (cap, offset) model cannot absorb.
 - **Journal:** `journal/027-capability-addressed-memory.md`.
 
+### D27 — Flat Space cardinality
+
+An Observer holds multiple independent Space caps directly in its D8 capability
+table. Each Space cap is an independent entry — no kernel-tracked parent/child,
+hierarchical, or structural relationships between Spaces. "Related Spaces" (a
+program's code, data, heap) are a userspace convention, paralleling D6's
+treatment of Observer grouping as userspace convention.
+
+The hierarchical alternative (parent Space subdivided into children) was
+rejected on five convergent grounds: D8 (first inter-entry structural
+relationship in the flat table), D6 (grouping is userspace policy), D4
+(hierarchy introduces implicit structural authority beyond designation), D11
+(close/destroy would require cascade or orphan semantics), A3 (tree assumption
+forecloses non-tree memory patterns such as shared libraries or peer ring
+buffers).
+
+Does NOT settle: Space operations (split, resize, COW/clone — D9 downstream),
+provenance tracking (deferred as a potential kernel-internal optimization,
+orthogonal to user-facing cardinality).
+
+- **Rests on:** D8 (flat cap table — no inter-entry relationships; Space caps
+  follow existing independent-entry pattern), D6 (no kernel grouping — Space
+  grouping is policy, same as Observer grouping), D4 (designation = authority —
+  each Space cap designates one resource; hierarchy would introduce implicit
+  structural authority), D11 (close removes one cap; destroy invalidates one
+  object — hierarchy would require cascade or orphan semantics), D26 (per-Space
+  VA bases assigned independently at creation), A3 (generic — hierarchy forces
+  tree assumption that not all workloads fit).
+- **Status:** settled — revisit if D8 is revised to support inter-entry
+  relationships, if D6 is revised to add kernel grouping, or if a downstream
+  derivation (Space split, memory accounting) reveals that the absence of
+  hierarchy forces essential complexity into userspace.
+- **Journal:** `journal/028-space-cardinality.md`.
+
 ### Entry template
 
 Each derivation entry names three things: what rests on what, how settled the
@@ -1311,11 +1345,11 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
 - **Minimum abstract scheduling properties on an Observer.** D2 says Observers
   carry abstract scheduling properties, but the minimum set (priority? deadline?
   IO-bound flag? period?) is not fixed.
-- **Observer-Space cardinality formalization.** The Vocabulary section describes
-  Observers as holding capabilities to "one or more Spaces." Under D26, each
-  Space cap grants access to one contiguous memory region. Remaining: formalize
-  the "one or more" — does an Observer hold multiple Space caps directly, or is
-  it one parent Space subdivided into child Spaces?
+- ~~**Observer-Space cardinality formalization.**~~ Settled by D27: flat. An
+  Observer holds multiple independent Space caps directly in its D8 table. No
+  kernel-tracked hierarchy between Spaces. Grouping is userspace convention (D6
+  parallel). Hierarchy rejected on D8, D6, D4, D11, A3. Provenance tracking
+  deferred as kernel-internal optimization.
 - **Revocation add-ons.** D11 settles the base primitive (close-only + destroy
   - ABA slot tag). D17 settles badge semantics (minter-assigned, opt-in
     per-badge tracking with closure notifications). Remaining add-ons: endpoint
@@ -1655,6 +1689,13 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   VA bases enable page table subtree sharing and cross-Observer pointer sharing.
   Dissolves D10 (address space object); strengthens D24 to structural property;
   dissolves map/unmap asymmetry. Supersedes journal 010.
+- `028-space-cardinality.md` — reasoning for D27: flat Space cardinality. An
+  Observer holds multiple independent Space caps directly in its D8 flat table.
+  Five convergent grounds reject hierarchy: D8 (first inter-entry structural
+  relationship), D6 (grouping is userspace policy), D4 (hierarchy introduces
+  implicit authority beyond designation), D11 (cascade/orphan extends close
+  semantics), A3 (tree assumption forecloses non-tree patterns). Provenance
+  tracking deferred as kernel-internal optimization.
 
 ---
 
