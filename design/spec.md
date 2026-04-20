@@ -1407,16 +1407,62 @@ slips in.
 This template itself is tentative. After 3-5 entries have landed under it,
 review whether the shape fits what actually needs to be captured. Adjust if not.
 
+### D29 — Time is a capability-held kernel object type
+
+Time is a kernel object type designated by capabilities, joining Space,
+endpoint, and Observer as the fourth type. The Observer's Time reference is a
+capability in the Observer's D8 flat table at a reserved slot (D21 pattern).
+Time objects represent claims to scheduling allocation on a specific logical
+core.
+
+Three convergent paths: (1) D4 — Time is "a claim to a portion of a specific
+logical core's scheduling time," a bounded resource. D4 requires capability
+mediation for bounded resources. Kernel-internal Time binding is ambient
+privilege. (2) D21 precedent — D11 destroy-invalidation, D17 badge-closure, and
+D8 ABA protection require the Time reference to be a cap-table entry, not a
+struct field. (3) Journal 023 cap-graph completeness — Time as kernel-internal
+would be the sole resource outside the capability graph.
+
+Dissolves two open questions. Time reclamation on Observer destroy: Observer
+destroy closes the Time cap (D11 close semantics). Time migration across cores:
+close Time cap on source core, acquire Time cap on destination (cold-path
+capability operation, D1-consistent).
+
+Does NOT settle: Time cardinality (one or many per Observer — vocabulary's
+"exactly one Time" is an unexamined assumption, not derived; the Space parallel
+under D27 suggests multi-Time may be consistent), Time parameters
+(budget/period, fraction, or claim-to-participate), Time clonability (D23
+uniformity suggests clonable but not derived), Time creation authority (per-core
+Time manager), Time donation mechanism (seL4 MCS pattern — deferred), D2
+scheduling property split (which abstract properties live on Time vs. Observer).
+
+- **Rests on:** D4 (designation = authority — Time is a bounded resource;
+  ambient scheduling privilege foreclosed; independent path), D21 (cap-table
+  entry precedent — D11 destroy-invalidation, D17 badge-closure, D8 ABA
+  protection apply identically to Time reference; independent path), journal 023
+  (cap-graph completeness — Time as kernel-internal would be the sole hole;
+  independent path), D8 (flat cap table — Time cap at reserved slot, O(1)
+  lookup), D11 (close semantics dissolve Time reclamation), D6 (one Time per
+  Observer — vocabulary commitment carried forward; cardinality not yet
+  re-examined), `design/landscape.md` §4.4 (scheduling parameters on thread
+  object vs. separate first-class capability — seL4 MCS scheduling contexts),
+  `design/research/syscall-landscape.md` (seL4 MCS SchedContext/SchedControl).
+- **Status:** settled — revisit if D4 is revised (removing designation =
+  authority removes the primary path), if D21 is revised (removing cap-table
+  entry precedent removes the representation argument), or if a downstream
+  derivation (Time cardinality, Time parameters) reveals that capability-held
+  Time creates essential complexity that kernel-internal would not.
+- **Journal:** `journal/030-time-is-capability-held.md`.
+
 ---
 
 ## Open questions
 
-- **Time migration across cores.** When an Observer migrates to a less-loaded
-  core, does its Time allocation transfer, or is it re-allocated on the
-  destination? Affects D2's migration story. (Journal 023 notes that
-  time-as-capability — seL4 MCS, S3K — would make migration a capability
-  transfer: close on source core, create on destination. See also Time
-  reclamation.)
+- ~~**Time migration across cores.**~~ Dissolved by D29: Time is a
+  capability-held kernel object. Migration is a cold-path capability operation:
+  close Time cap on source core, acquire Time cap on destination. Observer's
+  abstract scheduling properties (D2) transfer; the Time object is
+  core-specific.
 - **Minimum abstract scheduling properties on an Observer.** D2 says Observers
   carry abstract scheduling properties, but the minimum set (priority? deadline?
   IO-bound flag? period?) is not fixed.
@@ -1437,24 +1483,26 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
 - **Observer minimum schema.** D6 settles that an Observer is a single execution
   unit. D14 settles that Observer is a capability-held kernel object type. D20
   settles per-Observer fault handler. D21 settles the handler as a cap-table
-  entry (not a separate Observer struct field). The concrete field set (register
-  state, L0 page table pointer, capability table pointer, Time binding,
-  scheduling state, pending-list linkage (D18), Observer state:
-  runnable/blocked/faulted) needs formal derivation in the current chain. Note:
-  the fault handler is NOT in this list — it lives in the cap table at a
-  reserved slot, not the Observer struct. Archive journal/004 derived a
+  entry (not a separate Observer struct field). D29 settles Time as a cap-table
+  entry at a reserved slot (same D21 pattern). The concrete field set (register
+  state, L0 page table pointer, capability table pointer, scheduling state,
+  pending-list linkage (D18), Observer state: runnable/blocked/faulted) needs
+  formal derivation in the current chain. Note: neither the fault handler NOR
+  the Time reference are in this list — both live in the cap table at reserved
+  slots, not in the Observer struct. Archive journal/004 derived a
   first-principles minimum. D12 confirms the fault handler is structurally
   required. D14 confirms lifecycle state tracking is required. D20 confirms
-  per-Observer attachment. D21 confirms cap-table representation.
+  per-Observer attachment. D21 confirms cap-table representation. D29 confirms
+  Time cap-table representation.
 - ~~**Address space binding mutability.**~~ Dissolved by D26: no address space
   object, no binding. Observers access Spaces through capabilities; the page
   table is updated automatically as caps are acquired and lost.
 - **Observer creation API shape.** D14 settles Observer as capability-held but
   not the creation interface. Create-then-configure (seL4 — inert Observer,
   configured via cap ops, started separately) vs. all-params-upfront (archive —
-  one syscall). Minimum inputs: Space, Time, fault handler endpoint + badge
-  (D12, D20). Open: initial PC/SP, initial capabilities, create vs. start as
-  separate operations.
+  one syscall). Minimum inputs: Space, Time cap (D29), fault handler endpoint +
+  badge (D12, D20). Open: initial PC/SP, initial capabilities, create vs. start
+  as separate operations.
 - **Observer rights model.** D14 settles resume and destroy as minimum. D23
   settles clonability, enabling rights separation across multiple caps. Open:
   suspend (external pause), inspect register state (debugging), modify
@@ -1470,11 +1518,38 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
 - **Suspend as distinct from faulted.** Is there external suspension (not caused
   by fault)? If yes, Observer state has four values (runnable, blocked, faulted,
   externally-suspended). Use cases: debugging, checkpointing, resource pressure.
-- **Time reclamation on Observer destroy.** Observer holds one Time (D6). On
-  destroy: return to destroyer? To creator? Destroy the Time? Interacts with
-  Time's non-clonable property. (Journal 023 notes that time-as-capability — D4
-  consistency — would dissolve this: close returns to delegator via D11
-  semantics.)
+- ~~**Time reclamation on Observer destroy.**~~ Dissolved by D29: Time is a
+  capability-held kernel object. Observer destroy closes the Time cap (D11 close
+  semantics). If this was the last reference, the Time object is destroyed and
+  its scheduling allocation returns to the per-core pool. If other caps exist
+  (e.g., the creator retained a reference), the object persists.
+- **Time cardinality.** D29 settles Time as capability-held but does NOT settle
+  whether an Observer holds one or many Time caps. The vocabulary's "exactly one
+  Time" (D6) is an unexamined assumption, not derived from axioms. The Space
+  parallel (D27 — flat cardinality, multiple independent Space caps) suggests
+  multi-Time may be the consistent position: each Time cap represents a portion
+  of scheduling allocation, the total is the sum. Observer's abstract scheduling
+  properties (D2) are hints about how the total allocation should be
+  distributed. Requires its own exploration. Interacts with Time parameters and
+  D2.
+- **Time parameters.** What does a Time object carry? Budget/period (seL4 MCS
+  sporadic server model — hard-RT capable), a fraction of core scheduling
+  capacity (vocabulary-literal), or just a claim-to-participate with quantity
+  determined by the scheduler. Interacts with cardinality: if multi-Time, each
+  cap's parameters define its quantum; the per-core scheduler works with the
+  Observer's total allocation.
+- **Time clonability.** D23 settled all other types as clonable. The uniformity
+  argument suggests clonable (multiple references to the same scheduling
+  allocation, not a second allocation). Journal 014's assumption of
+  "non-clonable" was never derived.
+- **Time creation authority.** Who creates Time objects? Per-core Time manager
+  (graph.d2 already has this box). Parallels D3 (one logical Space manager). How
+  is initial Time distributed at boot?
+- **Time donation on IPC.** seL4 MCS donates scheduling context during IPC for
+  priority inversion prevention. If adopted, likely a kernel-internal
+  optimization on Call() paralleling D16's reply-cap injection. The caller is
+  blocked (doesn't need Time); the server uses the caller's Time. Compatible
+  with D6's constraint at any instant. Deferred.
 - **Can Observers share capability tables?** D8 settles per-Observer tables with
   no sharing. Under D26, Observers sharing Spaces hold independent caps to the
   same Spaces. Revisit as a D8 downstream: does the
@@ -1784,6 +1859,14 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   convergence on size and fixed format; divergence on cap encoding (bitmask →
   dedicated) and reply-cap placement (shared slot → dedicated field), explained
   by D8 and D16 settled after archive.
+- `030-time-is-capability-held.md` — reasoning for D29: three convergent paths
+  (D4 designation = authority for bounded resources, D21 cap-table entry
+  precedent, journal 023 cap-graph completeness) settle Time as capability-held
+  kernel object type. Dissolves Time reclamation (D11 close semantics) and Time
+  migration (cap close + acquire). Discovery: vocabulary's "exactly one Time" is
+  an unexamined assumption, not derived — flagged for exploration. Archive
+  convergence: archive treated Time as first-class object with dynamic bindings
+  and Time donation via IPC.
 
 ---
 

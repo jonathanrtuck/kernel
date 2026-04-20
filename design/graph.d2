@@ -1,6 +1,6 @@
 # Kernel structural map.
 #
-# Populated from design/spec.md derivations D1-D6, D8-D28, observations O2-O3,
+# Populated from design/spec.md derivations D1-D6, D8-D29, observations O2-O3,
 # and Vocabulary (Space, Time, Observer). Every box and edge has a corresponding
 # spec.md entry; items labeled "TBD" await downstream derivation.
 #
@@ -37,6 +37,8 @@ kernel: {
       # Scheduling algorithm is a leaf-node, swappable per core.
       # Carries algorithm-specific state; Observer carries only
       # abstract scheduling properties.
+      # D29: manages Time objects for this core. Time creation
+      # authority flows through the Time manager.
 
       interface: {
         shape: class
@@ -81,7 +83,7 @@ kernel: {
     # D14: capability-held kernel object type (fourth type).
     # Lifecycle operations (resume, destroy, potentially more)
     # are typed kernel syscalls (D7) taking Observer handles.
-    # One register state, one Time, one capability table.
+    # One register state, Time cap(s) at reserved slot (D29), one capability table.
     # Accesses Spaces via (cap, offset) — D26.
     # "Process" is a userspace convention (group of Observers
     # sharing Space caps).
@@ -110,6 +112,20 @@ kernel: {
       # Table sharing: whether Observers sharing Spaces should
       # share cap tables is open (D8 downstream).
     }
+  }
+
+  time: {
+    label: Time
+    style.multiple: true
+    # D29: capability-held kernel object type (fourth type).
+    # A claim to a portion of a specific logical core's
+    # scheduling allocation. Designated by capabilities.
+    # Observer holds Time cap(s) at reserved slot(s) in
+    # its D8 flat table (D21 pattern).
+    # Time objects are per-core (vocabulary: "fraction of a
+    # specific logical core's scheduling allocation").
+    # Cardinality (one or many per Observer), parameters,
+    # clonability, creation authority TBD.
   }
 
   endpoint: {
@@ -176,6 +192,7 @@ hardware.gic -> kernel.core-manager: device interrupts (D22, routed to endpoints
 hardware.core -> kernel.core-manager: exceptions (incl. SGI)
 
 # Kernel -> hardware
+kernel.core-manager.time-manager -> kernel.time: manages (D29, per-core)
 kernel.core-manager.time-manager -> hardware.core: timer programming
 # D5 + D26: kernel maintains page tables internally (per-Observer L0 root,
 # per-Space shared subtrees); MMU enforces them.
@@ -190,7 +207,7 @@ kernel.core-manager -> kernel.observer.capabilities: resolve (hot path)
 # (hot path). Observers sharing identical Space cap sets could share TTBR.
 kernel.core-manager -> hardware.mmu: TTBR load (hot path)
 
-# Capabilities designate kernel objects (Space, Time, Observers, endpoints).
+# Capabilities designate kernel objects (Space, Time, endpoint, Observer — D29).
 # The capability table connects Observers to the resources they
 # are authorized to use. Space caps grant memory access (D26).
 kernel.observer.capabilities -> kernel.space: access via (cap, offset) (D4, D9, D26)
@@ -198,7 +215,7 @@ kernel.observer.capabilities -> kernel.endpoint: send/receive (D4, D15)
 kernel.observer.capabilities -> kernel.observer: lifecycle ops (D4, D14)
 # D9: Space manager allocates physical backing for Spaces.
 kernel.space-manager -> kernel.space: physical backing
-kernel.observer.capabilities -> kernel.core-manager.time-manager: Time capabilities
+kernel.observer.capabilities -> kernel.time: scheduling allocation (D4, D29)
 # D22: Interrupts delivered through endpoints (no separate IRQ type).
 # Kernel routes hardware IRQs to endpoints internally.
 # Ack via D16 send-once cap in interrupt message.
