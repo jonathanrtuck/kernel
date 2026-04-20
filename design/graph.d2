@@ -99,7 +99,7 @@ kernel: {
       # Handles carry a generational slot tag (D11) — bumped on
       # slot reuse, prevents stale-handle aliasing. ABA defense,
       # not revocation; does not invalidate live capabilities.
-      # Backed by typed memory from Observer's budget.
+      # Backed by typed memory from the Observer's Spaces.
       # O(1) lookup via handle index.
       # Revocation primitive: close-only (refcount on drop) +
       # authoritative destroy (D11). Badge-closure notifications
@@ -136,7 +136,6 @@ kernel: {
     # Coalescing lives in shared memory, not endpoint (D18 dissolves D13 tension).
     # Multi-wait, message format TBD.
   }
-
 }
 
 hardware: {

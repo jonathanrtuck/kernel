@@ -365,12 +365,10 @@ rights mask) entries, managed internally by the kernel. Handles are opaque
 integers; the kernel handles slot allocation, growth, and reuse. Userspace never
 sees or manages the table's structure.
 
-The physical memory backing the table comes from the Observer's memory budget,
-not the kernel's pool. The Observer (or its creator) commits physical memory for
-capability storage. When the table is full and a new capability must be stored,
-the kernel faults the Observer; the fault handler commits more memory, then
-retries. This provides explicit resource accounting without exposing table
-structure.
+The physical memory backing the table is drawn from the Observer's Spaces, not
+from a kernel-internal pool. When the table is full and a new capability must be
+stored, the kernel faults the Observer; the fault handler provides more memory,
+then retries.
 
 The CNode tree model (seL4) was rejected: D7 eliminates the dispatch role that
 CNode trees structurally serve, and A5 creates tension with CNode management
@@ -395,9 +393,9 @@ policy remain open.)
   (kernel absorbs complexity — CNode management is interface complexity pushed
   to userspace; flat table keeps the interface simple), D1 (hot path — one
   memory access for flat index vs. two+ for CNode tree walk), D3 (one logical
-  Space manager — table memory charged to Observer's budget through the Space
-  manager), `design/research/authority-models.md` §4, §5.5 (seL4 CNode tree vs.
-  Zircon flat table; namespace shape comparison), `design/landscape.md` §1.1
+  Space manager — table memory drawn from the Observer's Spaces),
+  `design/research/authority-models.md` §4, §5.5 (seL4 CNode tree vs. Zircon
+  flat table; namespace shape comparison), `design/landscape.md` §1.1
   (capability representation survey).
 - **Status:** settled — revisit if D7 is revised (unified model would
   re-motivate CNode dispatch), if the capability-addressed memory model (D26)
@@ -414,8 +412,7 @@ allocates physical pages behind them and manages the MMU mappings that make them
 accessible. An Observer accesses a Space through capability-addressed (Space,
 offset) pairs (D26) — holding a Space cap is sufficient for access. Sharing is
 through capability transfer — multiple Observers holding capabilities to the
-same Space. Physical backing is drawn from the Space's budget; which physical
-pages back a Space is a kernel-internal concern.
+same Space. Which physical pages back a Space is a kernel-internal concern.
 
 The seL4 untyped-memory model (userspace manages physical allocation and
 constructs page tables) was rejected: A5 forecloses pushing memory management
@@ -428,8 +425,8 @@ proliferation.
 
 Does NOT settle: ~~page size exposure (byte-addressed vs. page-addressed
 interface)~~ (settled by D25: exposed; hiding rejected), specific operations on
-Spaces (create, COW/clone, resize), Space rights, fault delegation, or precise
-parent-Space-to-child-Space accounting relationship.
+Spaces (split, COW/clone, resize), Space rights, fault delegation, or how an
+Observer acquires additional Spaces at runtime.
 
 - **Rests on:** A5 (kernel absorbs complexity — same argument that rejected
   CNode trees in D8 applies to memory management), D5 (MMU-backed virtual
@@ -437,7 +434,7 @@ parent-Space-to-child-Space accounting relationship.
   page-table-specific concepts), D4 (capability-designated; sharing through
   capability transfer), D7 (memory operations are typed kernel syscalls, not
   IPC), D8 (precedent: kernel-managed structure with typed-memory backing from
-  Observer's budget), D3 (Space manager is the single allocation interface;
+  the Observer's Spaces), D3 (Space manager is the single allocation interface;
   memory object backing flows through it), `design/landscape.md` §2.1–2.3 (four
   families surveyed; two-step create/map dominant).
 - **Status:** settled — revisit if A5 is revised (would re-open
@@ -490,7 +487,7 @@ overspend on features whose alternatives may be free.
 Does NOT settle: mass invalidation (deferred with IPC), selective revocation
 (deferred with IPC), who authorizes destroy, cross-core prompt-effect policy
 (strong vs. weak), destroy cleanup protocol (inline vs. preemptible), ABA tag
-size and encoding, budget treatment of freed slots, table-full fault ↔
+size and encoding, memory reclamation of freed slots, table-full fault ↔
 revocation interaction.
 
 - **Rests on:** A5 (close-only alone forces terminate-by-force into userspace
@@ -595,7 +592,7 @@ cross-source data loss when multiple sources share a capacity-1 overwrite
 endpoint. Resolution deferred to endpoint-shape exploration. The tension is
 documented in journal/013 so it is not rediscovered.
 
-Queue memory charged to creator's Space budget (D8 pattern). Fixed capacity at
+Queue memory drawn from the creator's Spaces (D8 pattern). Fixed capacity at
 creation. Memory per queued message ~48 bytes (register-sized).
 
 Does NOT settle: message format, queue capacity policy, IPC fast-path
@@ -610,8 +607,8 @@ D19.)
   minimal per-core hot-path requirement), D7 (split model — IPC as a dedicated
   mechanism family; D7 notes "couples naturally with async"), D12 (fault traffic
   is IPC — kernel-as-sender requires non-blocking deposit), D4 (capability-
-  mediated — endpoints designated by capabilities), D3 + D8 (queue memory
-  budgeted to Space through typed-memory-backing pattern), `design/landscape.md`
+  mediated — endpoints designated by capabilities), D3 + D8 (queue memory drawn
+  from creator's Spaces; typed-memory-backing pattern), `design/landscape.md`
   §3.1 (sync vs. async survey), §3.2 ("every production microkernel converges on
   hybrid"), §3.4 (fast-path data), `design/research/syscall-landscape.md` §10
   (IPC as pivot point, performance data, lessons from removals).
@@ -768,7 +765,8 @@ and immutability.
 
 Mint is a third independent right in D8's rights mask (send, receive, mint),
 controlling who can assign badges when cloning. The endpoint creator controls
-mint-right distribution, aligning badge population growth with budget authority.
+mint-right distribution, aligning badge population growth with resource
+authority.
 
 Lifecycle visibility is opt-in: the endpoint creator specifies at creation
 whether per-badge refcount tracking is enabled. With tracking: when the last
@@ -1112,7 +1110,8 @@ Space reaches zero, the page table subtree for that Space is detached from the
 Observer's L0 table.
 
 Does NOT settle: sub-page packing strategy (kernel-internal implementation
-concern), Space budget transfer on cap move, D9 Space operations.
+concern), kernel-internal memory cost on cap transfer (page table entries for
+new holder), D9 Space operations.
 
 - **Rests on:** D4 (designation = authority — the invariant extends D4 to MMU
   access; the MMU mapping is a form of authority governed by the capability
@@ -1219,8 +1218,9 @@ than an enforced invariant.
 
 Does NOT settle: base table management (kernel-maintained read-only page vs.
 Observer-managed), cap rights for memory access (separate "access" right?),
-demand fault vs. eager page table population, page table memory budget
-ownership, VA base reclamation policy for long-lived systems.
+demand fault vs. eager page table population, page table memory ownership (whose
+Spaces back per-Observer page table structures), VA base reclamation policy for
+long-lived systems.
 
 - **Rests on:** D4 (designation = authority — holding a Space cap IS the
   authority; the model eliminates the gap between holding authority and
@@ -1483,10 +1483,16 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
   co-located Spaces on cleanup (expensive), or accept that sub-page Spaces don't
   benefit from automatic cleanup. Kernel-internal implementation concern, but
   D24 makes it load-bearing.
-- **Space budget transfer on cap move.** When a memory-object cap is moved from
-  one Observer to another, does the budget charge for the object's physical
-  backing transfer to the receiver's Space? Stay with the original creator?
-  Interacts with D3 (one logical Space manager) and D8 (typed-memory backing).
+- **Space acquisition at runtime.** Observers cannot create Spaces from nothing;
+  they receive Spaces through capability transfer or split existing Spaces. How
+  does an Observer that needs more memory acquire it? Candidates: request from
+  fault handler Observer, request from a memory server, protocol-level
+  negotiation. Connects to D12 (fault delegation) and D3 (Space manager as
+  allocation interface).
+- **Kernel-internal memory on cap transfer.** When an Observer acquires a Space
+  cap, the kernel creates page table entries and base table entries for the new
+  holder. Whose Spaces back these structures? Interacts with D8
+  (typed-memory-backing pattern) and D26 (per-Observer page tables).
 
 ---
 
@@ -1567,7 +1573,7 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
 - `017-badge-semantics.md` — reasoning for D17: D15's many-to-one patterns
   require sender identification; minter-assigned because identification (key
   into receiver state) requires receiver-controlled values; mint right as third
-  independent right in D8's rights mask (D4 consistency, budget alignment);
+  independent right in D8's rights mask (D4 consistency, resource alignment);
   opt-in per-badge lifecycle tracking resolves A3/A4 tension (not all workloads
   need it, but those that do should not fall back to polling); five tensions
   accepted for tracked endpoints; archive convergence on representation and
