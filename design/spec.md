@@ -1750,6 +1750,79 @@ shootdown batching (optimization, deferred), Observer "extract" operation
   "extract before destroy" makes the cascade protocol unnecessary.
 - **Journal:** `journal/034-destroy-cascade-protocol.md`.
 
+### D35 — Observer creation API: minimal create, separate start, composable operations
+
+Observer creation is a minimal typed kernel syscall:
+`create_observer(space_cap, handler_field_cap, badge) → observer_cap`. The Space
+cap is consumed entirely (D32 type conversion). The handler field cap and badge
+are installed at the reserved cap-table slot (D21). The Observer is created in
+an inert state — structure exists (cap table, page table root, register save
+area, fault handler), but the Observer is not scheduled.
+
+The caller configures the Observer before starting it using general-purpose
+operations: `observer_install_cap(observer_cap, source_cap) → slot` installs a
+capability into the Observer's table (kernel manages slot allocation,
+D8-consistent); `observer_write_registers(observer_cap, pc, sp, ...)` sets
+register state; `observer_resume(observer_cap)` transitions from inert to
+runnable (D14). Each requires a corresponding right on the Observer cap.
+
+Cap installation is a general-purpose Observer operation, not creation-specific.
+The same primitive serves fault resolution (supervisor installs Space caps after
+page fault), dynamic delegation (granting new capabilities at runtime), and
+pre-start setup. Time caps may be optionally installed before start — D31's
+pager chain is the fallback acquisition mechanism, not a prohibition on early
+provision.
+
+Five creation models foreclosed: fork+exec (D6/D4/D27), constructor/image-stamp
+(D31/D4), manifest-based (A3), VSpace binding (D26), Time as required parameter
+(D31). The all-params-upfront alternative was rejected: separate create and
+start forecloses nothing (all-params is a userspace library wrapping the
+sequence; the reverse decomposition cannot be built outside the kernel), every
+post-creation operation exists independently of creation (no new kernel
+surface), and the syscall overhead (~1,000–2,000 extra cycles for 4–6 calls) is
+negligible on this cold path relative to Observer creation's structural weight.
+
+Does NOT settle: Observer rights model (D35 confirms install-cap,
+write-registers, and resume as rights; the complete set is one level down),
+Observer minimum schema (must support inert state), specific syscall encoding,
+reply field allocation timing (D16 downstream — compatible with either pre-
+allocated or lazy), cap-install slot selection policy (kernel-chosen default,
+D8-consistent).
+
+- **Rests on:** D32 (type conversion — Space consumed entirely as structural
+  backing; creation Space does not provide executable memory), D20 + D21 (fault
+  handler field cap + badge mandatory at creation time; cap-table write at
+  reserved slot), D31 (Time via pager chain — not a creation parameter; pager
+  chain is fallback, not prohibition), D26 (no address space object — no VSpace
+  binding; Observer needs code Space cap before PC is meaningful), D14 (Observer
+  as capability-held type; resume as typed syscall), D7 (creation is a typed
+  kernel syscall; install-cap and write-registers are typed kernel syscalls), D8
+  (flat cap table with kernel-managed allocation — install-cap returns slot
+  number; D8-consistent), D12 (fault resolution requires cap installation into
+  another Observer's table — same primitive as pre-start setup), A4 (synchronous
+  creation within exception handler), A5 (kernel absorbs complexity — composable
+  primitives with userspace library for common patterns; all-params is a
+  library, not a kernel concern), D6 (Observer creation is structurally
+  heavyweight — extra syscalls negligible on cold path), D1 (creation is
+  cold-path), `design/landscape.md` §6.7 (task lifecycle survey —
+  create-then-configure, spawn, fork+exec, constructor, manifest),
+  `design/research/bootstrap-authority.md` (creation authority models),
+  `design/research/execution-unit.md` (execution unit structure),
+  `design/research/syscall-landscape.md` (seL4 TCB operations, Zircon
+  thread_create/thread_start).
+- **Archive convergence:** Partial. Archive used all-params-upfront:
+  `create_context(space, time, fault_handler, ...)`. Divergence explained by D31
+  (removes Time from creation), D26 (removes VSpace binding), and the
+  cap-install reuse argument (fault resolution shares the primitive with
+  pre-start setup — archive lacked this because pager protocol was explored
+  after creation model).
+- **Status:** settled — revisit if D32 is revised (changes type conversion
+  model), if D20/D21 are revised (changes fault handler requirement at
+  creation), or if the Observer rights model derivation reveals that the
+  install-cap / write-registers decomposition creates essential complexity that
+  a richer create call would have avoided.
+- **Journal:** `journal/035-observer-creation-api.md`.
+
 ---
 
 ## Open questions
@@ -1780,13 +1853,14 @@ shootdown batching (optimization, deferred), Observer "extract" operation
   unit. D14 settles that Observer is a capability-held kernel object type. D20
   settles per-Observer fault handler. D21 settles the handler as a cap-table
   entry (not a separate Observer struct field). D29 settles Time as capability-
-  held; D30 settles multi-Time in regular cap-table slots (not reserved). The
-  concrete field set (register state, L0 page table pointer, capability table
-  pointer, cached scheduling aggregate (D30), scheduling state, pending-list
-  linkage (D18), Observer state: runnable/blocked/faulted) needs formal
-  derivation in the current chain. Note: the fault handler lives in the cap
-  table at a reserved slot (D21). Time caps live in regular cap-table slots
-  (D30), but the cached scheduling aggregate is an Observer struct field.
+  held; D30 settles multi-Time in regular cap-table slots (not reserved). D35
+  settles that Observers support an inert state (created but not yet scheduled).
+  The concrete field set (register state, L0 page table pointer, capability
+  table pointer, cached scheduling aggregate (D30), scheduling state,
+  pending-list linkage (D18), Observer state: inert/runnable/blocked/faulted)
+  needs formal derivation in the current chain. Note: the fault handler lives in
+  the cap table at a reserved slot (D21). Time caps live in regular cap-table
+  slots (D30), but the cached scheduling aggregate is an Observer struct field.
   Archive journal/004 derived a first-principles minimum. D12 confirms the fault
   handler is structurally required. D14 confirms lifecycle state tracking is
   required. D20 confirms per-Observer attachment. D21 confirms cap-table
@@ -1794,21 +1868,22 @@ shootdown batching (optimization, deferred), Observer "extract" operation
 - ~~**Address space binding mutability.**~~ Dissolved by D26: no address space
   object, no binding. Observers access Spaces through capabilities; the page
   table is updated automatically as caps are acquired and lost.
-- **Observer creation API shape.** D14 settles Observer as capability-held but
-  not the creation interface. D31 settles that creation presents a Space cap
-  (kernel allocates Observer struct + cap table from that Space). Minimum
-  inputs: Space cap with create right (D31), fault handler field + badge (D12,
-  D20). Time acquired post-creation through pager chain (D31) rather than
-  provided at creation. Create-then-configure (seL4 — inert Observer, configured
-  via cap ops, started separately) vs. all-params-upfront (archive — one
-  syscall). Open: initial PC/SP, initial capabilities, create vs. start as
-  separate operations.
+- ~~**Observer creation API shape.**~~ Settled by D35: minimal create + separate
+  start + composable operations.
+  `create_observer(space_cap, handler_field_cap, badge) → observer_cap [inert]`.
+  PC/SP via write-registers, initial caps via general-purpose install-cap (same
+  primitive as fault resolution), start via resume. All-params-upfront rejected
+  (forecloses decomposition; composable primitives + userspace library is
+  A5-consistent). Remaining: Observer rights model (install-cap,
+  write-registers, resume confirmed as rights; complete set one level down).
 - **Observer rights model.** D14 settles resume and destroy as minimum. D23
-  settles clonability, enabling rights separation across multiple caps. Open:
-  suspend (external pause), inspect register state (debugging), modify
-  scheduling properties (D2), change fault handler (D20 — per-Observer, so this
-  is an Observer-cap right), duplicate-control right (Zircon ZX_RIGHT_DUPLICATE
-  model, deferred from D23). Each right = a typed kernel syscall under D7.
+  settles clonability, enabling rights separation across multiple caps. D35 adds
+  install-cap and write-registers as confirmed rights (needed for creation setup
+  and fault resolution). Open: suspend (external pause), inspect register state
+  (debugging), modify scheduling properties (D2), change fault handler (D20 —
+  per-Observer, so this is an Observer-cap right), duplicate-control right
+  (Zircon ZX_RIGHT_DUPLICATE model, deferred from D23). Each right = a typed
+  kernel syscall under D7.
 - ~~**Observer handle clonability.**~~ Settled by D23: clonable. Observer
   handles follow uniform capability rules (clone, attenuate, transfer)
   identically to all other kernel object types. Non-clonable rejected on five
@@ -1951,9 +2026,10 @@ shootdown batching (optimization, deferred), Observer "extract" operation
 - **Specific syscall surface.** D7 settles two mechanism families but not the
   exact set. D14 adds resume() and confirms destroy() applies to Observers. D28
   establishes inspect(observer_handle) as a typed kernel operation for reading
-  Observer state (fault message decomposition). The archive's 10-syscall design
-  is a data point. Depends on IPC model, Observer creation API, Observer rights
-  model, and D9 (memory objects).
+  Observer state (fault message decomposition). D35 adds create_observer(),
+  observer_install_cap(), and observer_write_registers() as typed kernel
+  operations. The archive's 10-syscall design is a data point. Depends on IPC
+  model, Observer rights model, and D9 (memory objects).
 - ~~**Address space lifecycle.**~~ Dissolved by D26: no address space kernel
   object. The page table is kernel-internal; per-Observer L0 tables are
   destroyed with the Observer; per-Space subtrees are reference-counted and
@@ -2208,6 +2284,18 @@ shootdown batching (optimization, deferred), Observer "extract" operation
   convergence (cascade through owned resources); divergence on return
   destination (archive returns to supervisor via ownership tree; this design
   uses flat caps + root Space).
+- `035-observer-creation-api.md` — reasoning for D35: minimal create + separate
+  start + composable operations. Five creation models foreclosed (fork+exec,
+  constructor, manifest, VSpace binding, Time-at-creation). Creation Space does
+  not provide executable memory (D32 type conversion); Observer needs code Space
+  cap before PC is meaningful (D26). Fault handler is a creation parameter under
+  any model (D20). Cap installation is a general-purpose Observer operation
+  shared with fault resolution — not creation-specific. Create-then-configure
+  chosen over all-params because it forecloses nothing (all-params is a
+  userspace library), introduces no new kernel surface, and syscall overhead is
+  negligible on this cold path. Archive divergence: archive used all-params;
+  explained by D31 (removes Time), D26 (removes VSpace), and cap-install reuse
+  argument.
 
 ---
 

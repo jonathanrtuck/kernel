@@ -5,7 +5,7 @@
 # spec.md entry; items labeled "TBD" await downstream derivation.
 #
 # Intentionally absent (pending derivation): specific syscall surface, Observer
-# minimum schema, Observer creation API and rights model (D14 downstream),
+# minimum schema, Observer rights model (D14 downstream; D35 settles creation),
 # field details (multi-wait — D13/D15 downstream; overflow settled by D18;
 # message format settled by D28), revocation add-ons (generation, CDT — base
 # settled in D11; badges settled in D17), per-physical-core concerns (power,
@@ -99,7 +99,11 @@ kernel: {
     # D23: Observer handles are clonable — uniform with all
     # other kernel object types. Rights separation via multiple
     # caps with different masks.
-    # Minimum schema, creation API, rights model TBD.
+    # D35: creation is minimal create + separate start.
+    # create_observer(space, handler, badge) → inert Observer.
+    # Configured via install_cap, write_registers, then resume.
+    # install_cap is general-purpose (also serves fault resolution).
+    # Minimum schema, rights model TBD.
 
     capabilities: {
       label: Capability table
