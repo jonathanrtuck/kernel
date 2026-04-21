@@ -120,7 +120,7 @@ boundary.
 
 The unified model provides transparent interposition: a child Observer calling
 `invoke(cap, ...)` cannot distinguish whether the cap points to a real kernel
-object or to a proxy endpoint. In the split model, a child making a typed kernel
+object or to a proxy field. In the split model, a child making a typed kernel
 syscall goes directly to the kernel — a proxy cannot transparently intercept it.
 
 This was examined against practical use cases:

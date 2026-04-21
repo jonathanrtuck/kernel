@@ -19,9 +19,9 @@ treatment on destruction.
 All kernel memory allocation follows one rule: present a Space, kernel allocates
 from it. Three domains emerge based on who presents:
 
-1. **Object creation (Observer, Endpoint):** The presented Space is consumed
-   entirely — a type conversion. `create_endpoint(space_cap)` converts a Space
-   into an Endpoint. The physical pages change purpose, not quantity.
+1. **Object creation (Observer, Field):** The presented Space is consumed
+   entirely — a type conversion. `create_field(space_cap)` converts a Space into
+   a Field. The physical pages change purpose, not quantity.
    `create_observer(space_cap, config)` converts a Space into an Observer's
    structural backing (cap table, L0 page table root, register save area). The
    Space is gone; the object exists.
@@ -34,7 +34,7 @@ from it. Three domains emerge based on who presents:
    (D31 — root Space is kernel-internal), so hiding per-object metadata within
    it introduces no new opacity.
 
-3. **Kernel-internal bookkeeping:** Space manager state, IRQ→endpoint routing
+3. **Kernel-internal bookkeeping:** Space manager state, IRQ→field routing
    table, per-core scheduler state. Charged to root Space. Bounded by hardware
    constants and object count. Invisible to userspace.
 
@@ -44,8 +44,8 @@ Creation converts Space into an object. Destruction converts the object back
 into Space:
 
 ```text
-create_endpoint(space_cap) → endpoint_cap    (Space becomes Endpoint)
-destroy_endpoint(endpoint_cap) → space_cap   (Endpoint becomes Space)
+create_field(space_cap) → field_cap    (Space becomes Field)
+destroy_field(field_cap) → space_cap   (Field becomes Space)
 ```
 
 Conservation is structural: physical pages change purpose, not quantity. The
@@ -93,7 +93,7 @@ bounded resources, return to different pools.
 ### Boot structures from root Space
 
 The kernel creates boot-time structures (root Observer, initial Spaces, initial
-Time, initial Endpoint) from its root Space. Fixed, predictable cost. No
+Time, initial Field) from its root Space. Fixed, predictable cost. No
 reconciliation needed — the root Space simply has less available after boot.
 
 ### Observer destruction: held caps deferred
@@ -116,7 +116,7 @@ independently derived.
 - **Destroy cascade protocol.** When an Observer is destroyed, its held caps are
   closed (D11). Cascading zero-refcount destructions produce freed backing that
   needs recipients. Connects to the pager chain / supervisor model.
-- **Space "create" right.** Whether Endpoint/Observer creation from a Space cap
+- **Space "create" right.** Whether Field/Observer creation from a Space cap
   requires a specific right in the rights mask (D8). Likely yes for D4.
 - **Overhead reporting.** When an Observer queries a Space's size, does it see
   the accessible size minus the reserved subtree overhead, or just the

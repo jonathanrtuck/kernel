@@ -13,10 +13,10 @@ bumped on slot reuse — to prevent stale-handle aliasing of reused table slots
 Add-on mechanisms for mass invalidation (generation-as-revocation) and selective
 revocation (CDT, badges) are deferred. Their value-vs-cost calculus depends on
 the IPC model, which has not been settled. Specifically, the case for omitting
-generation-as-revocation rests on endpoint rotation (destroy + recreate a
-session endpoint, clients reconnect) as the alternative — but endpoint rotation
-presupposes endpoint-like kernel objects, a property of the IPC model. Badges
-likewise ride on IPC. Committing to add-ons now would skip a level.
+generation-as-revocation rests on field rotation (destroy + recreate a session
+field, clients reconnect) as the alternative — but field rotation presupposes
+field-like kernel objects, a property of the IPC model. Badges likewise ride on
+IPC. Committing to add-ons now would skip a level.
 
 ---
 
@@ -129,9 +129,9 @@ Three candidate add-ons:
 Each add-on's value proposition rests on an alternative that, in its absence,
 userspace would otherwise use:
 
-- _Mass invalidation without generation:_ endpoint rotation — destroy a session
-  endpoint, recreate it, clients reconnect. One IPC per client at rotation time,
-  none per operation. Requires endpoint-like kernel objects to exist.
+- _Mass invalidation without generation:_ field rotation — destroy a session
+  field, recreate it, clients reconnect. One IPC per client at rotation time,
+  none per operation. Requires field-like kernel objects to exist.
 - _Selective revocation without CDT:_ badges (service-enforced) or proxy
   indirection (userspace proxy mediates). Both require IPC.
 - _Selective revocation of kernel-owned resources without CDT:_ only
@@ -140,11 +140,11 @@ userspace would otherwise use:
   keeping A alive."
 
 **The dependency.** Each alternative requires the IPC model to have specific
-properties — endpoint-like objects for endpoint rotation, per-message tag
-delivery for badges, mediation endpoints for proxies. The IPC model is open.
-Settling add-ons now means either committing to add-on cost without knowing
-whether the alternative makes them unnecessary, or implicitly committing to
-IPC-model properties — skipping a level.
+properties — field-like objects for field rotation, per-message tag delivery for
+badges, mediation fields for proxies. The IPC model is open. Settling add-ons
+now means either committing to add-on cost without knowing whether the
+alternative makes them unnecessary, or implicitly committing to IPC-model
+properties — skipping a level.
 
 Applying the philosophy principle "work one level at a time" and "a decision
 cannot be more settled than its least-settled ancestor": the add-ons must wait
@@ -206,8 +206,8 @@ Three paths land at Base-B + ABA:
 ## What this does NOT settle
 
 - **Mass invalidation.** Whether to add generation-as-revocation. Deferred with
-  IPC model — the alternative (endpoint rotation via destroy) depends on IPC
-  providing endpoint-like objects.
+  IPC model — the alternative (field rotation via destroy) depends on IPC
+  providing field-like objects.
 - **Selective revocation.** Whether to add CDT or rely on badge-based
   service-mediated discrimination. Deferred with IPC model — badges are
   IPC-carried.
@@ -251,7 +251,7 @@ here for traceability.
 
 Revisit if:
 
-- The IPC model decision reveals that Base-B plus IPC-level mechanisms (endpoint
+- The IPC model decision reveals that Base-B plus IPC-level mechanisms (field
   rotation, badges) do not cover A3-workload needs that generation-as-revocation
   or CDT would otherwise serve.
 - A5 is revised (would re-open Base-A).

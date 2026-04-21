@@ -57,15 +57,15 @@ The archive explored this path across three journal entries:
 
 **Archive/006:** "Context is not an object type." Lifecycle through resource
 control and IPC indirection. The argument: every post-creation operation on a
-Context can be mediated through resource control, IPC, or endpoint indirection.
+Context can be mediated through resource control, IPC, or field indirection.
 
-**Archive/011:** Introduced control Endpoints — per-Context, kernel-intercepted,
+**Archive/011:** Introduced control Fields — per-Context, kernel-intercepted,
 processed inline (no queue), state-checked before acting. Used for fault resume
-(handler sends "resume" to control Endpoint) and lifecycle management.
+(handler sends "resume" to control Field) and lifecycle management.
 
 **Archive/013:** Reversed both. The critical discovery: resume requires a direct
 kernel handle. The suspended Observer never called receive() — IPC can't reach
-it. The control Endpoint was "a syscall interface wearing an IPC costume" —
+it. The control Field was "a syscall interface wearing an IPC costume" —
 kernel-intercepted, no queue, processed inline. The semantics diverged
 completely from peer IPC while sharing the send() entry point. Making it an
 actual syscall was more honest.
@@ -74,7 +74,7 @@ The current chain's settled decisions reinforce the archive's conclusion:
 
 - D7 (settled after the archive's chain) independently identifies the
   Observer→Kernel asymmetry and creates the typed-kernel-syscall mechanism
-  family. Control Endpoints would violate D7.
+  family. Control Fields would violate D7.
 - D12 (settled after the archive) creates explicit structural demand for resume
   that the archive discovered only through IPC exploration.
 - D4 (settled in both chains) requires a capability handle as the noun.
@@ -110,16 +110,15 @@ exploration, and the landscape survey all point the same way.
 ## The decision
 
 **Observer is a capability-held kernel object type.** Observer joins Space,
-Time, Coordinate System (D10), and endpoint (D13) as the fifth kernel object
-type. Lifecycle operations — at minimum resume and destroy — are typed kernel
-syscalls (D7) taking Observer capability handles. The capability's rights mask
-governs which operations are permitted.
+Time, Coordinate System (D10), and field (D13) as the fifth kernel object type.
+Lifecycle operations — at minimum resume and destroy — are typed kernel syscalls
+(D7) taking Observer capability handles. The capability's rights mask governs
+which operations are permitted.
 
 **Fault resume flow (D12 + D14):** Observer faults → kernel delivers fault
-notification as endpoint message (D13) containing an Observer handle via
-capability transfer → pager processes fault → pager calls
-resume(observer_handle) as typed kernel syscall (D7) → kernel changes Observer
-state from suspended to runnable.
+notification as field message (D13) containing an Observer handle via capability
+transfer → pager processes fault → pager calls resume(observer_handle) as typed
+kernel syscall (D7) → kernel changes Observer state from suspended to runnable.
 
 **Termination (D11 + D14):** destroy(observer_handle) eliminates the Observer.
 D11's dead-handle semantics apply. close(observer_handle) drops the holder's
@@ -131,11 +130,11 @@ reference without destroying the object.
 
 D14 does not depend on D13's IPC model specifics. The derivation chain
 (D12→D7→D4) is load-bearing; D13 provides a convenient delivery mechanism
-(capability transfer in endpoint messages carries the Observer handle to the
-pager) but is not structurally required. If D13 moved — different IPC model,
-different message format — the Observer handle would still need to reach the
-pager through whatever delivery mechanism replaced it, and resume() would still
-be a typed kernel syscall.
+(capability transfer in field messages carries the Observer handle to the pager)
+but is not structurally required. If D13 moved — different IPC model, different
+message format — the Observer handle would still need to reach the pager through
+whatever delivery mechanism replaced it, and resume() would still be a typed
+kernel syscall.
 
 D14 is independent of D13's tentative status. The IPC model determines HOW the
 handle is delivered; D14 determines THAT a handle exists.

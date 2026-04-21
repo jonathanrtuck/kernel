@@ -6,7 +6,7 @@
 #
 # Intentionally absent (pending derivation): specific syscall surface, Observer
 # minimum schema, Observer creation API and rights model (D14 downstream),
-# endpoint details (multi-wait — D13/D15 downstream; overflow settled by D18;
+# field details (multi-wait — D13/D15 downstream; overflow settled by D18;
 # message format settled by D28), revocation add-ons (generation, CDT — base
 # settled in D11; badges settled in D17), per-physical-core concerns (power,
 # thermal, shared cache/TLB). See spec.md#Open questions.
@@ -93,7 +93,7 @@ kernel: {
     # Accesses Spaces via (cap, offset) — D26.
     # "Process" is a userspace convention (group of Observers
     # sharing Space caps).
-    # D20: per-Observer fault handler (endpoint ref + badge).
+    # D20: per-Observer fault handler (field ref + badge).
     # D21: fault handler is a cap-table entry at reserved slot
     # (not a separate Observer struct field). D11/D17/D8 apply.
     # D23: Observer handles are clonable — uniform with all
@@ -114,7 +114,7 @@ kernel: {
       # O(1) lookup via handle index.
       # Revocation primitive: close-only (refcount on drop) +
       # authoritative destroy (D11). Badge-closure notifications
-      # on tracked endpoints (D17).
+      # on tracked fields (D17).
       # Table sharing: whether Observers sharing Spaces should
       # share cap tables is open (D8 downstream).
     }
@@ -134,12 +134,12 @@ kernel: {
     # Parameters, clonability TBD.
   }
 
-  endpoint: {
-    label: Endpoint
+  field: {
+    label: Field
     style.multiple: true
-    # D13: queued endpoints with direct-switch fast path (tentative).
+    # D13: queued fields with direct-switch fast path (tentative).
     # D15: unidirectional, many-to-many, send/receive as object-rights.
-    # D16: reply via pre-allocated reply endpoint with send-once cap.
+    # D16: reply via pre-allocated reply field with send-once cap.
     # D17: badge semantics — minter-assigned, mint-right-controlled,
     # opt-in per-badge lifecycle tracking.
     # Single kernel object: bounded queue + waiters list.
@@ -148,17 +148,17 @@ kernel: {
     # Rights: send, receive, mint (D17), send-once (D16) —
     # independently grantable through D8 rights mask.
     # All information delivery (IPC, faults, interrupts, badge-closure
-    # notifications on tracked endpoints) through the same mechanism.
+    # notifications on tracked fields) through the same mechanism.
     # Kernel is a sender for fault/interrupt/closure messages (D12, D17).
-    # D22: interrupts are endpoint traffic — no separate IRQ type.
-    # Kernel routes hardware IRQs to endpoints, delivers with badge +
+    # D22: interrupts are field traffic — no separate IRQ type.
+    # Kernel routes hardware IRQs to fields, delivers with badge +
     # send-once ack cap (D16). Split/combine for IRQ range delegation.
-    # Each Observer has a pre-allocated reply endpoint; Call() creates
+    # Each Observer has a pre-allocated reply field; Call() creates
     # a send-once cap for RPC reply (D16).
     # D18: overflow = error-to-sender. Deferred fault delivery via
-    # per-endpoint pending list (intrusive, through Observer objects).
+    # per-field pending list (intrusive, through Observer objects).
     # Badge-closure dropped on full queue.
-    # Coalescing lives in shared memory, not endpoint (D18 dissolves D13 tension).
+    # Coalescing lives in shared memory, not field (D18 dissolves D13 tension).
     # D28: message format settled — 4 data words + 1 user cap slot +
     # label/badge/reply-cap as dedicated fields. Fixed-size control packet.
     # Multi-wait TBD.
@@ -194,7 +194,7 @@ hardware: {
 kernel.core-manager -> kernel.core-manager: IPI
 
 # Hardware -> kernel (A2, O3)
-hardware.gic -> kernel.core-manager: device interrupts (D22, routed to endpoints)
+hardware.gic -> kernel.core-manager: device interrupts (D22, routed to fields)
 hardware.core -> kernel.core-manager: exceptions (incl. SGI)
 
 # Kernel -> hardware
@@ -213,17 +213,17 @@ kernel.core-manager -> kernel.observer.capabilities: resolve (hot path)
 # (hot path). Observers sharing identical Space cap sets could share TTBR.
 kernel.core-manager -> hardware.mmu: TTBR load (hot path)
 
-# Capabilities designate kernel objects (Space, Time, endpoint, Observer — D29).
+# Capabilities designate kernel objects (Space, Time, field, Observer — D29).
 # The capability table connects Observers to the resources they
 # are authorized to use. Space caps grant memory access (D26).
 kernel.observer.capabilities -> kernel.space: access via (cap, offset) (D4, D9, D26)
-kernel.observer.capabilities -> kernel.endpoint: send/receive (D4, D15)
+kernel.observer.capabilities -> kernel.field: send/receive (D4, D15)
 kernel.observer.capabilities -> kernel.observer: lifecycle ops (D4, D14)
 # D9: Space manager allocates physical backing for Spaces.
 kernel.space-manager -> kernel.space: physical backing
 kernel.observer.capabilities -> kernel.time: scheduling allocation (D4, D29)
-# D22: Interrupts delivered through endpoints (no separate IRQ type).
-# Kernel routes hardware IRQs to endpoints internally.
+# D22: Interrupts delivered through fields (no separate IRQ type).
+# Kernel routes hardware IRQs to fields internally.
 # Ack via D16 send-once cap in interrupt message.
 
 # External interface: two mechanism families (D7).
@@ -233,17 +233,17 @@ kernel.observer.capabilities -> kernel.time: scheduling allocation (D4, D29)
 # trust-model asymmetry: kernel is exception handler (A4),
 # not a peer.
 userspace -> kernel.core-manager: kernel op syscalls (D7, capability-mediated)
-# D13+D15: Queued endpoints, unidirectional, many-to-many.
+# D13+D15: Queued fields, unidirectional, many-to-many.
 # Bounded queue, non-blocking send, direct process switch when
 # receiver waiting. One mechanism for IPC, faults, interrupts.
 # Send/receive rights via D8 capability rights mask.
 # D18: error-to-sender on full queue; deferred fault delivery.
 # Remaining: multi-wait. Message format settled (D28).
-userspace -> userspace: IPC via queued endpoints (D7+D13+D15+D28, capability-mediated)
+userspace -> userspace: IPC via queued fields (D7+D13+D15+D28, capability-mediated)
 # D12: All page faults delegated to userspace pager Observers.
 # Kernel provides dispatch only (detect, notify, resume).
 # Pager Observers handle policy (eviction, prefetch, page source).
-# D20: fault handler attaches per-Observer (endpoint ref + badge).
+# D20: fault handler attaches per-Observer (field ref + badge).
 # D14: Resume via resume(observer_handle) typed kernel syscall.
 # Observer handle delivered in fault message via cap transfer (D13).
 kernel -> userspace: fault delegation (D12+D14+D20, pager notification + resume)
@@ -253,6 +253,6 @@ kernel -> userspace: fault delegation (D12+D14+D20, pager notification + resume)
 # Kernel allocates from root Space / root Time pools for direct children.
 kernel -> userspace: resource request routing (D31, via D12 fault mechanism)
 # D22: Device interrupts delegated to userspace driver Observers.
-# Kernel dispatches (mask, enqueue to endpoint with badge + send-once ack cap, EOI).
-# Driver handles + acks via send-once. No separate IRQ type — all endpoint traffic.
-kernel -> userspace: interrupt delegation (D22, via endpoints + D16 send-once ack)
+# Kernel dispatches (mask, enqueue to field with badge + send-once ack cap, EOI).
+# Driver handles + acks via send-once. No separate IRQ type — all field traffic.
+kernel -> userspace: interrupt delegation (D22, via fields + D16 send-once ack)

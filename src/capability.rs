@@ -11,7 +11,7 @@
 pub enum ObjectType {
     Space,
     Time,
-    Endpoint,
+    Field,
     Observer,
 }
 

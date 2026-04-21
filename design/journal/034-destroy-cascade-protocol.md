@@ -22,7 +22,7 @@ When `destroy_observer(handle)` is invoked:
    happens FIRST — the object is dead before cleanup begins.
 3. Observer's structural backing returned as Space cap to caller (D32).
 4. Observer's cap table iterated. For each held cap: a. Close (D11 — decrement
-   refcount). b. Badge-closure check on tracked endpoints (D17). If queue full
+   refcount). b. Badge-closure check on tracked fields (D17). If queue full
    (D18): drop. c. If refcount reaches zero: the referenced object is destroyed
    too (cascade). Backing → kernel root Space (no caller for cascading destroy).
    If the cascaded object is an Observer, recurse into its cap table.
@@ -30,18 +30,18 @@ When `destroy_observer(handle)` is invoked:
    system-wide holder frees subtree pages (back into the Space, per D32).
 6. Per-Time cleanup: scheduling capacity returns to kernel pool (D32).
 7. Pending fault list: remove destroyed Observer from any pending lists (D18).
-   Wake Observers pending on destroyed endpoints with error.
+   Wake Observers pending on destroyed fields with error.
 
 ### Key structural properties
 
-**Only Observers cascade.** Spaces, Endpoints, and Times don't hold caps.
-Destroying an Endpoint frees its backing but doesn't recurse. Cascade depth =
-length of exclusively-held Observer chains. Total cascade work = O(total objects
+**Only Observers cascade.** Spaces, Fields, and Times don't hold caps.
+Destroying a Field frees its backing but doesn't recurse. Cascade depth = length
+of exclusively-held Observer chains. Total cascade work = O(total objects
 reachable through exclusive references).
 
 **Single Observer destroy is O(N + M).** N = cap table entries (close each). M =
-badge-closure checks (tracked endpoints). Both bounded by Observer's Space
-budget (D32 — table size bounded by backing Space).
+badge-closure checks (tracked fields). Both bounded by Observer's Space budget
+(D32 — table size bounded by backing Space).
 
 **Object is dead before cleanup begins.** D11 says dead handles are created at
 destroy time. The cascade is cleanup of an already-dead object. No partially-
@@ -112,13 +112,13 @@ controls who can trigger cascades by attenuating caps to omit destroy.
 
 ### Badge-closure is best-effort during cascade (derived)
 
-D18 applies unchanged. Badge-closure notifications on tracked endpoints are
+D18 applies unchanged. Badge-closure notifications on tracked fields are
 enqueued if space permits, dropped if queue full. No special cascade logic.
 
 ### Pending fault list cleanup (derived)
 
 D18's intrusive pending list: destroyed Observer unlinked O(1). Destroyed
-endpoint's pending Observers woken with error, O(pending count).
+field's pending Observers woken with error, O(pending count).
 
 ## Archive convergence
 

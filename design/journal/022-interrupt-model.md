@@ -1,4 +1,4 @@
-# Journal 022 — Interrupt model: delegation through endpoints
+# Journal 022 — Interrupt model: delegation through fields
 
 ## Question
 
@@ -48,7 +48,7 @@ in userspace where each driver implements its own.
 
 **Path 3 — A5 (net).** The dispatch interface (mask, signal, EOI) is smaller
 than a policy-configuration interface would be. The kernel absorbs the GIC
-programming complexity behind a simple capability + endpoint interface. Driver
+programming complexity behind a simple capability + field interface. Driver
 complexity (device-specific handling) lives in userspace leaf nodes. Applying
 "push complexity to the leaves": the GIC programming is kernel-internal
 complexity behind a simple interface; device-specific handling is leaf-node
@@ -70,15 +70,15 @@ The parallel with D12 is point-for-point:
   cannot do background processing (A4).
 - **ISR-in-userspace at interrupt priority (QNX InterruptAttach).** Foreclosed
   by D1 + D13. Running user code on the interrupt exception path violates D1's
-  minimal per-core hot path. D13 commits to information delivery through
-  endpoints, not through special execution contexts.
+  minimal per-core hot path. D13 commits to information delivery through fields,
+  not through special execution contexts.
 - **Integer IRQ IDs (QNX/Minix 3).** Foreclosed by D4 — ambient authority, no
   designation = authority.
 - **File descriptor model (Redox irq:N).** Foreclosed by D4 — namespace-
   dependent, not capability-mediated.
 - **Kernel-level interrupt coalescing.** Foreclosed by D18 + A3. Coalescing is
-  reducible to shared memory + signaling (D9/D10 + capacity-1 endpoints). Not
-  all workloads need it (A3).
+  reducible to shared memory + signaling (D9/D10 + capacity-1 fields). Not all
+  workloads need it (A3).
 
 ---
 
@@ -86,24 +86,23 @@ The parallel with D12 is point-for-point:
 
 Several sub-questions turned out to be already settled:
 
-- **Delivery through queued endpoints.** D13 commits: "All information delivery
-  — IPC, faults, interrupts, system signals — uses the same mechanism." The
-  kernel enqueues an interrupt message to the driver Observer's endpoint.
+- **Delivery through queued fields.** D13 commits: "All information delivery —
+  IPC, faults, interrupts, system signals — uses the same mechanism." The kernel
+  enqueues an interrupt message to the driver Observer's field.
 - **Identification through badges.** D17 + D19: "Timer/interrupt signals:
   signaling services hold badged send caps." Multiple interrupts fan into one
-  driver endpoint, distinguished by per-interrupt badges.
+  driver field, distinguished by per-interrupt badges.
 - **Overflow uses mask-on-delivery.** D18 explicitly: "interrupt masking: mask
-  on delivery, unmask on driver acknowledgment. If the endpoint signal fails,
-  the interrupt stays masked — the interrupt controller holds the pending
-  state."
+  on delivery, unmask on driver acknowledgment. If the field signal fails, the
+  interrupt stays masked — the interrupt controller holds the pending state."
 
 ---
 
-## No separate IRQ object type: interrupts are endpoint traffic
+## No separate IRQ object type: interrupts are field traffic
 
-D13 commits to all information delivery through endpoints. Faults, IPC, and
-interrupts all arrive as messages on endpoints. The driver receives from one
-endpoint and dispatches by badge. This is already settled.
+D13 commits to all information delivery through fields. Faults, IPC, and
+interrupts all arrive as messages on fields. The driver receives from one field
+and dispatches by badge. This is already settled.
 
 Phase 5 evaluation explored whether interrupts need their own kernel object type
 (IRQ objects, IRQControl factories, interrupt bindings) and progressively
@@ -124,42 +123,39 @@ bounded IRQ namespace, splittable and transferable like Space. Eliminated
 IRQControl but retained a separate IRQ kernel object type with bind, ack, split,
 and destroy operations.
 
-Rejected because the IRQ object's relationship to the endpoint mirrors the
+Rejected because the IRQ object's relationship to the field mirrors the
 relationship between a sender and a channel — structurally the same as an
 Observer with a send cap. The kernel deposits messages on behalf of hardware,
-but the delivery mechanism is the same endpoint mechanism used by everything
-else (D13). The IRQ object was duplicating structure the endpoint already
-provides: the endpoint IS the delivery point, and authority over its receive
-side IS authority over what it delivers.
+but the delivery mechanism is the same field mechanism used by everything else
+(D13). The IRQ object was duplicating structure the field already provides: the
+field IS the delivery point, and authority over its receive side IS authority
+over what it delivers.
 
-### Stage 3: Endpoints only (settled)
+### Stage 3: Fields only (settled)
 
-The interrupt namespace maps onto the endpoint namespace. The kernel maintains
-an internal IRQ→endpoint routing table. Authority over a set of hardware
-interrupts = holding the receive cap on the endpoint where those interrupts
-arrive.
+The interrupt namespace maps onto the field namespace. The kernel maintains an
+internal IRQ→field routing table. Authority over a set of hardware interrupts =
+holding the receive cap on the field where those interrupts arrive.
 
 The model:
 
 1. At boot, the kernel discovers device interrupts from the device tree / GIC
-   configuration and routes them to a root interrupt endpoint.
-2. The initial Observer receives a receive cap to this endpoint (same mechanism
-   as receiving initial Space — the boot distribution protocol, not yet settled,
+   configuration and routes them to a root interrupt field.
+2. The initial Observer receives a receive cap to this field (same mechanism as
+   receiving initial Space — the boot distribution protocol, not yet settled,
    applies uniformly).
-3. To delegate interrupts to a driver, the holder splits the endpoint by IRQ
-   range: a new endpoint is created that receives the specified subset. The
-   original endpoint loses those IRQs. The new endpoint cap is transferred to
-   the driver.
-4. The driver receives interrupt messages on its endpoint. Each message carries
-   a badge identifying the IRQ and a send-once ack cap (D16).
+3. To delegate interrupts to a driver, the holder splits the field by IRQ range:
+   a new field is created that receives the specified subset. The original field
+   loses those IRQs. The new field cap is transferred to the driver.
+4. The driver receives interrupt messages on its field. Each message carries a
+   badge identifying the IRQ and a send-once ack cap (D16).
 5. After handling the interrupt, the driver uses the send-once ack cap. This
    tells the kernel to unmask the interrupt. The cap is consumed (D16
    semantics). If the driver crashes and the cap is closed without use, the
    interrupt stays masked (D18 mask-on-delivery safety).
-6. If the driver wants interrupts and IPC on one endpoint, it either uses the
-   interrupt endpoint as its IPC endpoint (distributing send caps to clients) or
-   combines multiple endpoints into one (a new endpoint that receives all
-   sources).
+6. If the driver wants interrupts and IPC on one field, it either uses the
+   interrupt field as its IPC field (distributing send caps to clients) or
+   combines multiple fields into one (a new field that receives all sources).
 
 No new kernel object type. No IRQ-specific operations on the driver's critical
 path — the driver just calls receive() and uses send-once caps, exactly like
@@ -168,10 +164,10 @@ identical to an incoming RPC request with a reply cap.
 
 ### Why no IRQ object type is needed
 
-**D13 already commits interrupt delivery to endpoints.** The endpoint receives
-the message. The endpoint receive cap is the authority. Adding an IRQ object in
-front of the endpoint is an indirection that D13 already eliminated by
-committing to "all information delivery is one mechanism."
+**D13 already commits interrupt delivery to fields.** The field receives the
+message. The field receive cap is the authority. Adding an IRQ object in front
+of the field is an indirection that D13 already eliminated by committing to "all
+information delivery is one mechanism."
 
 **D16 already provides the ack mechanism.** Send-once caps are a general-purpose
 one-shot authorization (D16: "edge-triggered interrupt delivery" listed as an
@@ -186,36 +182,36 @@ models where ack was a typed kernel op on an IRQ object.
 
 **Every identified downside traces to a parent decision:**
 
-| Concern                             | Actually lives in                                        |
-| ----------------------------------- | -------------------------------------------------------- |
-| Send-once cap performance           | D16 (every RPC already uses send-once)                   |
-| Crash recovery                      | General lifecycle (Space, Time, endpoints all have this) |
-| Split/combine endpoint operations   | D13/D15 (endpoint model evolution)                       |
-| Endpoints carrying hardware sources | D13 ("all information delivery uses the same mechanism") |
+| Concern                          | Actually lives in                                        |
+| -------------------------------- | -------------------------------------------------------- |
+| Send-once cap performance        | D16 (every RPC already uses send-once)                   |
+| Crash recovery                   | General lifecycle (Space, Time, fields all have this)    |
+| Split/combine field operations   | D13/D15 (field model evolution)                          |
+| Fields carrying hardware sources | D13 ("all information delivery uses the same mechanism") |
 
 No risk is introduced by D22. Every concern is inherited from a parent decision
 that is independently settled.
 
 ---
 
-## Endpoint split and combine
+## Field split and combine
 
-Two operations on endpoints emerge from the interrupt model but are potentially
+Two operations on fields emerge from the interrupt model but are potentially
 general:
 
-**Split by IRQ range.** Create a new endpoint; move the specified IRQ routes to
-it. The original endpoint loses those routes. The holder of the original
-endpoint's receive cap authorizes the split (they hold authority over those
-IRQs). For kernel-controlled sources (IRQs), the kernel redirects its internal
-routing. Whether split generalizes to badge-range-based partitioning for IPC
-sources is a downstream question — the kernel could maintain internal routing
-rules, checking badge range on enqueue.
+**Split by IRQ range.** Create a new field; move the specified IRQ routes to it.
+The original field loses those routes. The holder of the original field's
+receive cap authorizes the split (they hold authority over those IRQs). For
+kernel-controlled sources (IRQs), the kernel redirects its internal routing.
+Whether split generalizes to badge-range-based partitioning for IPC sources is a
+downstream question — the kernel could maintain internal routing rules, checking
+badge range on enqueue.
 
-**Combine.** Take N endpoints, return a new endpoint that receives all their
-messages. The original endpoints are consumed. For IRQs, the kernel merges
-routing. For IPC, existing send caps to the originals... either become dead
-(D11) and clients re-connect, or the kernel transparently forwards. The details
-are downstream of the endpoint model.
+**Combine.** Take N fields, return a new field that receives all their messages.
+The original fields are consumed. For IRQs, the kernel merges routing. For IPC,
+existing send caps to the originals... either become dead (D11) and clients
+re-connect, or the kernel transparently forwards. The details are downstream of
+the field model.
 
 Both operations are cold-path (setup/reconfiguration, not per-message). Both are
 potentially useful independent of interrupts: split for structured load
@@ -230,12 +226,12 @@ The interrupt hot path (every interrupt) is:
 1. Exception entry on the targeted core (O3)
 2. Kernel reads ICC_IAR1_EL1 to identify the interrupt (per-core GIC CPU
    interface register)
-3. Kernel looks up the IRQ→endpoint routing (kernel-internal mapping)
+3. Kernel looks up the IRQ→field routing (kernel-internal mapping)
 4. Kernel masks the interrupt in the GIC (or auto-masked by IAR read)
-5. Kernel creates a send-once ack cap, enqueues message to the endpoint with
+5. Kernel creates a send-once ack cap, enqueues message to the field with
    badge + ack cap
 6. Kernel writes ICC_EOIR1_EL1 for EOI
-7. Kernel runs scheduler — if the driver Observer is waiting on the endpoint on
+7. Kernel runs scheduler — if the driver Observer is waiting on the field on
    this core, direct process switch (D13 fast path, ~400 cycles ARM64)
 
 Steps 2, 4, 6 touch only per-core GIC CPU interface registers — no shared state
@@ -254,17 +250,17 @@ Both paths are per-core with no shared mutable state on the hot path.
 
 ## Tensions
 
-**T1 — Interrupt-to-driver latency.** Every device interrupt traverses the
-endpoint mechanism before reaching userspace. Inherently longer than monolithic
-ISR dispatch. D13's direct-switch fast path mitigates for the common case
-(driver waiting on its endpoint, same core). Landscape §5.5: "Most microkernels
-keep the in-kernel path so short that nesting provides negligible benefit"
-(Blackham et al.: non-preemptible seL4 achieves 10k–100k cycle worst-case).
-Accepted cost of the microkernel model.
+**T1 — Interrupt-to-driver latency.** Every device interrupt traverses the field
+mechanism before reaching userspace. Inherently longer than monolithic ISR
+dispatch. D13's direct-switch fast path mitigates for the common case (driver
+waiting on its field, same core). Landscape §5.5: "Most microkernels keep the
+in-kernel path so short that nesting provides negligible benefit" (Blackham et
+al.: non-preemptible seL4 achieves 10k–100k cycle worst-case). Accepted cost of
+the microkernel model.
 
 **T2 — GIC complexity in the kernel.** GICv3 programming (Distributor,
 Redistributors, CPU Interface, potentially ITS for LPIs) is substantial. A5
-places it kernel-side behind the simple endpoint interface. Philosophy "use what
+places it kernel-side behind the simple field interface. Philosophy "use what
 the hardware provides" confirms: the kernel programs the GIC, doesn't
 reimplement interrupt routing in software.
 
@@ -272,9 +268,9 @@ reimplement interrupt routing in software.
 Cold-path per D1, but changing routing requires touching the shared Distributor.
 Cross-core coordination (O2) may be needed.
 
-**T4 — Endpoint destroy ↔ GIC state coupling.** Destroying an endpoint that
-carries IRQ routes must mask those interrupts. The kernel must track which
-endpoints have IRQ routes and clean up GIC state on destroy.
+**T4 — Field destroy ↔ GIC state coupling.** Destroying a field that carries IRQ
+routes must mask those interrupts. The kernel must track which fields have IRQ
+routes and clean up GIC state on destroy.
 
 **T5 — Send-once cap per interrupt.** Cap-table slot allocation/deallocation on
 every interrupt. Same cost as D16's Call() on every RPC — not a new cost, but
@@ -290,7 +286,7 @@ D12, D13, D16, D17, D18.
 
 **A2 (ARM64)** is load-bearing but only for the hardware mechanism (GIC). The
 delegation decision derives from A3 + A4 + A5; A2 provides the specific
-hardware. If A2 changed to a different architecture, delegation and the endpoint
+hardware. If A2 changed to a different architecture, delegation and the field
 model would remain; only the kernel-internal GIC code would change.
 
 ---
@@ -299,10 +295,10 @@ model would remain; only the kernel-internal GIC code would change.
 
 The archive (restart-1) established the unification principle independently:
 journal/002 ("all information delivery is one mechanism — faults, interrupts,
-IPC are just messages with different metadata"). D22's endpoint-only model is
-the strongest form of this commitment: interrupts are not just "like" messages
-through endpoints — they ARE messages through endpoints, with no separate object
-type. The archive arrived at the principle; D22 follows it to its conclusion.
+IPC are just messages with different metadata"). D22's field-only model is the
+strongest form of this commitment: interrupts are not just "like" messages
+through fields — they ARE messages through fields, with no separate object type.
+The archive arrived at the principle; D22 follows it to its conclusion.
 
 ---
 
@@ -314,14 +310,14 @@ proposed object type:
 1. **IRQControl factory + interrupt binding** — rejected: factory pattern
    inconsistent with D4 designation = authority.
 2. **IRQ objects parallel to Space** — rejected: the IRQ object duplicated
-   structure the endpoint already provides; the object's relationship to the
-   endpoint is sender-to-channel, not resource-to-framework.
-3. **Endpoints only** — settled: D13 commits to endpoint-based delivery, D16
-   provides ack via send-once, no new type needed.
+   structure the field already provides; the object's relationship to the field
+   is sender-to-channel, not resource-to-framework.
+3. **Fields only** — settled: D13 commits to field-based delivery, D16 provides
+   ack via send-once, no new type needed.
 
 Each revision applied the design's own principles more thoroughly. The
 progression demonstrates philosophy "find the abstraction that absorbs the edge
-cases": the endpoint already handles IPC, faults, and (with send-once) the
+cases": the field already handles IPC, faults, and (with send-once) the
 interrupt ack pattern. Adding an IRQ object was reaching for a new type when the
 existing abstraction already covered the use case.
 
@@ -329,15 +325,15 @@ existing abstraction already covered the use case.
 
 ## What remains open
 
-- **Endpoint split semantics.** The split-by-IRQ-range operation creates a new
-  endpoint and moves IRQ routes. Exact semantics: does the original endpoint
-  retain a reference for automatic return on destroy (crash recovery)? Does
-  split generalize to badge-range partitioning for IPC sources?
-- **Endpoint combine semantics.** Take N endpoints, return one. What happens to
+- **Field split semantics.** The split-by-IRQ-range operation creates a new
+  field and moves IRQ routes. Exact semantics: does the original field retain a
+  reference for automatic return on destroy (crash recovery)? Does split
+  generalize to badge-range partitioning for IPC sources?
+- **Field combine semantics.** Take N fields, return one. What happens to
   existing send caps on the originals? Transparent forwarding, dead handles, or
   explicit migration?
 - **Boot distribution of IRQ authority.** The initial Observer receives the root
-  interrupt endpoint. The mechanism is the same as Space distribution — one
+  interrupt field. The mechanism is the same as Space distribution — one
   unsettled question, one answer for both.
 - **Interrupt priority exposure.** GICv3 8-bit hardware priority. Deferred.
 - **IRQ routing policy.** Which core receives a given SPI. Deferred.

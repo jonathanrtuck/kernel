@@ -1,4 +1,4 @@
-# 018 — Endpoint overflow policy: error-to-sender with deferred fault delivery
+# 018 — Field overflow policy: error-to-sender with deferred fault delivery
 
 **Date:** 2026-04-18 **Starting point:** D13 is tentative pending the downstream
 cluster (overflow, coalescing, multi-wait, message format). Three revisit
@@ -10,9 +10,9 @@ coalescing tension that motivated the second.
 
 ## The question
 
-What happens when a send to a queued endpoint finds the queue at capacity? And
-does the answer resolve the D13 coalescing tension (cross-source data loss on
-shared endpoints with overwrite semantics) within the single-mechanism model?
+What happens when a send to a queued field finds the queue at capacity? And does
+the answer resolve the D13 coalescing tension (cross-source data loss on shared
+fields with overwrite semantics) within the single-mechanism model?
 
 ---
 
@@ -38,15 +38,14 @@ something) and fault delivery guarantee (the kernel-as-sender must succeed).
 
 The established microkernel pattern (landscape §3.2: "every production
 microkernel converges on hybrid") is: writer puts the latest value in shared
-memory, sends a signal through a capacity-1 endpoint. If the signal fails (error
-— already pending), no loss: the receiver reads shared memory on next drain and
-gets the latest value. Data coalesces in shared memory; the endpoint is a
-wake-up.
+memory, sends a signal through a capacity-1 field. If the signal fails (error —
+already pending), no loss: the receiver reads shared memory on next drain and
+gets the latest value. Data coalesces in shared memory; the field is a wake-up.
 
 D9 (memory objects) and D10 (address spaces) provide the building blocks. The
 setup is per-channel (a few syscalls), not per-message. For kernel→userspace
 (interrupts), the standard approach (landscape §5.1) is interrupt masking: mask
-on delivery, unmask on driver acknowledgment. If the endpoint signal fails, the
+on delivery, unmask on driver acknowledgment. If the field signal fails, the
 interrupt stays masked — the interrupt controller holds the pending state.
 
 This means: per-badge coalescing (D13's resolution #1) and overwrite-oldest are
@@ -55,13 +54,13 @@ kernel does not need a coalescing overflow mode.
 
 ### The D13 coalescing tension dissolves
 
-The tension was: queued endpoints + capacity-1 overwrite + shared endpoints =
+The tension was: queued fields + capacity-1 overwrite + shared fields =
 cross-source data loss. With error-to-sender as the only overflow behavior,
 there is no overwrite — so there is no cross-source data loss. The tension was
 predicated on overwrite semantics. Without overwrite, it doesn't arise. D13's
 revisit trigger #1 ("coalescing gap cannot be solved without a full second
-primitive") does not fire: coalescing lives in shared memory, not in the
-endpoint, and requires no second primitive.
+primitive") does not fire: coalescing lives in shared memory, not in the field,
+and requires no second primitive.
 
 ---
 
@@ -73,19 +72,19 @@ Kernel provides mechanism; userspace provides policy.
 
 ### Why error is the only mode
 
-A3 (generic) originally pushed toward per-endpoint policy at creation (different
+A3 (generic) originally pushed toward per-field policy at creation (different
 workloads, different needs). But the decomposition above showed that the only
 workloads needing something other than error (latest-wins, coalescing) are
 reducible to shared memory + signaling. Error-to-sender is the irreducible
-kernel mechanism. No per-endpoint policy flag is needed — just creation-time
+kernel mechanism. No per-field policy flag is needed — just creation-time
 capacity.
 
 Applying "push complexity to the leaves" fractally: the overflow mode is a leaf
-inside the endpoint implementation. Making it configurable would add a branch to
-the send path and a policy field to the endpoint object. Since the only
-non-error use cases are achievable through composition of existing primitives,
-the branch is accidental complexity — it doesn't serve a need that can't be
-served another way.
+inside the field implementation. Making it configurable would add a branch to
+the send path and a policy field to the field object. Since the only non-error
+use cases are achievable through composition of existing primitives, the branch
+is accidental complexity — it doesn't serve a need that can't be served another
+way.
 
 ### Blocking-on-full is not adopted
 
@@ -106,9 +105,9 @@ equally when the queue is full (both get errors). No silent data loss.
 ## Deferred fault delivery for the kernel-as-sender
 
 D12 + D13 + A4 create a hard constraint: when an Observer faults, the kernel
-must enqueue a fault message to the pager endpoint. The kernel cannot block
-(A4), cannot be faulted, and cannot meaningfully "handle" an error (A4 means no
-retry — the exception handler returns and the fault is lost).
+must enqueue a fault message to the pager field. The kernel cannot block (A4),
+cannot be faulted, and cannot meaningfully "handle" an error (A4 means no retry
+— the exception handler returns and the fault is lost).
 
 Error-to-sender works for userspace senders (they can retry, degrade, escalate).
 It does not work for the kernel-as-sender on fault messages: the faulting
@@ -119,15 +118,15 @@ delivered.
 
 When the kernel tries to enqueue a fault message and the queue is full, the
 kernel marks the faulting Observer as "fault pending delivery" and links it into
-a per-endpoint pending list. When the receiver's next receive() frees a slot,
-the kernel checks the pending list and delivers the oldest deferred fault into
-the freed slot before returning to the receiver.
+a per-field pending list. When the receiver's next receive() frees a slot, the
+kernel checks the pending list and delivers the oldest deferred fault into the
+freed slot before returning to the receiver.
 
 **No new memory allocation.** The pending list is an intrusive linked list
 threaded through existing Observer objects. Each Observer is already allocated
 (from someone's Space budget). The linkage field can share space with other
 wait-state linkage (blocked-on-receive, blocked-on-reply) — only one is active
-at a time based on Observer state. Per-endpoint cost: one list head pointer (8
+at a time based on Observer state. Per-field cost: one list head pointer (8
 bytes). Per-Observer cost: one linkage field (shared with other wait states, 0
 net bytes).
 
@@ -137,10 +136,9 @@ syscall (exception entry). No background work, no polling, no kernel thread.
 **D1-compatible.** Receive is cold-path. Checking a list head pointer is one
 branch.
 
-**D13-compatible.** The fault is delivered through the endpoint queue. The
-pending list is kernel-internal state, not a second visible mechanism. From
-userspace, fault messages appear in the queue like any other message — just
-delayed.
+**D13-compatible.** The fault is delivered through the field queue. The pending
+list is kernel-internal state, not a second visible mechanism. From userspace,
+fault messages appear in the queue like any other message — just delayed.
 
 **The Observer doesn't notice.** It was suspended on fault. Whether the fault
 message reaches the pager immediately or after a brief delay (until the queue
@@ -155,13 +153,13 @@ receiver discovers staleness lazily on next interaction (send to dead handle →
 error). This is acceptable: the receiver opted into tracking for proactive
 cleanup, but proactive cleanup failing gracefully is not a correctness issue.
 
-### Endpoint destroy with pending faults
+### Field destroy with pending faults
 
-If a pager's endpoint is destroyed while Observers have deferred faults in the
+If a pager's field is destroyed while Observers have deferred faults in the
 pending list, those Observers need cleanup. This folds into the pager
-unavailability protocol (already an open question). Endpoint destroy must walk
-the pending list — the cleanup action (kill the pending Observers, fault-chain
-to a parent handler, etc.) is determined by the unavailability protocol.
+unavailability protocol (already an open question). Field destroy must walk the
+pending list — the cleanup action (kill the pending Observers, fault-chain to a
+parent handler, etc.) is determined by the unavailability protocol.
 
 ---
 
@@ -192,13 +190,13 @@ delivery mechanism.
 ## The decision
 
 **Overflow policy: error-to-sender.** When a send finds the queue at capacity,
-the kernel returns an error. No per-endpoint policy modes. No overwrite. No
-coalescing at the endpoint level. Coalescing workloads use shared memory +
-signaling (D9/D10 + capacity-1 endpoints).
+the kernel returns an error. No per-field policy modes. No overwrite. No
+coalescing at the field level. Coalescing workloads use shared memory +
+signaling (D9/D10 + capacity-1 fields).
 
 **Kernel-as-sender fault delivery: deferred via pending list.** When the kernel
 cannot enqueue a fault message (queue full), it links the faulting Observer into
-a per-endpoint pending list. The next receive() that frees a slot delivers the
+a per-field pending list. The next receive() that frees a slot delivers the
 deferred fault. Intrusive linked list through Observer objects — zero additional
 memory allocation.
 
@@ -207,13 +205,12 @@ staleness lazily. Not a correctness issue.
 
 **D13 coalescing tension: dissolved.** No overwrite means no cross-source data
 loss. The tension was predicated on overwrite semantics that this derivation
-does not adopt. Coalescing lives in shared memory, not in the endpoint
-mechanism.
+does not adopt. Coalescing lives in shared memory, not in the field mechanism.
 
 **D13 revisit trigger #1 ("coalescing gap cannot be solved without a full second
 primitive"): does not fire.** Coalescing is achieved through composition of
-existing primitives (shared memory + endpoint signaling), not through a second
-IPC primitive.
+existing primitives (shared memory + field signaling), not through a second IPC
+primitive.
 
 ---
 
@@ -225,11 +222,11 @@ IPC primitive.
   hypothetical per-badge coalescing mode would require.
 - **Deferred fault delivery adds receive-path work.** One branch (check list
   head) on every receive. Cold-path, minimal cost.
-- **Badge-closure can be silently lost.** Receivers using tracked endpoints for
+- **Badge-closure can be silently lost.** Receivers using tracked fields for
   proactive client cleanup must tolerate occasional staleness. Correctness
   doesn't depend on it — only cleanup timeliness.
-- **Interrupt delivery on full endpoint.** The interrupt model (open question)
-  must account for error-on-full. Standard approach: mask on delivery, unmask on
+- **Interrupt delivery on full field.** The interrupt model (open question) must
+  account for error-on-full. Standard approach: mask on delivery, unmask on
   acknowledgment. If delivery fails, interrupt stays masked until driver catches
   up. The interrupt controller holds the pending state.
 
@@ -253,10 +250,10 @@ implementing the interrupt delivery path.
 - **Interrupt model.** Must account for error-on-full: mask-on-delivery,
   unmask-on-acknowledgment. The interrupt controller provides the deferred
   delivery mechanism for interrupts (analogous to the pending list for faults).
-- **Pager unavailability protocol.** K5's pending list adds a new trigger:
-  endpoint destroy with pending faults. The cleanup action depends on the
-  unavailability protocol.
-- **Multi-endpoint wait.** D13 revisit trigger #3 remains open. Not addressed by
+- **Pager unavailability protocol.** K5's pending list adds a new trigger: field
+  destroy with pending faults. The cleanup action depends on the unavailability
+  protocol.
+- **Multi-field wait.** D13 revisit trigger #3 remains open. Not addressed by
   this derivation.
 - **Observer minimum schema.** The pending-list linkage field is a new schema
   entry (shared with other wait-state linkage — no net size increase, but must
@@ -264,7 +261,7 @@ implementing the interrupt delivery path.
 - **Badge-closure × overflow interaction.** Resolved: dropped on full queue. No
   further interaction.
 - **Per-badge tracking × coalescing interaction.** Dissolved: coalescing is not
-  an endpoint mechanism. D17's per-badge map serves tracking only.
+  a field mechanism. D17's per-badge map serves tracking only.
 
 ---
 
@@ -272,11 +269,11 @@ implementing the interrupt delivery path.
 
 | Alternative                   | Rejected because                                                                                                                                                                                           |
 | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Overwrite-oldest              | Creates the D13 coalescing tension (cross-source data loss on shared endpoints). The use cases served by overwrite are achievable through shared memory + signaling.                                       |
-| Per-badge coalescing          | Reducible to shared memory + signaling. Would change the endpoint from FIFO to per-badge map, losing cross-source ordering. The structural opportunity (D17 per-badge map) exists but is not needed.       |
-| Per-endpoint policy modes     | The only non-error use cases are reducible. A policy flag adds accidental complexity (configurable branch on send path, policy field on endpoint object) for no irreducible benefit.                       |
+| Overwrite-oldest              | Creates the D13 coalescing tension (cross-source data loss on shared fields). The use cases served by overwrite are achievable through shared memory + signaling.                                          |
+| Per-badge coalescing          | Reducible to shared memory + signaling. Would change the field from FIFO to per-badge map, losing cross-source ordering. The structural opportunity (D17 per-badge map) exists but is not needed.          |
+| Per-field policy modes        | The only non-error use cases are reducible. A policy flag adds accidental complexity (configurable branch on send path, policy field on field object) for no irreducible benefit.                          |
 | Blocking-on-full              | Re-introduces the sender-blocks limitation D13 was designed to avoid. A4 forecloses it for kernel-as-sender, creating asymmetry.                                                                           |
-| Faulting the sender on full   | Sender can't fix the problem (queue belongs to endpoint creator, not sender). Breaks the D8 fault pattern's assumption that the faulted entity can resolve the fault.                                      |
+| Faulting the sender on full   | Sender can't fix the problem (queue belongs to field creator, not sender). Breaks the D8 fault pattern's assumption that the faulted entity can resolve the fault.                                         |
 | Reserved kernel slots (K1)    | Workable but wastes userspace capacity. R must be sized at creation for unknown peak — over-provision wastes, under-provision risks fault loss. Deferred delivery (K5) avoids both.                        |
 | Kernel-overwrite (K2)         | May overwrite a previous fault from another Observer, leaving that Observer stuck forever. Kernel overwriting its own prior deliveries is the structural failure mode.                                     |
 | Kill on delivery failure (K3) | Harsh — a transient overload (pager slow to drain) permanently kills Observers that could recover. Pushes "size your queue right" as a hard contract. Inconsistent with "make the right way the easy way." |

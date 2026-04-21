@@ -1,7 +1,7 @@
-# 015 — Endpoint shape: unidirectional, many-to-many, send/receive rights
+# 015 — Field shape: unidirectional, many-to-many, send/receive rights
 
-**Date:** 2026-04-18 **Starting point:** D13 settled queued endpoints with
-direct-switch fast path (tentative) and listed endpoint shape as the first
+**Date:** 2026-04-18 **Starting point:** D13 settled queued fields with
+direct-switch fast path (tentative) and listed field shape as the first
 downstream question: "Unidirectional vs. bidirectional. Many-to-many vs.
 constrained topology." The archive chose unidirectional, many-to-many, topology
 via capabilities (archive/009), but the current chain had not derived this.
@@ -10,7 +10,7 @@ via capabilities (archive/009), but the current chain had not derived this.
 
 ## The question
 
-What is the shape of an endpoint — directionality (unidirectional vs.
+What is the shape of a field — directionality (unidirectional vs.
 bidirectional), topology constraints (many-to-many vs. constrained), and
 capability-rights model (what rights, how expressed)?
 
@@ -34,9 +34,9 @@ dedicated pipe (1:1), fan-out (1:many). The kernel must not hardwire a single
 topology.
 
 **3. The kernel must be a non-blocking sender in many-to-one patterns.** D12
-(fault delegation) + D13 (all delivery through endpoints) mean the kernel
-enqueues fault and interrupt messages. Multiple fault sources to one pager is a
-many-to-one pattern that must work within the endpoint mechanism.
+(fault delegation) + D13 (all delivery through fields) mean the kernel enqueues
+fault and interrupt messages. Multiple fault sources to one pager is a
+many-to-one pattern that must work within the field mechanism.
 
 **4. Constrained many-to-one (QNX model) is dominated.** QNX separates channels
 (receive side) from connections (send side), enforcing exactly one receiver.
@@ -44,7 +44,7 @@ This restricts worker-pool patterns (multiple receivers) without reducing kernel
 complexity — the kernel must enforce the restriction (added complexity) while
 foreclosing patterns that A3 requires. Many-to-one is a usage pattern within
 many-to-many, enforced by capability distribution rather than kernel policy.
-Applying "push complexity to the leaves" fractally: the many-to-many endpoint IS
+Applying "push complexity to the leaves" fractally: the many-to-many field IS
 the leaf; topology-enforcement would be connective tissue above it.
 
 ---
@@ -55,7 +55,7 @@ After constraints eliminate the QNX model, two candidates remain.
 
 ### Option A: Unidirectional, many-to-many, send/receive as object-rights
 
-One kernel object per endpoint: bounded queue + waiters list. Capabilities carry
+One kernel object per field: bounded queue + waiters list. Capabilities carry
 rights (send, receive, or both). Topology is emergent from capability
 distribution — the kernel provides the most general mechanism, Observers choose
 the pattern. Closest precedents: Mach ports, seL4 endpoints.
@@ -63,9 +63,9 @@ the pattern. Closest precedents: Mach ports, seL4 endpoints.
 - Server inbox (many:1): many clients hold send caps, server holds receive cap.
 - Worker pool (many:many): clone receive caps to multiple worker Observers.
 - Dedicated pipe (1:1): one send cap, one receive cap.
-- Request-reply: client transfers a send cap (to its reply endpoint) in the
-  request message. Server sends reply to that cap.
-- Kernel-as-sender: kernel enqueues fault/interrupt messages to one endpoint.
+- Request-reply: client transfers a send cap (to its reply field) in the request
+  message. Server sends reply to that cap.
+- Kernel-as-sender: kernel enqueues fault/interrupt messages to one field.
 
 ### Option B: Bidirectional, 1:1 paired, per-end capabilities
 
@@ -91,7 +91,7 @@ channels.
   no peer to signal.
 - **D7 (split model):** creation returns one capability, like every other kernel
   object type (Space, Time, Coordinate System, Observer).
-- **D12 + D13 (fault delivery):** kernel enqueues to one pager endpoint for many
+- **D12 + D13 (fault delivery):** kernel enqueues to one pager field for many
   faulting Observers. No per-source channel needed. Many-to-one is natural.
 - **D13 "one mechanism":** preserved. No aggregation object needed for common
   patterns.
@@ -140,11 +140,11 @@ philosophy.
 
 A plausible Option-A-native answer exists: badge-closure notifications. When the
 last send capability with badge B is closed, the kernel enqueues a closure
-notification to the endpoint's receive side. This would be event-driven, stay
-within the one-mechanism model, and track per-badge refcounts inside the
-endpoint object. This belongs in the badge-semantics exploration (D11's deferred
-add-on), not here. The mechanism is not committed — only the observation that
-the gap is addressable within Option A's framework.
+notification to the field's receive side. This would be event-driven, stay
+within the one-mechanism model, and track per-badge refcounts inside the field
+object. This belongs in the badge-semantics exploration (D11's deferred add-on),
+not here. The mechanism is not committed — only the observation that the gap is
+addressable within Option A's framework.
 
 ---
 
@@ -152,11 +152,11 @@ the gap is addressable within Option A's framework.
 
 **Unidirectional, many-to-many, send/receive as object-rights (Option A).**
 
-An endpoint is a single kernel object: bounded queue + waiters list.
-Capabilities to the same endpoint carry different rights in the D8 rights mask:
-send (enqueue), receive (dequeue), or both. Topology is emergent from capability
-distribution — the kernel does not enforce sender/receiver counts. The archive's
-principle applies: "allow shape, don't enforce it."
+A field is a single kernel object: bounded queue + waiters list. Capabilities to
+the same field carry different rights in the D8 rights mask: send (enqueue),
+receive (dequeue), or both. Topology is emergent from capability distribution —
+the kernel does not enforce sender/receiver counts. The archive's principle
+applies: "allow shape, don't enforce it."
 
 Three convergent paths:
 
@@ -165,7 +165,7 @@ Three convergent paths:
    introduces structural exceptions to both.
 
 2. **D12 + D13 many-to-one composition.** Fault delivery, interrupt delivery,
-   and server patterns are many-to-one. Option A handles them with one endpoint.
+   and server patterns are many-to-one. Option A handles them with one field.
    Option B requires per-source channels + aggregation — a second mechanism that
    weakens D13's "one mechanism" commitment.
 
@@ -206,25 +206,24 @@ but the shape derivation doesn't pass through A4.
 
 ## What remains open
 
-Downstream of D15, within the D13 endpoint cluster:
+Downstream of D15, within the D13 field cluster:
 
 - **Badge semantics.** Per-capability identifier attached by kernel to messages.
   Enables receiver to identify sender source. Encoding, assignment, and
   badge-closure notifications (the peer disconnection answer). Connected to
   D11's deferred add-ons.
 - **Reply-cap mechanism.** One-shot (kernel mints during call, auto-revoked
-  after reply) vs. persistent (client creates a reply endpoint, transfers send
-  cap explicitly). Affects fast-path design and cap table pressure.
+  after reply) vs. persistent (client creates a reply field, transfers send cap
+  explicitly). Affects fast-path design and cap table pressure.
 - **Overflow policy.** Error to sender (archive), overwrite-oldest, fault
-  sender. The coalescing tension from D13 (shared endpoint + capacity-1
-  overwrite + multiple sources = cross-source data loss) is directly downstream.
-- **Multi-endpoint wait.** How an Observer waits on multiple endpoints
-  simultaneously. Less urgent than for bidirectional (one endpoint serves many
-  sources), but still needed (pager with fault endpoint + user-request
-  endpoint).
+  sender. The coalescing tension from D13 (shared field + capacity-1 overwrite +
+  multiple sources = cross-source data loss) is directly downstream.
+- **Multi-field wait.** How an Observer waits on multiple fields simultaneously.
+  Less urgent than for bidirectional (one field serves many sources), but still
+  needed (pager with fault field + user-request field).
 - **Message format.** Size, slot count, capability transfer encoding, badge
   placement.
-- **Endpoint lifecycle and naming.** Working name "endpoint" is the lowercase
+- **Field lifecycle and naming.** Working name "field" is the lowercase
   common-term equivalent; final naming deferred with other public API names.
 
 ---

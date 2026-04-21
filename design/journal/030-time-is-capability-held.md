@@ -1,15 +1,15 @@
 # 030 — Time is a capability-held kernel object type
 
 **Question:** What is Time's object status? Is it a capability-held kernel
-object (like Space, endpoint, Observer), a kernel-internal resource binding, or
+object (like Space, field, Observer), a kernel-internal resource binding, or
 something else?
 
 **Answer:** Time is a capability-held kernel object type. The Observer's Time
 reference is a capability in the Observer's D8 flat table at a reserved slot
-(D21 pattern). Time joins Space, endpoint, and Observer as the fourth
+(D21 pattern). Time joins Space, field, and Observer as the fourth
 capability-designated kernel object type (correcting D14's count — D14 listed
-Time alongside Space and endpoint but Time's capability status was never
-formally derived until now).
+Time alongside Space and field but Time's capability status was never formally
+derived until now).
 
 ---
 
@@ -22,7 +22,7 @@ Journal 006 (D6) listed "Time binding" as a concrete Observer field without
 resolving whether it was capability-mediated or a direct binding.
 
 Journal 014 (D14) counted Time among kernel object types ("Observer joins Space,
-Time, and endpoint as the fourth type") and referenced Time's "non-clonable
+Time, and field as the fourth type") and referenced Time's "non-clonable
 property" — but neither was formally derived.
 
 Journal 023 (research implications) proposed Time as a capability-held object
@@ -44,7 +44,7 @@ TreeSLS): every kernel object reachable only through the capability graph. D21
 claim to a portion of a specific logical core's scheduling time." A claim to a
 bounded resource — the rate of scheduling time per logical core is bounded at
 100%. D4 requires capabilities as the authority mechanism for bounded resources.
-Every other bounded resource (Space for memory, endpoints for communication,
+Every other bounded resource (Space for memory, fields for communication,
 Observer for execution) is capability-designated. If Observers consume
 scheduling time without presenting a capability to designate that claim, it is
 ambient privilege — D4 forecloses this.
@@ -68,7 +68,7 @@ kernel object should be reachable only through the capability graph. If Time is
 kernel-internal, it is the sole resource outside the cap graph — a hole in the
 discipline that D21 established as a design principle. Making Time
 capability-held maintains completeness: all four object types (Space, Time,
-endpoint, Observer) are in the graph. System state is capturable by walking
+field, Observer) are in the graph. System state is capturable by walking
 capabilities.
 
 ### Dissolved open questions

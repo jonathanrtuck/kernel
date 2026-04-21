@@ -70,7 +70,7 @@ while the pager handles the fault. If the pager crashes, the Observer is
 orphaned — no entity holds a cap to it.
 
 **D10, D15, D9 (type consistency).** Address space handles are implicitly
-clonable (D10: multiple Observers bind to the same one). Endpoint handles are
+clonable (D10: multiple Observers bind to the same one). Field handles are
 explicitly clonable (D15: "clone receive caps to multiple worker Observers").
 Memory object handles are implicitly clonable (D9: sharing through capability
 transfer). Non-clonable Observer handles would make Observer the sole exception
@@ -112,7 +112,7 @@ delivery mechanism was unclear.
 
 The current chain independently settled this: D20 (per-Observer fault handler
 attachment) and D21 (fault handler is a cap-table entry at a reserved slot). The
-fault handler is a separate endpoint cap — it is not the Observer handle holder.
+fault handler is a separate field cap — it is not the Observer handle holder.
 The unification concept is dissolved by D20/D21. The primary motivation for
 non-clonable in the archive no longer applies.
 
@@ -180,7 +180,7 @@ affecting the clonability decision.
 
 **Settled.** Observer capabilities are clonable. Observer handles follow uniform
 capability rules — clone, attenuate, transfer — identically to every other
-kernel object type (endpoints, address spaces, memory objects).
+kernel object type (fields, address spaces, memory objects).
 
 Five convergent arguments:
 

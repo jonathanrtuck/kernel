@@ -103,9 +103,19 @@ under "Rests on"; it exists so later sections can be precise.
   Observer always has one register state, one PC, one execution stream
   regardless of how many Time caps it holds.
 
-_Capitalized-vs-lowercase convention:_ Capitalized terms (Space, Time, Observer)
-are kernel proper nouns — names of specific concepts in this kernel's design,
-with the semantics defined here. Lowercase equivalents from broader OS
+- **Field.** The medium through which Observers communicate. A Field is a
+  queued, unidirectional, many-to-many IPC object: multiple Observers may send
+  to the same Field, and multiple may receive from it, with access governed by
+  capability rights (send, receive, mint). All information delivery — peer
+  messages, fault notifications, interrupt signals, badge-closure events — flows
+  through Fields. The metaphor is from physics: a field mediates interaction
+  between observers, and any number of participants can disturb or sense the
+  same field. Which queue slots are occupied, the waiters list, and optional
+  per-badge tracking state are kernel-internal concerns.
+
+_Capitalized-vs-lowercase convention:_ Capitalized terms (Space, Time, Observer,
+Field) are kernel proper nouns — names of specific concepts in this kernel's
+design, with the semantics defined here. Lowercase equivalents from broader OS
 literature (memory object, thread) refer to the same kind of thing but without
 claiming this kernel's specific semantics. The two are interchangeable in prose;
 capitalization signals "speaking of our concept" vs. "speaking of the general
@@ -481,7 +491,7 @@ ABA defense, not revocation: it does not invalidate live capabilities.
 Close-only alone (Base-A) was rejected. Four structural workload patterns under
 A3 — adversarial targets, failure-mode targets, pressure response, and
 structural cascade — require terminate-by-force. For kernel-owned resources
-(Observers, Spaces, endpoints), close-only cannot express this; the userspace
+(Observers, Spaces, fields), close-only cannot express this; the userspace
 construction that would substitute cannot interpose at the MMU level and must
 route through a kernel mechanism that is itself a form of authoritative destroy
 under another name. Forcing this construction into userspace violates A5 via O4
@@ -489,10 +499,10 @@ under another name. Forcing this construction into userspace violates A5 via O4
 
 Add-on mechanisms for mass invalidation (generation-as-revocation) and selective
 revocation (CDT, badges) are deferred. Their value depends on the IPC model:
-endpoint rotation serves mass invalidation only if endpoint-like kernel objects
-exist; badges ride on IPC; proxy indirection requires IPC mediation. Committing
-to add-ons before the IPC model is settled would either skip a level or
-overspend on features whose alternatives may be free.
+field rotation serves mass invalidation only if field-like kernel objects exist;
+badges ride on IPC; proxy indirection requires IPC mediation. Committing to
+add-ons before the IPC model is settled would either skip a level or overspend
+on features whose alternatives may be free.
 
 Does NOT settle: mass invalidation (deferred with IPC), selective revocation
 (deferred with IPC), who authorizes destroy, cross-core prompt-effect policy
@@ -516,9 +526,9 @@ revocation interaction.
   distributed-setting costs), `design/research/authority-models.md` §4.1–4.8,
   §5.2, §6.3 (per-system survey, cost table, seL4 WCET concern).
 - **Status:** settled — revisit when the IPC model decision reveals whether
-  Base-B plus IPC-level mechanisms (endpoint rotation, badges) cover the
-  workloads that would otherwise justify generation-as-revocation or CDT, or if
-  a downstream lifecycle derivation (Observer, Space) reveals the base primitive
+  Base-B plus IPC-level mechanisms (field rotation, badges) cover the workloads
+  that would otherwise justify generation-as-revocation or CDT, or if a
+  downstream lifecycle derivation (Observer, Space) reveals the base primitive
   is structurally insufficient.
 - **Journal:** `journal/011-base-revocation-primitive.md`.
 
@@ -576,19 +586,19 @@ required by D12; representation settled by D21 as cap-table entry).
   accommodated without unacceptable IPC complexity.
 - **Journal:** `journal/012-fault-delegation.md`.
 
-### D13 — Queued endpoints with direct-switch fast path
+### D13 — Queued fields with direct-switch fast path
 
-The primary IPC mechanism is bounded queued endpoints. Messages accumulate in a
-per-endpoint queue. Sender deposits and continues (non-blocking; behavior on
-queue-full is a downstream endpoint-shape question). When the receiver is
-already waiting, direct process switch bypasses the queue entirely at rendezvous
-speed (~400 cycles ARM64). All information delivery — peer IPC, fault
-notifications (D12), interrupt signals, system events — uses the same mechanism.
+The primary IPC mechanism is bounded queued fields. Messages accumulate in a
+per-field queue. Sender deposits and continues (non-blocking; behavior on
+queue-full is a downstream field-shape question). When the receiver is already
+waiting, direct process switch bypasses the queue entirely at rendezvous speed
+(~400 cycles ARM64). All information delivery — peer IPC, fault notifications
+(D12), interrupt signals, system events — uses the same mechanism.
 
 Sync-only was foreclosed: A3 requires event-driven workload support, and D12
 requires the kernel to deposit fault messages without blocking. The queued model
-subsumes both patterns: sync (send + block-on-reply endpoint) and async (send +
-continue). The archive's "strictly dominates" argument: queued endpoints achieve
+subsumes both patterns: sync (send + block-on-reply field) and async (send +
+continue). The archive's "strictly dominates" argument: queued fields achieve
 rendezvous speed for the same-core, receiver-waiting case AND provide async
 fallback — sync rendezvous cannot handle the async case at all.
 
@@ -597,18 +607,18 @@ chosen: sender-always-blocks limitation breaks fan-out patterns; the archive
 independently rejected it for the same reason. Sync + queued notifications
 (QNX-like) also not chosen: still has sender-blocks, plus two mechanisms.
 
-A coalescing tension exists for shared endpoints with overwrite-oldest overflow:
-cross-source data loss when multiple sources share a capacity-1 overwrite
-endpoint. Resolution deferred to endpoint-shape exploration. The tension is
-documented in journal/013 so it is not rediscovered.
+A coalescing tension exists for shared fields with overwrite-oldest overflow:
+cross-source data loss when multiple sources share a capacity-1 overwrite field.
+Resolution deferred to field-shape exploration. The tension is documented in
+journal/013 so it is not rediscovered.
 
 Queue memory drawn from the creator's Spaces (D8 pattern). Fixed capacity at
 creation. Memory per queued message ~48 bytes (register-sized).
 
 Does NOT settle: ~~message format~~ (settled by D28), queue capacity policy, IPC
-fast-path conditions, D12 fault delivery specifics. (Endpoint shape settled by
-D15. Overflow policy settled by D18. Coalescing dissolved by D18. Reply routing
-settled by D16. Badge semantics settled by D17. Multi-endpoint wait resolved by
+fast-path conditions, D12 fault delivery specifics. (Field shape settled by D15.
+Overflow policy settled by D18. Coalescing dissolved by D18. Reply routing
+settled by D16. Badge semantics settled by D17. Multi-field wait resolved by
 D19. Message format settled by D28.)
 
 - **Rests on:** A3 (generic — both sync and async patterns required; independent
@@ -617,14 +627,14 @@ D19. Message format settled by D28.)
   minimal per-core hot-path requirement), D7 (split model — IPC as a dedicated
   mechanism family; D7 notes "couples naturally with async"), D12 (fault traffic
   is IPC — kernel-as-sender requires non-blocking deposit), D4 (capability-
-  mediated — endpoints designated by capabilities), D3 + D8 (queue memory drawn
+  mediated — fields designated by capabilities), D3 + D8 (queue memory drawn
   from creator's Spaces; typed-memory-backing pattern), `design/landscape.md`
   §3.1 (sync vs. async survey), §3.2 ("every production microkernel converges on
   hybrid"), §3.4 (fast-path data), `design/research/syscall-landscape.md` §10
   (IPC as pivot point, performance data, lessons from removals).
 - **Status:** tentative — D18 resolves trigger #1 (coalescing gap dissolved — no
   second primitive needed) and settles overflow policy. D19 resolves trigger #3
-  (multi-endpoint wait — badge fan-in via D15+D17 covers common patterns;
+  (multi-field wait — badge fan-in via D15+D17 covers common patterns;
   multi-receive syscall deferred, not foreclosed). Remaining trigger: bounded
   queue capacity creates unsolvable priority inversion or deadlock patterns
   (trigger #2, a downstream concern of priority/scheduling interaction, D2).
@@ -633,7 +643,7 @@ D19. Message format settled by D28.)
 ### D14 — Observer is a capability-held kernel object type
 
 Observer is a kernel object type designated by capabilities, joining Space,
-Time, and endpoint (D13) as the fourth type. Lifecycle operations — at minimum
+Time, and field (D13) as the fourth type. Lifecycle operations — at minimum
 resume and destroy — are typed kernel syscalls (D7) taking Observer capability
 handles. The capability's rights mask governs permitted operations. D11's
 destroy provides termination; outstanding capabilities become dead handles.
@@ -665,14 +675,14 @@ per-Observer), Time reclamation on destroy, Observer minimum schema.
   structural demand for resume, though D4 and D6 provide independent support).
 - **Journal:** `journal/014-observer-is-capability-held.md`.
 
-### D15 — Unidirectional, many-to-many endpoints with send/receive rights
+### D15 — Unidirectional, many-to-many fields with send/receive rights
 
-An endpoint is a single kernel object: bounded queue + waiters list.
-Capabilities to the same endpoint carry different rights in the D8 rights mask:
-send (enqueue), receive (dequeue), or both. Topology is emergent from capability
-distribution — the kernel does not enforce sender/receiver counts. Three usage
-patterns arise by convention: server inbox (many:1), worker pool (many:many),
-dedicated pipe (1:1).
+A Field is a single kernel object: bounded queue + waiters list. Capabilities to
+the same field carry different rights in the D8 rights mask: send (enqueue),
+receive (dequeue), or both. Topology is emergent from capability distribution —
+the kernel does not enforce sender/receiver counts. Three usage patterns arise
+by convention: server inbox (many:1), worker pool (many:many), dedicated pipe
+(1:1).
 
 Three convergent paths: (1) D8 + D11 structural consistency — standard entry
 format, symmetric destroy; bidirectional would require structural exceptions to
@@ -684,10 +694,10 @@ capability-mediated access.
 
 Request-reply requires explicit reply-cap transfer per RPC (well-understood
 cost; D16 settles the mechanism as send-once cap on a pre-allocated reply
-endpoint). Peer disconnection detection requires a badge-closure notification
+field). Peer disconnection detection requires a badge-closure notification
 mechanism (deferred to badge-semantics exploration).
 
-Does NOT settle: overflow policy, multi-endpoint wait, message format, endpoint
+Does NOT settle: overflow policy, multi-field wait, message format, field
 naming. (Reply-cap mechanism settled by D16. Badge semantics settled by D17.)
 
 - **Rests on:** D4 (send/receive as independent authorities — confused deputy
@@ -695,7 +705,7 @@ naming. (Reply-cap mechanism settled by D16. Badge semantics settled by D17.)
   standard entry format; bidirectional would require structural exception), D11
   (symmetric destroy — bidirectional requires asymmetric peer-closure
   signaling), D12 + D13 (kernel-as-sender in many-to-one fault/interrupt
-  delivery; one endpoint per receiver, no aggregation needed), A3 (generic —
+  delivery; one field per receiver, no aggregation needed), A3 (generic —
   diverse topology patterns required; kernel-enforced fixed topology foreclosed;
   QNX constrained model dominated), D7 (creation returns one capability,
   consistent with all other kernel object types), `design/landscape.md` §3.3
@@ -707,17 +717,17 @@ naming. (Reply-cap mechanism settled by D16. Badge semantics settled by D17.)
   exploration reveals that peer disconnection detection cannot be solved within
   the unidirectional model (would reopen bidirectional's peer-closure
   advantage).
-- **Journal:** `journal/015-endpoint-shape.md`.
+- **Journal:** `journal/015-field-shape.md`.
 
-### D16 — Reply via pre-allocated reply endpoint with send-once cap
+### D16 — Reply via pre-allocated reply field with send-once cap
 
-RPC reply routing uses a pre-allocated reply endpoint per Observer (a regular
-endpoint, D15) combined with a send-once capability right in D8's rights mask.
-On Call(), the kernel creates a send-once cap to the caller's reply endpoint,
-includes it in the request message, and blocks the caller on its reply endpoint.
-The server sends the reply to the send-once cap; the cap is consumed on use. The
-reply endpoint persists across RPCs; the cap is ephemeral. No new kernel type —
-the reply endpoint is a standard endpoint.
+RPC reply routing uses a pre-allocated reply field per Observer (a regular
+field, D15) combined with a send-once capability right in D8's rights mask. On
+Call(), the kernel creates a send-once cap to the caller's reply field, includes
+it in the request message, and blocks the caller on its reply field. The server
+sends the reply to the send-once cap; the cap is consumed on use. The reply
+field persists across RPCs; the cap is ephemeral. No new kernel type — the reply
+field is a standard field.
 
 Send-once is a general-purpose use-limited attenuation right, not
 reply-specific. It extends D4's attenuation hierarchy: a send-once cap is
@@ -726,44 +736,44 @@ notifications, single-use authorization tokens, and edge-triggered interrupt
 delivery. Prior art: Mach send-once rights on ports; EROS resume keys
 (effectively send-once).
 
-The kernel is free to optimize the reply fast path behind the endpoint interface
+The kernel is free to optimize the reply fast path behind the field interface
 (bypassing the queue structure when the sole waiter is the known caller). This
 is an implementation optimization, not an object-model commitment.
 
 Structurally parallel with D14's fault handling: both deliver a caller-specific
 response capability in the message. The mechanism families differ per D7 — IPC
-reply is send-to-endpoint; fault resume is resume(observer_handle) — but the
+reply is send-to-field; fault resume is resume(observer_handle) — but the
 message shape is consistent.
 
 A dedicated Reply kernel type (seL4 MCS) was considered and rejected: the
-fast-path bypass it enables is an optimization achievable behind the endpoint
+fast-path bypass it enables is an optimization achievable behind the field
 interface, not a structural necessity. A persistent send cap without send-once
 (archive's approach) was refined: send-once prevents post-reply capability
 retention. Badge-based reply was foreclosed by D4 (ambient addressing, not
 capability designation).
 
 Does NOT settle: Call()/ReplyRecv() syscall details (part of specific syscall
-surface), reply endpoint allocation policy (pre-allocated at creation vs. lazy),
-send-once right encoding in D8's rights mask, shared reply endpoint with badge
+surface), reply field allocation policy (pre-allocated at creation vs. lazy),
+send-once right encoding in D8's rights mask, shared reply field with badge
 disambiguation (depends on badge semantics). ~~Message format interaction~~
 settled by D28: reply cap is a kernel-injected dedicated field (not a user cap
 slot), paralleling badge.
 
-- **Rests on:** D15 (unidirectional endpoints require reply-cap transfer — the
-  cost this mechanism pays), D14 (fault resume settled separately — decouples
-  IPC reply from fault resume; structural parallel in message shape), D7 (split
+- **Rests on:** D15 (unidirectional fields require reply-cap transfer — the cost
+  this mechanism pays), D14 (fault resume settled separately — decouples IPC
+  reply from fault resume; structural parallel in message shape), D7 (split
   model — IPC reply must be in IPC mechanism family), D8 (flat cap table with
   rights mask — send-once extends the mask), D4 (capability-based authority —
-  badge-based reply foreclosed), D13 (queued endpoints with direct-switch fast
-  path — kernel can optimize reply path), D11 (base revocation — send-once is
-  auto-revoked on use; close semantics), `design/research/endpoint-shape.md`
-  (Mach send-once rights, seL4 reply cap, EROS resume key),
+  badge-based reply foreclosed), D13 (queued fields with direct-switch fast path
+  — kernel can optimize reply path), D11 (base revocation — send-once is
+  auto-revoked on use; close semantics), `design/research/field-shape.md` (Mach
+  send-once rights, seL4 reply cap, EROS resume key),
   `design/research/syscall-landscape.md` §1.1 (seL4 MCS reply object fix).
-- **Status:** settled — revisit if D15 is revised (different endpoint shape
-  changes the reply-cap constraint), if the send-once right proves insufficient
-  for reply semantics (e.g., server needs to reply multiple times), or if the
-  fast-path optimization behind the endpoint interface proves unachievable
-  without a dedicated Reply type.
+- **Status:** settled — revisit if D15 is revised (different field shape changes
+  the reply-cap constraint), if the send-once right proves insufficient for
+  reply semantics (e.g., server needs to reply multiple times), or if the
+  fast-path optimization behind the field interface proves unachievable without
+  a dedicated Reply type.
 - **Journal:** `journal/016-reply-cap-mechanism.md`.
 
 ### D17 — Badge semantics: minter-assigned, mint-right-controlled, opt-in lifecycle tracking
@@ -776,19 +786,19 @@ distinguishing. The minter chooses the value; the kernel enforces unforgeability
 and immutability.
 
 Mint is a third independent right in D8's rights mask (send, receive, mint),
-controlling who can assign badges when cloning. The endpoint creator controls
+controlling who can assign badges when cloning. The field creator controls
 mint-right distribution, aligning badge population growth with resource
 authority.
 
-Lifecycle visibility is opt-in: the endpoint creator specifies at creation
-whether per-badge refcount tracking is enabled. With tracking: when the last
-send cap with badge B to endpoint E is closed, the kernel enqueues a closure
-notification to E's receive side (through the endpoint queue, D13). Without
-tracking: no per-badge state, no notifications, trivial close path. Opt-in
-resolves the A3/A4 tension: not all workloads need disconnection detection (A3),
-but those that do should not fall back to polling (A4).
+Lifecycle visibility is opt-in: the field creator specifies at creation whether
+per-badge refcount tracking is enabled. With tracking: when the last send cap
+with badge B to field E is closed, the kernel enqueues a closure notification to
+E's receive side (through the field queue, D13). Without tracking: no per-badge
+state, no notifications, trivial close path. Opt-in resolves the A3/A4 tension:
+not all workloads need disconnection detection (A3), but those that do should
+not fall back to polling (A4).
 
-Five tensions are accepted for tracked endpoints: D16 send-once consumption vs.
+Five tensions are accepted for tracked fields: D16 send-once consumption vs.
 badge-closure (must distinguish consumed-by-use from closed-without-use); D13
 bounded queue vs. notification volume; per-badge map growth (controlled by
 mint-right distribution and bounded by creation-time capacity); reverse
@@ -807,39 +817,38 @@ message format, badge-closure × overflow policy interaction, per-badge tracking
   table — badge stored in entry; rights mask holds mint right), D4 (designation
   = authority — badge unforgeability prevents confused deputy at IPC layer;
   badge-based addressing foreclosed; mint authority is capability-mediated), D13
-  (one delivery mechanism — closure notifications use the endpoint queue), D12
+  (one delivery mechanism — closure notifications use the field queue), D12
   (fault handler badge structurally required — kernel synthesizes fault messages
   without a sender cap), D11 (base revocation — badge-closure is a revocation
-  add-on; close triggers per-badge check on tracked endpoints), D16 (send-once
-  caps create the consumed-vs-closed tension), A3 (generic — not all workloads
-  need lifecycle tracking; opt-in), A4 (purely reactive — polling-based
-  disconnection detection is inconsistent; event-driven notification is
-  A4-consistent), `design/research/endpoint-shape.md` (seL4 badge mechanism,
-  Mach send-once rights, Zircon peer-closed signal), `design/landscape.md` §1.3,
-  §3.5, §3.6, §5.2 (badge and notification mechanisms across surveyed systems).
+  add-on; close triggers per-badge check on tracked fields), D16 (send-once caps
+  create the consumed-vs-closed tension), A3 (generic — not all workloads need
+  lifecycle tracking; opt-in), A4 (purely reactive — polling-based disconnection
+  detection is inconsistent; event-driven notification is A4-consistent),
+  `design/research/field-shape.md` (seL4 badge mechanism, Mach send-once rights,
+  Zircon peer-closed signal), `design/landscape.md` §1.3, §3.5, §3.6, §5.2
+  (badge and notification mechanisms across surveyed systems).
 - **Status:** settled — revisit if D15 is revised (changes the many-to-one
   composition that creates the need), if D8 is revised (changes where badge is
   stored), if D13 is revised (changes the notification delivery mechanism), or
   if the opt-in model proves insufficient (a workload pattern requires
-  badge-closure on an endpoint the receiver didn't create and can't replace).
+  badge-closure on a field the receiver didn't create and can't replace).
 - **Journal:** `journal/017-badge-semantics.md`.
 
 ### D18 — Error-to-sender overflow with deferred fault delivery
 
-When a send to a queued endpoint finds the queue at capacity, the kernel returns
-an error. No per-endpoint policy modes, no overwrite, no kernel-level
-coalescing. Coalescing workloads use shared memory + signaling (D9 shared Space
-caps + capacity-1 endpoints) — the standard microkernel architecture (landscape
-§3.2).
+When a send to a queued field finds the queue at capacity, the kernel returns an
+error. No per-field policy modes, no overwrite, no kernel-level coalescing.
+Coalescing workloads use shared memory + signaling (D9 shared Space caps +
+capacity-1 fields) — the standard microkernel architecture (landscape §3.2).
 
 For the kernel-as-sender (D12 fault messages), deferred delivery: the kernel
-links the faulting Observer into a per-endpoint pending list. The next receive()
+links the faulting Observer into a per-field pending list. The next receive()
 that frees a slot delivers the deferred fault. The pending list is an intrusive
 linked list through existing Observer objects — zero additional memory
 allocation. D17 badge-closure notifications are dropped on full queue; the
 receiver discovers staleness lazily.
 
-The D13 coalescing tension (cross-source data loss on shared endpoints with
+The D13 coalescing tension (cross-source data loss on shared fields with
 overwrite semantics) dissolves: no overwrite means no cross-source data loss.
 D13 revisit trigger #1 does not fire — coalescing is achieved through
 composition of existing primitives, not through a second IPC primitive.
@@ -847,7 +856,7 @@ composition of existing primitives, not through a second IPC primitive.
 Does NOT settle: ~~interrupt delivery mechanism (must account for error-on-full
 via masking)~~ (settled by D22: delegation with mask-on-delivery; D18 trigger
 does not fire — no unsolvable delivery gaps), pager unavailability protocol
-(endpoint destroy with pending faults adds a trigger), multi-endpoint wait (D13
+(field destroy with pending faults adds a trigger), multi-field wait (D13
 revisit trigger #3), Observer minimum schema (pending-list linkage field).
 
 - **Rests on:** A3 (generic — different workloads, but only error is
@@ -856,11 +865,11 @@ revisit trigger #3), Observer minimum schema (pending-list linkage field).
   trigger for deferred delivery), D12 (fault delegation — fault messages must be
   delivered; the kernel-as-sender constraint drives deferred delivery), D13
   (bounded queue, fixed capacity — overflow is the question this answers; one
-  mechanism — deferred delivery stays within the endpoint, not a second
-  primitive), D1 (overflow is cold-path; deferred delivery check on receive is
-  cold-path), D9 (shared memory for coalescing — sharing Space caps makes
-  kernel-level coalescing reducible), D17 (badge-closure dropped on full — not a
-  correctness issue; per-badge tracking × coalescing interaction dissolved),
+  mechanism — deferred delivery stays within the field, not a second primitive),
+  D1 (overflow is cold-path; deferred delivery check on receive is cold-path),
+  D9 (shared memory for coalescing — sharing Space caps makes kernel-level
+  coalescing reducible), D17 (badge-closure dropped on full — not a correctness
+  issue; per-badge tracking × coalescing interaction dissolved),
   `design/landscape.md` §3.2 (every production microkernel converges on shared
   memory + IPC signaling for data-plane communication), §5.1 (mask-on-delivery
   for interrupt coalescing).
@@ -869,17 +878,17 @@ revisit trigger #3), Observer minimum schema (pending-list linkage field).
   badge-closure notifications create a correctness issue (not just a timeliness
   issue), or if the interrupt model derivation reveals that error-on-full
   combined with interrupt masking creates unsolvable delivery gaps.
-- **Journal:** `journal/018-endpoint-overflow-policy.md`.
+- **Journal:** `journal/018-field-overflow-policy.md`.
 
 ### D20 — Per-Observer fault handler attachment
 
 The fault handler attaches to the Observer. Each Observer stores a fault handler
-endpoint reference and a badge. On fault, the kernel reads both from the
-faulting Observer's struct and delivers a fault notification to the handler
-endpoint with the stored badge, plus the faulting Observer's capability handle
-via cap transfer (D14).
+field reference and a badge. On fault, the kernel reads both from the faulting
+Observer's struct and delivers a fault notification to the handler field with
+the stored badge, plus the faulting Observer's capability handle via cap
+transfer (D14).
 
-Every Observer creation must supply a fault handler endpoint and badge (D12
+Every Observer creation must supply a fault handler field and badge (D12
 invariant enforced at creation time). Redundant configuration when N Observers
 want the same handler is a userspace ergonomics cost, not kernel complexity — a
 library function absorbs it.
@@ -894,7 +903,7 @@ cap-table entry.)
   independent delegation of fault handler configuration authority; independent
   path), D17 (badge-closure lifecycle visibility works only with per-Observer
   reference; fault handler badge is structurally required per-Observer
-  regardless of endpoint attachment; independent path), D12 (every Observer must
+  regardless of field attachment; independent path), D12 (every Observer must
   have a fault handler — maps to local invariant with per-Observer), D14
   (Observer as capability-held type — provides the natural configuration noun),
   D1 (hot-path simplicity — single cache-line access),
@@ -914,16 +923,16 @@ cap-table entry.)
 
 The per-Observer fault handler reference (D20) is a regular capability in the
 Observer's D8 flat table at a kernel-reserved slot index. The entry carries send
-rights to the handler endpoint, the per-Observer badge, and a generational slot
-tag (D11). On fault, the kernel reads the entry at the known index and delivers
-a fault message to the designated endpoint with the stored badge.
+rights to the handler field, the per-Observer badge, and a generational slot tag
+(D11). On fault, the kernel reads the entry at the known index and delivers a
+fault message to the designated field with the stored badge.
 
 Three independent arguments converge: (1) D11 authoritative destroy of the
-handler endpoint must invalidate the reference — the cap-table walk handles this
+handler field must invalidate the reference — the cap-table walk handles this
 automatically; kernel-internal requires a parallel tracking structure; (2) D17
 badge-closure on Observer destroy fires generically via cap-close — kernel-
 internal requires explicit coupling between Observer-destroy and badge-closure;
-(3) D8 ABA slot-tag protection prevents stale references after endpoint destroy
+(3) D8 ABA slot-tag protection prevents stale references after field destroy
 
 - slot reuse — kernel-internal requires separate dangling-pointer prevention.
 
@@ -959,26 +968,26 @@ pager unavailability protocol (D21 makes detection clear: dead cap-table entry).
   cost or structure).
 - **Journal:** `journal/021-fault-handler-representation.md`.
 
-### D22 — Device interrupt delegation through endpoints
+### D22 — Device interrupt delegation through fields
 
 The kernel delegates device interrupt handling to userspace driver Observers.
 The kernel's role is interrupt dispatch: detect the interrupt (read GIC IAR),
-mask it, enqueue a message to the driver Observer's endpoint with a
-per-interrupt badge (D17) and a send-once ack cap (D16), send EOI, return. The
-driver does everything else. Three independent paths converge, paralleling D12
-(fault delegation): (1) A4 forecloses background interrupt processing; (2) A3
+mask it, enqueue a message to the driver Observer's field with a per-interrupt
+badge (D17) and a send-once ack cap (D16), send EOI, return. The driver does
+everything else. Three independent paths converge, paralleling D12 (fault
+delegation): (1) A4 forecloses background interrupt processing; (2) A3
 forecloses a single hardcoded interrupt policy; (3) A5 — the dispatch interface
 (mask, signal, EOI) is smaller than a policy-configuration interface.
 
-No separate IRQ kernel object type. The interrupt namespace maps onto the
-endpoint namespace. The kernel maintains an internal IRQ→endpoint routing table.
-At boot, device interrupts (discovered from device tree / GIC configuration)
-route to a root interrupt endpoint. The initial Observer receives this endpoint
-(same mechanism as initial Space distribution — one unsettled boot protocol, one
-answer for both). To delegate, the holder splits the endpoint by IRQ range: a
-new endpoint receives the subset, the original loses it. The new endpoint cap is
-transferred to a driver Observer. Dynamically-discovered interrupts (LPIs via
-ITS) are added to the appropriate endpoint by the kernel.
+No separate IRQ kernel object type. The interrupt namespace maps onto the field
+namespace. The kernel maintains an internal IRQ→field routing table. At boot,
+device interrupts (discovered from device tree / GIC configuration) route to a
+root interrupt field. The initial Observer receives this field (same mechanism
+as initial Space distribution — one unsettled boot protocol, one answer for
+both). To delegate, the holder splits the field by IRQ range: a new field
+receives the subset, the original loses it. The new field cap is transferred to
+a driver Observer. Dynamically-discovered interrupts (LPIs via ITS) are added to
+the appropriate field by the kernel.
 
 The driver handles interrupts identically to IPC: receive a message, do work,
 respond. Each interrupt message carries a badge (identifying the IRQ) and a
@@ -988,7 +997,7 @@ closed without use, the interrupt stays masked (D18 safety). No IRQ-specific
 operations — the driver uses receive() and send-once, exactly like RPC.
 
 Both delivery and ack are IPC-family under D7: delivery is kernel-as-sender
-depositing to endpoint; ack is driver using a send-once cap. No typed kernel
+depositing to field; ack is driver using a send-once cap. No typed kernel
 operations specific to interrupts.
 
 Scope: SPIs (32–1019), LPIs (8192+), and delegatable PPIs. The preemption timer
@@ -996,21 +1005,21 @@ is kernel-internal (D2 scheduling mechanism). IPIs are kernel-internal (O2
 cross-core coordination). Landscape §5.1 confirms: "No microkernel delegates the
 preemption timer."
 
-Two endpoint operations emerge: split (create new endpoint, move IRQ routes to
-it) and combine (merge N endpoints into one receiving all sources). Both are
-cold-path. Both are potentially general endpoint operations — split for
-structured load distribution, combine as an alternative to multi-wait (D19).
-Details downstream of the endpoint model.
+Two field operations emerge: split (create new field, move IRQ routes to it) and
+combine (merge N fields into one receiving all sources). Both are cold-path.
+Both are potentially general field operations — split for structured load
+distribution, combine as an alternative to multi-wait (D19). Details downstream
+of the field model.
 
 An IRQ object type (parallel to Space) and a factory model (IRQControl, seL4
 precedent) were both considered and rejected. Every concern identified with the
-endpoint-only model — send-once performance, crash recovery, split/combine
+field-only model — send-once performance, crash recovery, split/combine
 complexity — traces to a parent decision (D16, general lifecycle, D13/D15) and
 is not introduced by D22.
 
-Does NOT settle: endpoint split semantics (automatic return on destroy for crash
-recovery? generalization to badge-range partitioning?), endpoint combine
-semantics (transparent forwarding vs. dead handles for existing send caps), boot
+Does NOT settle: field split semantics (automatic return on destroy for crash
+recovery? generalization to badge-range partitioning?), field combine semantics
+(transparent forwarding vs. dead handles for existing send caps), boot
 distribution of IRQ authority, interrupt priority exposure (GICv3 8-bit priority
 — deferred), IRQ routing policy (which core receives a given SPI — deferred),
 userspace timer mechanism, GICv4 forward-compatibility (direct virtual
@@ -1020,38 +1029,38 @@ injection).
   (no single interrupt policy; independent path), A5 (net: dispatch interface
   smaller than policy-configuration interface; confirms delegation's interface
   economics), D12 (structural precedent — three convergent paths parallel
-  exactly), D13 (all information delivery through queued endpoints — interrupt
-  delivery committed; the endpoint IS the delivery mechanism, no additional type
+  exactly), D13 (all information delivery through queued fields — interrupt
+  delivery committed; the field IS the delivery mechanism, no additional type
   needed), D16 (send-once ack cap — D16 explicitly lists "edge-triggered
   interrupt delivery" as an application; the ack mechanism already exists), D17
-  (badges identify which interrupt fired; fan-in onto one endpoint), D18
-  (overflow settled: mask-on-delivery, GIC holds pending state; D18 revisit
-  trigger does not fire — no unsolvable delivery gaps), D4 (capability-mediated
-  authority — endpoint receive cap IS the authority over its interrupt sources;
-  integer IRQ IDs and file-descriptor models foreclosed), D7 (both delivery and
-  ack are IPC-family; no interrupt-specific typed kernel operations), D8 (flat
-  table accommodates send-once ack caps per interrupt message), D11 (endpoint
-  destroy masks associated IRQs; dead-handle semantics), D1 (hot path: GIC CPU
-  interface registers are per-core; no shared mutable state on interrupt
-  handling path; routing configuration and split/combine are cold-path), O3
-  (interrupts taken on targeted core), `design/landscape.md` §5.1 (four
-  interrupt ownership patterns surveyed; universal kernel-internal: masking,
-  EOI, preemption timer), §5.2 (six interrupt object models surveyed), §5.6
-  (microkernels dissolve deferred processing), §5.7 (GICv3/v4 specifics),
+  (badges identify which interrupt fired; fan-in onto one field), D18 (overflow
+  settled: mask-on-delivery, GIC holds pending state; D18 revisit trigger does
+  not fire — no unsolvable delivery gaps), D4 (capability-mediated authority —
+  field receive cap IS the authority over its interrupt sources; integer IRQ IDs
+  and file-descriptor models foreclosed), D7 (both delivery and ack are
+  IPC-family; no interrupt-specific typed kernel operations), D8 (flat table
+  accommodates send-once ack caps per interrupt message), D11 (field destroy
+  masks associated IRQs; dead-handle semantics), D1 (hot path: GIC CPU interface
+  registers are per-core; no shared mutable state on interrupt handling path;
+  routing configuration and split/combine are cold-path), O3 (interrupts taken
+  on targeted core), `design/landscape.md` §5.1 (four interrupt ownership
+  patterns surveyed; universal kernel-internal: masking, EOI, preemption timer),
+  §5.2 (six interrupt object models surveyed), §5.6 (microkernels dissolve
+  deferred processing), §5.7 (GICv3/v4 specifics),
   `design/research/syscall-landscape.md` (seL4 IRQControl/IRQHandler, Zircon
   interrupt objects, L4Re IRQ objects, EROS IrqCtl/IrqWait).
 - **Status:** settled — revisit if D13 is revised (different IPC model changes
   the delivery mechanism), if D16 is revised (changes the send-once mechanism
-  that provides ack), or if a downstream derivation reveals that the
-  endpoint-only model creates essential complexity that a separate IRQ type
-  would not (e.g., split/combine prove unimplementable without per-endpoint IRQ
-  state that breaks D15 uniformity).
+  that provides ack), or if a downstream derivation reveals that the field-only
+  model creates essential complexity that a separate IRQ type would not (e.g.,
+  split/combine prove unimplementable without per-field IRQ state that breaks
+  D15 uniformity).
 - **Journal:** `journal/022-interrupt-model.md`.
 
 ### D23 — Observer capabilities are clonable
 
 Observer handles follow uniform capability rules: clone, attenuate, transfer —
-identically to every other kernel object type (Spaces, endpoints). Multiple
+identically to every other kernel object type (Spaces, fields). Multiple
 entities can hold capabilities to the same Observer, each with independent
 rights masks. No type-specific exceptions in D8's table management.
 
@@ -1065,7 +1074,7 @@ achievable through capability discipline under clonable.
 
 The archive's "handle = handler unification" concept (if non-clonable, the
 handle holder is necessarily the fault handler) is dissolved by D20/D21: the
-fault handler is a separate endpoint cap at a reserved slot, not the Observer
+fault handler is a separate field cap at a reserved slot, not the Observer
 handle holder.
 
 A duplicate-control right (Zircon's ZX_RIGHT_DUPLICATE model) can be added later
@@ -1335,9 +1344,9 @@ message content, inspect() syscall shape, sender-side syscall encoding (which
 registers carry what — A2 implementation detail), send-right gating of cap
 transfer (Grant right), IPC fast-path conditions.
 
-- **Rests on:** D13 (queued endpoints — message is what the queue holds; ~48
-  byte per-slot estimate anchors the size), D16 (reply cap mechanism — the
-  kernel creates the reply cap, motivating the dedicated field), D17 (badge is
+- **Rests on:** D13 (queued fields — message is what the queue holds; ~48 byte
+  per-slot estimate anchors the size), D16 (reply cap mechanism — the kernel
+  creates the reply cap, motivating the dedicated field), D17 (badge is
   kernel-injected — motivates badge as a separate field outside data words), D8
   (flat cap table with typed entries — cap transfer is structurally distinct
   from data copying; motivates dedicated cap fields), D12 (fault delegation —
@@ -1348,7 +1357,7 @@ transfer (Grant right), IPC fast-path conditions.
   (capability-addressed memory — bulk data through shared Spaces, not
   in-message; messages are control plane only), D7 (split model — fault message
   is IPC notification; inspect() is typed kernel operation; label is
-  pass-through, kernel doesn't dispatch on it), D15 (unidirectional endpoints —
+  pass-through, kernel doesn't dispatch on it), D15 (unidirectional fields —
   message flows one direction; badge identifies sender), D24 (cap-mapping
   invariant — ownership-transfer IPC dissolved; message format independent),
   `design/research/ownership-transfer-ipc.md` (message format survey across
@@ -1419,12 +1428,12 @@ review whether the shape fits what actually needs to be captured. Adjust if not.
 
 ### D29 — Time is a capability-held kernel object type
 
-Time is a kernel object type designated by capabilities, joining Space,
-endpoint, and Observer as the fourth type. Time capabilities are regular entries
-in the Observer's D8 flat table (D30 settles multi-Time, so the D21
-reserved-slot pattern does not apply — Time caps use regular slots like Space
-caps). Time objects represent claims to scheduling capacity (D31 revised the
-vocabulary: abstract, not per-core; core assignment is kernel-internal).
+Time is a kernel object type designated by capabilities, joining Space, field,
+and Observer as the fourth type. Time capabilities are regular entries in the
+Observer's D8 flat table (D30 settles multi-Time, so the D21 reserved-slot
+pattern does not apply — Time caps use regular slots like Space caps). Time
+objects represent claims to scheduling capacity (D31 revised the vocabulary:
+abstract, not per-core; core assignment is kernel-internal).
 
 Three convergent paths: (1) D4 — Time is "a claim to a portion of a specific
 logical core's scheduling time," a bounded resource. D4 requires capability
@@ -1525,8 +1534,8 @@ objects (scheduling capacity not yet granted). The kernel's internal pools are
 Space and Time objects subject to the same split invariants — the kernel cannot
 over-allocate.
 
-Structural objects (Endpoints, Observers) are created by presenting a Space cap
-to back them. The kernel allocates from that Space and returns a cap to the new
+Structural objects (Fields, Observers) are created by presenting a Space cap to
+back them. The kernel allocates from that Space and returns a cap to the new
 object. The Space shrinks by the allocation cost. Conservation holds: physical
 bytes change purpose, not quantity. A "create" right in the Space rights mask
 (D8) distinguishes creation authority from memory access.
@@ -1538,7 +1547,7 @@ lives in userspace pagers). For page faults on initial memory: cannot occur
 terminate.
 
 At boot, the kernel creates the root Observer with minimal resources: initial
-Space(s) (fully backed), initial Time (enough to run), interrupt endpoint (D22
+Space(s) (fully backed), initial Time (enough to run), interrupt field (D22
 receive cap), and fault handler = kernel (D21 reserved slot). Post-boot, the
 root Observer acquires additional resources through the normal pager-chain
 mechanism. No special boot protocol.
@@ -1586,7 +1595,7 @@ creation API config parameters, Time parameters, Time clonability.
   (resource request is a typed kernel syscall), D8 (Space-backed creation —
   typed-memory-backing pattern extended; "create" right in rights mask), D26 +
   D24 (initial Spaces fully backed — root Observer page faults dissolved), D22
-  (interrupt endpoint at boot — same distribution mechanism), A4 (kernel goes
+  (interrupt field at boot — same distribution mechanism), A4 (kernel goes
   dormant after boot — all post-boot resource flow requires Observer syscalls),
   A3 (boot creates minimal initial graph — no workload assumptions; real policy
   in userspace pagers), `design/landscape.md` §1.7 (bootstrapping models), §2.2
@@ -1611,7 +1620,7 @@ creation API config parameters, Time parameters, Time clonability.
 ### D32 — Kernel-internal memory accounting: type conversion model
 
 Object creation is type conversion: a Space is consumed entirely and becomes the
-object's functional backing. `create_endpoint(space_cap) → endpoint_cap`;
+object's functional backing. `create_field(space_cap) → field_cap`;
 `create_observer(space_cap, config) → observer_cap`. The Space is gone; the
 object exists. Destruction is the reverse: `destroy(object_cap) → space_cap`.
 The freed pages become a new Space returned to the destroyer. Conservation is
@@ -1654,16 +1663,16 @@ subtree overhead?), merge/join operation (reverse of split).
 - **Rests on:** D8 (typed-memory backing — the Observer pays for its structures
   from its Spaces; unaccounted kernel allocation foreclosed), D31 (kernel holds
   root Space — metadata charged there; pager chain for resource acquisition;
-  type conversion established for Endpoint/Observer creation), D9
-  (kernel-managed memory — kernel handles physical backing internally;
-  non-contiguous physical pages behind one Space is standard), D26 (per-Space
-  shared subtrees — reference-counted; subtree cost baked into Space at
-  creation), D11 (close on destroy — freed backing returns as Space or to root
-  Space if cap closed), D25 (expose real constraints — visible Space
-  consumption, no hidden overhead in Observer Spaces), D13 (queue memory from
-  creator's Spaces — extended to full type conversion), A4 (synchronous
-  accounting — charge at alloc, refund at dealloc), A5 (kernel absorbs
-  complexity — metadata invisible, accounting kernel-internal).
+  type conversion established for Field/Observer creation), D9 (kernel-managed
+  memory — kernel handles physical backing internally; non-contiguous physical
+  pages behind one Space is standard), D26 (per-Space shared subtrees —
+  reference-counted; subtree cost baked into Space at creation), D11 (close on
+  destroy — freed backing returns as Space or to root Space if cap closed), D25
+  (expose real constraints — visible Space consumption, no hidden overhead in
+  Observer Spaces), D13 (queue memory from creator's Spaces — extended to full
+  type conversion), A4 (synchronous accounting — charge at alloc, refund at
+  dealloc), A5 (kernel absorbs complexity — metadata invisible, accounting
+  kernel-internal).
 - **Archive convergence:** Strong. Archive journal 013:
   `open_wormhole → wormhole_handle`, `close_wormhole → space_handle`. Same
   type-conversion model, same conservation argument.
@@ -1678,7 +1687,7 @@ subtree overhead?), merge/join operation (reverse of split).
 
 Object destruction cascades through held capabilities: each cap is closed, and
 objects reaching refcount zero are destroyed too. Only Observers cascade (only
-Observers hold caps; Spaces, Endpoints, Times don't). Single Observer destroy is
+Observers hold caps; Spaces, Fields, Times don't). Single Observer destroy is
 O(N + M): N cap table entries closed, M badge-closure checks. Cascade depth is
 bounded by exclusively-held Observer chains.
 
@@ -1714,7 +1723,7 @@ shootdown batching (optimization, deferred), Observer "extract" operation
   mechanism; dead-handle semantics ensure no visible intermediate state; ABA
   tags protect reused slots), D17 (badge-closure — up to M checks per Observer
   destroy; T5 tension accepted), D18 (overflow — badge-closure dropped on full
-  queue; deferred faults cleaned up on endpoint destroy), D32 (type conversion —
+  queue; deferred faults cleaned up on field destroy), D32 (type conversion —
   structural backing returned to destroyer; cascade-freed has no caller), D31
   (root Space — cascade-freed backing destination; pager chain for
   re-acquisition), D8 (flat cap table — iteration is O(N); rights mask holds
@@ -1763,11 +1772,10 @@ shootdown batching (optimization, deferred), Observer "extract" operation
   - ABA slot tag). D17 settles badge semantics (minter-assigned, opt-in
     per-badge tracking with closure notifications). D33 settles the destroy
     cascade protocol (preemptible, structural-backing-only return, destroy right
-    in rights mask). Remaining add-ons: endpoint rotation via destroy (D11
-    provides destroy; endpoint lifecycle needed); generation-as-revocation (O(1)
-    mass invalidation; alternative is endpoint rotation). Still deferred: CDT
-    (selective revocation of a subtree); strong vs. weak cross-core
-    prompt-effect policy.
+    in rights mask). Remaining add-ons: field rotation via destroy (D11 provides
+    destroy; field lifecycle needed); generation-as-revocation (O(1) mass
+    invalidation; alternative is field rotation). Still deferred: CDT (selective
+    revocation of a subtree); strong vs. weak cross-core prompt-effect policy.
 - **Observer minimum schema.** D6 settles that an Observer is a single execution
   unit. D14 settles that Observer is a capability-held kernel object type. D20
   settles per-Observer fault handler. D21 settles the handler as a cap-table
@@ -1789,8 +1797,8 @@ shootdown batching (optimization, deferred), Observer "extract" operation
 - **Observer creation API shape.** D14 settles Observer as capability-held but
   not the creation interface. D31 settles that creation presents a Space cap
   (kernel allocates Observer struct + cap table from that Space). Minimum
-  inputs: Space cap with create right (D31), fault handler endpoint + badge
-  (D12, D20). Time acquired post-creation through pager chain (D31) rather than
+  inputs: Space cap with create right (D31), fault handler field + badge (D12,
+  D20). Time acquired post-creation through pager chain (D31) rather than
   provided at creation. Create-then-configure (seL4 — inert Observer, configured
   via cap ops, started separately) vs. all-params-upfront (archive — one
   syscall). Open: initial PC/SP, initial capabilities, create vs. start as
@@ -1849,18 +1857,18 @@ shootdown batching (optimization, deferred), Observer "extract" operation
   capability tables, or is per-Observer authority (with explicit capability
   transfer) sufficient?
 - ~~**Interrupt model (device interrupts, not exceptions).**~~ Settled by D22:
-  delegation to userspace driver Observers through endpoints. No separate IRQ
-  object type — the interrupt namespace maps onto the endpoint namespace. The
-  kernel routes hardware interrupts to endpoints; authority = receive cap. Ack
-  via D16 send-once cap in each interrupt message. Split/combine endpoint
-  operations for IRQ range delegation. Preemption timer and IPIs excluded
+  delegation to userspace driver Observers through fields. No separate IRQ
+  object type — the interrupt namespace maps onto the field namespace. The
+  kernel routes hardware interrupts to fields; authority = receive cap. Ack via
+  D16 send-once cap in each interrupt message. Split/combine field operations
+  for IRQ range delegation. Preemption timer and IPIs excluded
   (kernel-internal).
-- **Endpoint split semantics.** D22 introduces split-by-IRQ-range: create a new
-  endpoint, move IRQ routes to it. Open: does the parent endpoint retain a
-  reference for automatic return on destroy (crash recovery)? Does split
-  generalize to badge-range partitioning for IPC sources?
-- **Endpoint combine semantics.** D22 introduces combine: merge N endpoints into
-  one. Open: what happens to existing send caps on the originals? Transparent
+- **Field split semantics.** D22 introduces split-by-IRQ-range: create a new
+  field, move IRQ routes to it. Open: does the parent field retain a reference
+  for automatic return on destroy (crash recovery)? Does split generalize to
+  badge-range partitioning for IPC sources?
+- **Field combine semantics.** D22 introduces combine: merge N fields into one.
+  Open: what happens to existing send caps on the originals? Transparent
   forwarding, dead handles (D11), or explicit migration?
 - **Interrupt priority and routing.** D22 defers both. GICv3 8-bit priority:
   kernel-managed vs. exposed. SPI routing: kernel-managed vs. exposed. Both are
@@ -1875,7 +1883,7 @@ shootdown batching (optimization, deferred), Observer "extract" operation
   rounded (byte values accepted, kernel rounds, PAGE_SIZE queryable). One level
   down from D25.
 - ~~**Fault handler attachment.**~~ Settled by D20: per-Observer. Each Observer
-  stores its own fault handler endpoint reference and badge.
+  stores its own fault handler field reference and badge.
 - **Pager unavailability protocol.** What happens when a pager Observer is
   destroyed, blocked, or unresponsive while an Observer is faulting? D31 commits
   to fault handler chains (resource escalation requires handler → handler's
@@ -1895,31 +1903,30 @@ shootdown batching (optimization, deferred), Observer "extract" operation
   memory operations (provide physical backing for the faulting Space) before
   calling resume()? The sequence shapes the pager's syscall pattern.
 - **D7 classification of fault traffic.** D12 says fault notifications go to
-  pager Observers. D13 says all information delivery uses queued endpoints.
-  Fault delivery is through normal IPC endpoints (kernel-as-sender). D18 settles
-  the overflow case (deferred via pending list). Remaining: the specific
-  mechanism by which the kernel enqueues fault messages in the normal (non-full)
-  case, and fault message contents.
-- ~~**Endpoint overflow policy.**~~ Settled by D18: error-to-sender, deferred
-  fault delivery for kernel-as-sender. No per-endpoint policy modes.
+  pager Observers. D13 says all information delivery uses queued fields. Fault
+  delivery is through normal IPC fields (kernel-as-sender). D18 settles the
+  overflow case (deferred via pending list). Remaining: the specific mechanism
+  by which the kernel enqueues fault messages in the normal (non-full) case, and
+  fault message contents.
+- ~~**Field overflow policy.**~~ Settled by D18: error-to-sender, deferred fault
+  delivery for kernel-as-sender. No per-field policy modes.
 - ~~**Coalescing / notification mechanism.**~~ Dissolved by D18: no overwrite
   means no cross-source data loss. Coalescing lives in shared memory + signaling
-  (D9 shared Space caps), not in the endpoint mechanism.
-- ~~**Multi-endpoint wait.**~~ Resolved by D19: badge fan-in (D15+D17) covers
-  the common multi-source patterns (clients, faults, timers, replies on one
-  endpoint). Residual cases (structurally distinct endpoints) use
-  thread-per-source. A stateless multi-receive syscall is explicitly not
-  foreclosed — Observer wait-state internals should accommodate N-endpoint
-  blocking for future addition.
+  (D9 shared Space caps), not in the field mechanism.
+- ~~**Multi-field wait.**~~ Resolved by D19: badge fan-in (D15+D17) covers the
+  common multi-source patterns (clients, faults, timers, replies on one field).
+  Residual cases (structurally distinct fields) use thread-per-source. A
+  stateless multi-receive syscall is explicitly not foreclosed — Observer
+  wait-state internals should accommodate N-field blocking for future addition.
 - **Badge downstream details.** D17 settles badge semantics (minter-assigned,
   mint right, opt-in per-badge tracking). Remaining: badge size (implementation
   detail, 64-bit default), send-once exemption encoding (consumed-by-use vs.
   closed-without-use — deferred with D16's send-once right encoding), badge on
   D16 kernel-created send-once caps (Call() badge assignment), max-badge-count /
-  capacity semantics for tracked endpoints, badge-closure message format.
+  capacity semantics for tracked fields, badge-closure message format.
   (Badge-closure × overflow: resolved by D18 — dropped on full queue. Per-badge
-  tracking × coalescing: dissolved by D18 — coalescing is not an endpoint
-  mechanism; per-badge map serves tracking only.)
+  tracking × coalescing: dissolved by D18 — coalescing is not a field mechanism;
+  per-badge map serves tracking only.)
 - ~~**Fault handler representation.**~~ Settled by D21: cap-table entry. The
   handler is a regular capability in the Observer's D8 flat table at a
   kernel-reserved slot index. D11 destroy-invalidation, D17 badge-closure, and
@@ -2031,7 +2038,7 @@ shootdown batching (optimization, deferred), Observer "extract" operation
   by A5; kernel-internal foreclosed by A4+A3; hybrid boundary is
   workload-dependent policy (A3); archive convergence on full delegation.
 - `013-ipc-model.md` — reasoning for D13: sync-only foreclosed by A3+D12; queued
-  endpoints with direct-switch fast path subsume both sync and async patterns;
+  fields with direct-switch fast path subsume both sync and async patterns;
   archive convergence on same model via independent paths (Time transfer,
   message unification); coalescing tension documented; tentative pending
   downstream cluster (overflow, coalescing, notification, multi-wait, message
@@ -2042,18 +2049,18 @@ shootdown batching (optimization, deferred), Observer "extract" operation
   settles fault resume as resume(observer_handle) typed syscall; six downstream
   questions opened (creation API, rights, clonability, suspend, fault handler
   attachment, Time reclamation).
-- `015-endpoint-shape.md` — reasoning for D15: three convergent paths (D8+D11
+- `015-field-shape.md` — reasoning for D15: three convergent paths (D8+D11
   structural consistency, D12+D13 many-to-one composition, A3+capability
   topology) settle unidirectional many-to-many with send/receive rights;
   bidirectional (Zircon) rejected for structural exceptions to D8+D11 and
   aggregation requirement weakening D13; QNX constrained model dominated; peer
   disconnection gap addressable via badge-closure notifications (deferred to
   badge semantics).
-- `016-reply-cap-mechanism.md` — reasoning for D16: pre-allocated reply endpoint
-  (regular endpoint) with send-once cap; D14 decouples fault resume from IPC
-  reply, removing archive's unification argument; send-once is general-purpose
+- `016-reply-cap-mechanism.md` — reasoning for D16: pre-allocated reply field
+  (regular field) with send-once cap; D14 decouples fault resume from IPC reply,
+  removing archive's unification argument; send-once is general-purpose
   use-limited attenuation (Mach precedent), not reply-specific; dedicated Reply
-  type rejected (optimization achievable behind endpoint interface); archive
+  type rejected (optimization achievable behind field interface); archive
   convergence on same object model, refined with send-once.
 - `017-badge-semantics.md` — reasoning for D17: D15's many-to-one patterns
   require sender identification; minter-assigned because identification (key
@@ -2061,21 +2068,21 @@ shootdown batching (optimization, deferred), Observer "extract" operation
   independent right in D8's rights mask (D4 consistency, resource alignment);
   opt-in per-badge lifecycle tracking resolves A3/A4 tension (not all workloads
   need it, but those that do should not fall back to polling); five tensions
-  accepted for tracked endpoints; archive convergence on representation and
+  accepted for tracked fields; archive convergence on representation and
   assignment, mint right and lifecycle tracking are new.
-- `018-endpoint-overflow-policy.md` — reasoning for D18: workload decomposition
+- `018-field-overflow-policy.md` — reasoning for D18: workload decomposition
   shows only error-to-sender is irreducible; coalescing is reducible to shared
   memory + signaling (landscape §3.2 standard pattern); D13 coalescing tension
   dissolves (no overwrite = no cross-source data loss); kernel-as-sender (D12)
   fault delivery via deferred pending list (intrusive linked list through
   Observer objects, zero allocation); badge-closure dropped on full queue
   (receiver discovers staleness lazily); archive convergence on error-to-sender.
-- `019-multi-endpoint-wait.md` — resolves D13 trigger #3: badge fan-in (D15+D17)
+- `019-multi-field-wait.md` — resolves D13 trigger #3: badge fan-in (D15+D17)
   covers common multi-source patterns (clients, faults, timers, replies
-  consolidated onto one endpoint); four mechanisms evaluated (no primitive, port
-  set, multi-receive, endpoint binding); no kernel primitive needed now;
+  consolidated onto one field); four mechanisms evaluated (no primitive, port
+  set, multi-receive, field binding); no kernel primitive needed now;
   multi-receive syscall explicitly not foreclosed; Observer wait-state should
-  accommodate N-endpoint blocking for future addition.
+  accommodate N-field blocking for future addition.
 - `020-fault-handler-attachment.md` — reasoning for D20: five tensions with
   per-address-space (D6 grouping, D4 authority coupling, D17 badge-closure, D11
   cascade, D1 hot path) all favor per-Observer; per-both rejected (composes with
@@ -2091,12 +2098,12 @@ shootdown batching (optimization, deferred), Observer "extract" operation
   archive divergence explained by absence of D17 in archive's chain.
 - `022-interrupt-model.md` — reasoning for D22: three convergent paths (A4 no
   background processing, A3 no single policy, A5 dispatch < policy interface)
-  parallel D12 exactly; no separate IRQ object type — interrupts are endpoint
+  parallel D12 exactly; no separate IRQ object type — interrupts are field
   traffic; D13 commits delivery, D16 provides ack via send-once, D17 provides
-  badge identification; endpoint split/combine for IRQ range delegation;
-  derivation trail: IRQControl factory → IRQ objects → endpoints-only, each
-  revision eliminating a proposed type by applying D4/D13/D16 more thoroughly;
-  every identified downside traces to a parent decision; archive convergence on
+  badge identification; field split/combine for IRQ range delegation; derivation
+  trail: IRQControl factory → IRQ objects → fields-only, each revision
+  eliminating a proposed type by applying D4/D13/D16 more thoroughly; every
+  identified downside traces to a parent decision; archive convergence on
   unification principle ("all information delivery is one mechanism").
 - `023-research-implications.md` — analysis of 2022–2026 bleeding-edge OS
   research against settled decisions. Not a derivation. Identifies: framekernel
@@ -2179,7 +2186,7 @@ shootdown batching (optimization, deferred), Observer "extract" operation
   vocabulary revision. Kernel retains resource pools (root Space, per-core root
   Time), creates root Observer with minimal resources, acts as root pager.
   Resource requests routed through D12 fault mechanism. Structural objects
-  (Endpoints, Observers) created from Space caps. Factory caps rejected (D4
+  (Fields, Observers) created from Space caps. Factory caps rejected (D4
   indirection). Split-model-with-omnipotent-root rejected (security — god object
   at EL0). Time revised to abstract scheduling capacity (core assignment
   kernel-internal, A5 parallel with D9/D26). Strong archive convergence: journal

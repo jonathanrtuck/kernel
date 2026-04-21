@@ -110,7 +110,7 @@ This is D12's pattern applied one level up:
 - Resource request: Observer syscall → kernel routes to pager → pager resolves →
   kernel resumes.
 
-The pager receives both as messages on its fault handler endpoint. The message
+The pager receives both as messages on its fault handler field. The message
 carries a fault type distinguishing page faults from resource requests.
 
 D8 already describes this exact pattern for cap table growth: "When the table is
@@ -120,19 +120,19 @@ mechanism generalizes D8's existing pattern to all resource acquisition.
 
 ### Structural object creation from Space
 
-Endpoints and Observers are structural objects backed by Space. Creating them
+Fields and Observers are structural objects backed by Space. Creating them
 requires presenting a Space cap — the kernel allocates from that Space and
 returns a cap to the new object. The Space shrinks by the allocation cost.
 Conservation holds: physical bytes changed purpose, not quantity.
 
-- `create_endpoint(space_cap, queue_size) → endpoint_cap`
+- `create_field(space_cap, queue_size) → field_cap`
 - `create_observer(space_cap, config) → observer_cap`
 
 The Space cap IS the creation authority (D4: holding a cap IS the authority). A
 "create" right in the Space rights mask (D8) controls which Space caps authorize
 creation vs. read/write-only access.
 
-Destruction reverses creation: destroying an Endpoint or Observer returns the
+Destruction reverses creation: destroying a Field or Observer returns the
 physical backing to the Space it came from.
 
 ### Root fault handling
@@ -164,7 +164,7 @@ At boot, the kernel:
 4. Creates the root Observer with minimal resources:
    - Initial Space(s) — code + data + stack, fully physically backed.
    - Initial Time — enough scheduling capacity to run on BSP core.
-   - Interrupt endpoint (D22) — receive cap for device interrupt delivery.
+   - Interrupt field (D22) — receive cap for device interrupt delivery.
    - Fault handler = kernel itself (reserved cap-table slot per D21).
 5. Resumes the root Observer. Goes dormant (A4 — purely reactive).
 
@@ -240,7 +240,7 @@ this step.
 - **Resource request fault message format.** What information does the request
   message carry? Requested resource type, size, Observer handle. Parallels page
   fault message format (D28 downstream).
-- **Space "create" right.** Whether Endpoint/Observer creation from a Space cap
+- **Space "create" right.** Whether Field/Observer creation from a Space cap
   requires a specific right in the Space rights mask (D8). Likely yes for D4
   cleanness — distinguishes "memory access" from "creation authority."
 - **Pager unavailability in the chain.** The resource acquisition model commits
@@ -255,7 +255,7 @@ this step.
 - **Time clonability.** D23 uniformity suggests clonable. Unchanged.
 - **Observer creation API shape.** D31 settles that creation presents a Space
   cap (create_observer(space_cap, config)). The specific config parameters
-  (initial PC/SP, fault handler endpoint + badge, initial Time cap, initial
+  (initial PC/SP, fault handler field + badge, initial Time cap, initial
   capabilities) are downstream.
 - **Kernel-internal memory accounting.** The kernel's own structures (page
   tables, Observer structs during boot) are allocated from the kernel's root

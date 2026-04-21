@@ -10,7 +10,7 @@
 pub mod arch;
 pub mod capability;
 pub mod config;
-pub mod endpoint;
+pub mod field;
 pub mod firmware;
 pub mod observer;
 #[cfg(target_os = "none")]

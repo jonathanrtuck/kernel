@@ -1,16 +1,16 @@
-# Endpoint Overflow Policy and Multi-Source Wait
+# Field Overflow Policy and Multi-Source Wait
 
 ## Question
 
-When a queued IPC endpoint is full, what happens? And how do systems allow a
-single thread to wait on multiple endpoints simultaneously? These two questions
-are entangled: overflow policy determines what "full" means and what happens to
-the sender; multi-wait policy determines whether a separate mechanism is
-required to aggregate signals from multiple sources.
+When a queued IPC field is full, what happens? And how do systems allow a single
+thread to wait on multiple fields simultaneously? These two questions are
+entangled: overflow policy determines what "full" means and what happens to the
+sender; multi-wait policy determines whether a separate mechanism is required to
+aggregate signals from multiple sources.
 
 This document also covers the adjacent coalescing question: whether a
-bounded-queue endpoint with capacity-1 and overwrite-oldest semantics can serve
-as a coalescing notification primitive without a second kernel object.
+bounded-queue field with capacity-1 and overwrite-oldest semantics can serve as
+a coalescing notification primitive without a second kernel object.
 
 ---
 

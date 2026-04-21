@@ -284,7 +284,7 @@ pager more semantic information than the current model.
 - **Vocabulary revision.** "Coordinate System" may become an implementation
   concept (page table configuration) or be retired. The substance/framework
   split in the vocabulary simplifies if all user-visible kernel objects are
-  substance-shaped (Space, Time, Observer, Endpoint).
+  substance-shaped (Space, Time, Observer, Field).
 
 ---
 

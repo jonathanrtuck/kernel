@@ -1,6 +1,6 @@
 # IPC Message Format — 2026-04-20
 
-**Starting point:** D13 (queued endpoints) listed message format as a downstream
+**Starting point:** D13 (queued fields) listed message format as a downstream
 open question. Five journal entries (013, 016, 017, 023, 025) reference it; none
 derive it. D25 (cap-mapping invariant) dissolved the last coupling concern
 (ownership-transfer IPC), confirming message format independence. All parent
@@ -57,8 +57,8 @@ at most).
 
 **Queue memory bounds.** D13 estimates ~48 bytes per queued message. A 4-word
 message with header, badge, cap slot, reply cap, and queue linkage fits within
-this budget. Larger formats increase per-slot cost for every endpoint in the
-system — cold-path waste that compounds.
+this budget. Larger formats increase per-slot cost for every field in the system
+— cold-path waste that compounds.
 
 **Rejected: variable-length (seL4 model).** Length validation on every message,
 two copy paths (register vs. memory spill), variable queue slot sizes. The
@@ -187,7 +187,7 @@ independent reasoning:
    archive lacked D8's clarity when it chose cap_mask.
 
 2. **Reply cap placement: payload slot (archive) vs. dedicated field
-   (current).** The archive's RPC request uses 2 data + 2 caps (reply endpoint
+   (current).** The archive's RPC request uses 2 data + 2 caps (reply field
    - Time capability) from the 4 shared slots. This derivation gives the reply
      cap its own kernel-injected field. Explanation: D16 (settled after the
      archive) establishes that the kernel creates the reply cap, making it
@@ -249,8 +249,8 @@ load-bearing (variable-size is also per-syscall).
 - **Sender-side syscall encoding.** How the send() and Call() syscalls encode
   the message (which registers carry what) is an A2 implementation detail behind
   this format.
-- **Send-right gating of cap transfer.** Whether the endpoint's rights (D15) or
-  a separate Grant right gates cap slot usage. seL4 uses a Grant right; this
+- **Send-right gating of cap transfer.** Whether the field's rights (D15) or a
+  separate Grant right gates cap slot usage. seL4 uses a Grant right; this
   kernel may or may not need one.
 - **IPC fast-path conditions.** Whether the fast path handles 0-cap messages
   only or also covers the 1-cap case. Implementation optimization.

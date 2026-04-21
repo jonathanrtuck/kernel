@@ -13,13 +13,13 @@ visibility.
 
 ## The question
 
-Each Observer stores a fault handler endpoint reference and a badge (D20). Two
+Each Observer stores a fault handler field reference and a badge (D20). Two
 representation options:
 
 - **Cap-table entry:** The handler is a regular capability in the Observer's D8
   flat table at a kernel-known slot index. Entry format matches D8: (object_ptr,
   rights_mask, badge, slot_tag).
-- **Kernel-internal field:** The handler is a (endpoint_ptr, badge) tuple stored
+- **Kernel-internal field:** The handler is a (field_ptr, badge) tuple stored
   directly in the Observer struct, outside the capability table.
 
 ## Systematic pass — interactions found
@@ -29,7 +29,7 @@ structure; axioms don't push either way.
 
 ### D11 — Destroy invalidation (strongest structural argument)
 
-When the fault handler endpoint is destroyed via D11 authoritative destroy:
+When the fault handler field is destroyed via D11 authoritative destroy:
 
 **Cap-table entry:** D11's destroy mechanism walks capability tables to find and
 invalidate all capabilities pointing to the destroyed object. The fault handler
@@ -39,8 +39,8 @@ unavailable" case. Zero special-case logic.
 
 **Kernel-internal:** The handler reference is invisible to D11's capability
 table walk. The kernel must maintain a separate tracking structure —
-back-pointers from each endpoint to all Observers using it as a handler — so
-that endpoint destroy can find and nullify those references. This is a parallel
+back-pointers from each field to all Observers using it as a handler — so that
+field destroy can find and nullify those references. This is a parallel
 revocation system for a single use case. Alternatively, deferred invalidation
 with generation-number machinery — but D11's slot tag already provides this for
 cap-table entries.
@@ -54,12 +54,12 @@ this essential? No — the cap-table entry eliminates it).
 ### D17 — Badge-closure lifecycle visibility
 
 **Cap-table entry:** Observer destroy closes all caps in the Observer's table.
-The fault handler entry is closed. If the handler endpoint has opt-in per-badge
+The fault handler entry is closed. If the handler field has opt-in per-badge
 tracking, this triggers a badge-closure notification. The mechanism is generic —
 cap-close is the universal trigger. No Observer-destroy-specific logic.
 
 **Kernel-internal:** Observer destroy must explicitly check whether the handler
-endpoint has per-badge tracking and invoke the badge-closure mechanism manually.
+field has per-badge tracking and invoke the badge-closure mechanism manually.
 This couples Observer-destroy code to the badge-closure subsystem. D17 journal
 identified this: "no equivalent substitute" for the cap-table entry's automatic
 lifecycle visibility.
@@ -67,12 +67,12 @@ lifecycle visibility.
 ### D8 — ABA protection
 
 **Cap-table entry:** D11's generational slot tag prevents stale-handle aliasing.
-If the handler endpoint is destroyed and a new endpoint is created at the same
-memory address, the old cap-table entry is already invalidated.
+If the handler field is destroyed and a new field is created at the same memory
+address, the old cap-table entry is already invalidated.
 
-**Kernel-internal:** A direct pointer to the endpoint. If the endpoint is
-destroyed and its memory reused, the pointer becomes dangling. Prevention
-requires the same tracking structure as D11 above.
+**Kernel-internal:** A direct pointer to the field. If the field is destroyed
+and its memory reused, the pointer becomes dangling. Prevention requires the
+same tracking structure as D11 above.
 
 ### D4 — Capability-based authority
 
@@ -83,7 +83,7 @@ it's a special case — a kernel object reference outside the system that D4 + D
 - D11 provide.
 
 Weakened by the fact that the kernel doesn't check rights on the fault path
-(kernel-as-sender reads the endpoint pointer directly). Rights matter at
+(kernel-as-sender reads the field pointer directly). Rights matter at
 configuration time (set_fault_handler), not at use time. But the handler still
 participates in D11's revocation and D17's lifecycle mechanisms, even though
 rights aren't exercised on the fault path.
@@ -94,7 +94,7 @@ Cap-table entry adds one dependent memory access on the fault path: Observer
 struct → cap table base pointer → cap_table[index]. If the cap table is in a
 different cache line (likely — separate allocation), one additional L1/L2 miss.
 
-However, the fault path continues with IPC message delivery through the endpoint
+However, the fault path continues with IPC message delivery through the field
 queue (~400 cycles on ARM64), which is several more memory accesses. The handler
 lookup is a fraction of total fault-path cost. D1's structural concern (no
 cross-core shared state on the hot path) is satisfied by both options — both are
@@ -108,8 +108,8 @@ Tension is real but marginal.
 
 **The fault handler reference is a cap-table entry.** A regular capability in
 the Observer's D8 flat table at a kernel-known slot index. The entry carries
-send rights to the handler endpoint, the per-Observer badge (D20), and a slot
-tag (D11).
+send rights to the handler field, the per-Observer badge (D20), and a slot tag
+(D11).
 
 The cap-table entry model requires zero new infrastructure:
 
@@ -120,7 +120,7 @@ The cap-table entry model requires zero new infrastructure:
 
 The kernel-internal model requires:
 
-- A parallel tracking structure for endpoint-destroy invalidation
+- A parallel tracking structure for field-destroy invalidation
 - Explicit coupling between Observer-destroy and badge-closure
 - Dangling-pointer prevention machinery
 
@@ -148,8 +148,8 @@ field. The kernel knows the index at compile time.
   not include a fault handler field — only the cap table pointer.
 
 - **Observer creation API:** Creating an Observer must install a send cap to the
-  handler endpoint (with the designated badge) at the reserved slot index. This
-  is a cap-table write, not a separate struct-field initialization.
+  handler field (with the designated badge) at the reserved slot index. This is
+  a cap-table write, not a separate struct-field initialization.
 
 - **set_fault_handler() syscall:** If the Observer rights model includes fault
   handler mutability, the operation replaces the cap-table entry at the reserved
@@ -207,7 +207,7 @@ operating as a strategy, not A5 operating as a design input.
 - **Reserved slot index value.** Implementation detail — slot 0 is natural but
   arbitrary. Resolve during implementation.
 - **Rights on the handler cap.** Likely: send right only. The kernel uses the
-  endpoint pointer directly (kernel-as-sender), so rights are checked at
+  field pointer directly (kernel-as-sender), so rights are checked at
   configuration time, not fault time. Whether the handler cap should carry
   additional rights (receive? mint?) depends on the Observer rights model.
 - **Address space binding representation.** Parallel question opened by this
@@ -215,6 +215,6 @@ operating as a strategy, not A5 operating as a design input.
   frequency (every context switch) may justify a different answer or a
   cache-in-struct optimization.
 - **Pager unavailability.** What happens when the kernel reads the handler cap
-  and finds it dead (endpoint destroyed)? This is the "pager unavailable"
-  protocol — still open (D12 downstream). D21 makes the detection mechanism
-  clear: the cap-table entry is dead (D11 invalidated).
+  and finds it dead (field destroyed)? This is the "pager unavailable" protocol
+  — still open (D12 downstream). D21 makes the detection mechanism clear: the
+  cap-table entry is dead (D11 invalidated).

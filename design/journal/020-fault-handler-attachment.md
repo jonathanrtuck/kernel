@@ -18,7 +18,7 @@ Observer override)?
 
 This is a two-facet question:
 
-1. **Attachment point** — which kernel object stores the fault handler endpoint
+1. **Attachment point** — which kernel object stores the fault handler field
    reference?
 2. **Representation** — is the reference a cap-table entry or a kernel-internal
    field?
@@ -32,9 +32,9 @@ connected sub-question that the attachment decision shapes.
 
 Three things follow mechanically before the attachment-specific analysis:
 
-**1. Badge must be per-Observer regardless of endpoint attachment.** D17 derived
+**1. Badge must be per-Observer regardless of field attachment.** D17 derived
 constraint #4: the kernel synthesizes fault messages without a sender cap, so a
-badge must be stored alongside the handler reference. If the endpoint is
+badge must be stored alongside the handler reference. If the field is
 per-address-space, the badge must still be per-Observer — otherwise the pager
 can't distinguish which of N Observers in a shared address space faulted. A
 shared badge makes the badge mechanism void for fault traffic.
@@ -79,7 +79,7 @@ independently delegatable authorities.
 
 **T3: D17 badge-closure lifecycle visibility.** D17's opt-in per-badge tracking
 enables badge-closure notifications: when the last send cap with badge B to
-endpoint E is closed, the kernel enqueues a closure notification. If the fault
+field E is closed, the kernel enqueues a closure notification. If the fault
 handler reference is a per-Observer cap-table entry, Observer destruction closes
 the cap, triggering badge-closure. The pager receives "child with badge B is
 gone" for free.
@@ -89,20 +89,20 @@ space's handler cap. Badge-closure doesn't provide per-Observer lifecycle
 visibility. The pager must learn about child destruction through a separate
 mechanism.
 
-**T4: D11 destroy cascade.** If the handler endpoint is per-address-space and
-the endpoint is destroyed (D11 authoritative destroy), all Observers in the
-address space simultaneously lose their handler. D12's invariant ("every
-Observer has a handler") is violated for all of them at once. The kernel must
-handle this cascade — kill the Observers? Leave them in an invalid state?
+**T4: D11 destroy cascade.** If the handler field is per-address-space and the
+field is destroyed (D11 authoritative destroy), all Observers in the address
+space simultaneously lose their handler. D12's invariant ("every Observer has a
+handler") is violated for all of them at once. The kernel must handle this
+cascade — kill the Observers? Leave them in an invalid state?
 
 Per-Observer: each handler is independent. Destroying one Observer's handler
 doesn't affect others.
 
-**T5: D1 hot-path cost.** Per-Observer reads (endpoint, badge) from the Observer
+**T5: D1 hot-path cost.** Per-Observer reads (field, badge) from the Observer
 struct — one cache line, already in cache from register save. Per-address-space
-reads the endpoint from the address space struct (one extra pointer chase) and
-the badge from the Observer struct (split across two objects). Small cost, but
-D1 says hot-path simplicity matters.
+reads the field from the address space struct (one extra pointer chase) and the
+badge from the Observer struct (split across two objects). Small cost, but D1
+says hot-path simplicity matters.
 
 ---
 
@@ -130,7 +130,7 @@ Observer can always override. But:
 ## Foreclosed alternatives
 
 **Pure per-address-space with shared badge** is functionally broken. If both the
-endpoint AND badge are per-address-space, the pager can't distinguish which
+field AND badge are per-address-space, the pager can't distinguish which
 Observer faulted via badge. The Observer handle (D14) in the fault message
 provides identification, but the badge mechanism becomes semantically void for
 fault traffic. Contradicts D17's structural requirement.
@@ -170,14 +170,14 @@ process manager can iterate.
 ## The decision
 
 **The fault handler attaches to the Observer.** Each Observer stores a fault
-handler endpoint reference and a badge. On fault, the kernel reads both from the
+handler field reference and a badge. On fault, the kernel reads both from the
 faulting Observer's struct and delivers a fault notification to the handler
-endpoint with the stored badge, plus the faulting Observer's capability handle
-via cap transfer (D14).
+field with the stored badge, plus the faulting Observer's capability handle via
+cap transfer (D14).
 
-Every Observer creation must supply a fault handler endpoint and badge. The
-kernel rejects creation of an Observer without a handler (D12 invariant enforced
-at creation time).
+Every Observer creation must supply a fault handler field and badge. The kernel
+rejects creation of an Observer without a handler (D12 invariant enforced at
+creation time).
 
 ---
 
@@ -204,8 +204,8 @@ Observer struct, outside the cap table):
 - Requires explicit kernel cleanup logic on destroy (manual bookkeeping that the
   capability system handles automatically for cap-table entries).
 - The handler exists outside the capability system — no rights mask, no ABA tag.
-  If the handler endpoint is destroyed (D11), the kernel must manually
-  invalidate this reference.
+  If the handler field is destroyed (D11), the kernel must manually invalidate
+  this reference.
 - Slightly faster fault dispatch (direct pointer, no table lookup). Doesn't
   consume a cap-table slot.
 
@@ -221,10 +221,10 @@ decision.
 ## Archive convergence
 
 The archive (restart-1) chose per-Context (≡ per-Observer) in journal/012 (badge
-assignment): "Fault path stores `(endpoint_ref, badge)`" per Context. The
-current chain arrives at the same conclusion from independently derived
-foundations (D6, D4, D17, D14 — none of which existed in the archive's chain at
-the time of its fault handler decision).
+assignment): "Fault path stores `(field_ref, badge)`" per Context. The current
+chain arrives at the same conclusion from independently derived foundations (D6,
+D4, D17, D14 — none of which existed in the archive's chain at the time of its
+fault handler decision).
 
 ---
 
@@ -258,7 +258,7 @@ essential complexity pushed to userspace. A userspace library absorbs it.
 
 - **Fault handler mutability.** Can the fault handler be changed after Observer
   creation? Per D14's open "Observer rights model" question, this is a right in
-  the rights mask: set_fault_handler(observer_handle, endpoint_handle, badge)
+  the rights mask: set_fault_handler(observer_handle, field_handle, badge)
   requiring appropriate rights. Whether this right exists and who controls it is
   part of the Observer rights derivation.
 

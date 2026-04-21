@@ -1,11 +1,11 @@
-# Endpoint Shape: Directionality, Topology, and Capability Rights
+# Field Shape: Directionality, Topology, and Capability Rights
 
 ## Question
 
-What is the shape of an IPC endpoint? Specifically:
+What is the shape of an IPC field? Specifically:
 
-1. **Directionality** — is the endpoint unidirectional (one designated sender
-   side, one designated receiver side) or bidirectional (both ends can send and
+1. **Directionality** — is the field unidirectional (one designated sender side,
+   one designated receiver side) or bidirectional (both ends can send and
    receive)?
 2. **Topology** — what cardinality constraints exist between senders and
    receivers? (one-to-one, many-to-one, many-to-many)
@@ -13,7 +13,7 @@ What is the shape of an IPC endpoint? Specifically:
    and how are these rights subdivided?
 
 This question arises in the context of IPC object design immediately after
-settling on queued endpoints with a direct-switch fast path.
+settling on queued fields with a direct-switch fast path.
 
 ---
 

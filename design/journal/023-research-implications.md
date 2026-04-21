@@ -66,10 +66,10 @@ boundaries. When a message is sent, ownership of the backing memory transfers to
 the receiver — the type system enforces that the sender can't access it after
 send. Zero-copy falls out as a type-system invariant.
 
-D13 settled queued endpoints with direct-switch fast path. D9 settled
-variable-size kernel-managed memory objects. D8 settled per-Observer flat cap
-tables. Capability transfer already moves designation; extending it to move the
-memory object's backing is a natural extension. The D8 flat table already tracks
+D13 settled queued fields with direct-switch fast path. D9 settled variable-size
+kernel-managed memory objects. D8 settled per-Observer flat cap tables.
+Capability transfer already moves designation; extending it to move the memory
+object's backing is a natural extension. The D8 flat table already tracks
 per-Observer ownership; moving an entry from one table to another maps directly.
 
 **Timing pressure:** the message format is still open. If settled without
@@ -87,9 +87,9 @@ governing all system state. Persist the tree and you've persisted the system.
 
 The kernel is not building persistence. But the conceptual discipline is
 powerful: D4 + D8 + D9 + D10 + D14 + D13 already make capabilities the sole
-designation mechanism for Observers, memory objects, address spaces, and
-endpoints. If this discipline is maintained — every kernel object reachable only
-through the capability graph — structural properties follow:
+designation mechanism for Observers, memory objects, address spaces, and fields.
+If this discipline is maintained — every kernel object reachable only through
+the capability graph — structural properties follow:
 
 - Debugging: walk the graph to see complete system state.
 - Leak detection: anything unreachable through capabilities is reclaimable.
@@ -115,7 +115,7 @@ a specific logical core's scheduling time." Two open questions touch this:
   holder that delegated it.
 
 Making Time a capability-designated kernel object (joining Space, Observer,
-Coordinate System, endpoint) would be consistent with D4's architecture. Not
+Coordinate System, field) would be consistent with D4's architecture. Not
 settled here — but noted as a frame that may dissolve several open questions
 simultaneously.
 
@@ -129,10 +129,10 @@ Google disabled io_uring on Android, ChromeOS, and internal servers after 60% of
 their 2022 bug bounty exploits targeted it. The attack surface of a
 general-purpose async interface is large.
 
-D13's fixed-capacity bounded queues, D18's error-to-sender (no per-endpoint
-policy modes, no kernel-level coalescing), and D13's rejection of the SQ/CQ
-pattern are all structurally simpler than io_uring. The research confirms the
-instinct: simplicity in the IPC mechanism reduces attack surface.
+D13's fixed-capacity bounded queues, D18's error-to-sender (no per-field policy
+modes, no kernel-level coalescing), and D13's rejection of the SQ/CQ pattern are
+all structurally simpler than io_uring. The research confirms the instinct:
+simplicity in the IPC mechanism reduces attack surface.
 
 ### Type-system isolation needs hardware backup → D5
 

@@ -1,12 +1,12 @@
 # 017 — Badge semantics: minter-assigned, mint-right-controlled, opt-in lifecycle tracking
 
 **Date:** 2026-04-18 **Starting point:** D15 settled unidirectional,
-many-to-many endpoints with send/receive rights, and listed badge semantics as
-the first downstream open question: "Per-capability identifier attached by
-kernel to messages. Enables receiver to identify sender source. Encoding,
-assignment, and badge-closure notifications (the peer disconnection answer)."
-D11 had deferred badge-related revocation add-ons jointly with IPC; D13 + D15
-now enable this exploration.
+many-to-many fields with send/receive rights, and listed badge semantics as the
+first downstream open question: "Per-capability identifier attached by kernel to
+messages. Enables receiver to identify sender source. Encoding, assignment, and
+badge-closure notifications (the peer disconnection answer)." D11 had deferred
+badge-related revocation add-ons jointly with IPC; D13 + D15 now enable this
+exploration.
 
 ---
 
@@ -34,10 +34,10 @@ identify which sender sent a message. The only per-sender metadata the kernel
 can attach is per-capability — the capability is the sender's credential. D8's
 flat table entry is the natural location:
 `(object pointer, rights mask, badge, slot tag)`. The badge is on the referrer
-(the cap), not the referent (the endpoint). This follows from the requirement:
-different senders to the same endpoint carry different badges. If badge were on
-the endpoint, all senders would carry the same value — equivalent to the
-endpoint's identity, which the receiver already knows.
+(the cap), not the referent (the field). This follows from the requirement:
+different senders to the same field carry different badges. If badge were on the
+field, all senders would carry the same value — equivalent to the field's
+identity, which the receiver already knows.
 
 **2. Badge delivery is hot-path; badge management is cold-path.** D1 (per-core
 hot path): every send reads the badge from the sender's cap-table entry and
@@ -53,20 +53,20 @@ could change its badge, the receiver's key-into-state model breaks. The kernel
 enforces both: the sender cannot read, choose, or modify the badge at send time.
 
 **4. Fault handler badge is structurally required.** D12 (fault delegation) +
-D13 (all delivery through endpoints): the kernel synthesizes fault messages and
-enqueues them to the handler's endpoint. The IPC path reads badges from the
+D13 (all delivery through fields): the kernel synthesizes fault messages and
+enqueues them to the handler's field. The IPC path reads badges from the
 sender's cap — but the kernel has no cap-table entry for fault delivery. The
-Observer must store a badge alongside its fault handler endpoint reference.
-Whoever installs the handler supplies both. (Note: whether the fault handler
-reference itself is a cap-table entry or a kernel-internal reference is an open
-question — see "What remains open" below. If it is a cap-table entry, the badge
-is simply part of that entry. If it is a kernel-internal reference, the badge is
-a sibling field on the Observer struct.)
+Observer must store a badge alongside its fault handler field reference. Whoever
+installs the handler supplies both. (Note: whether the fault handler reference
+itself is a cap-table entry or a kernel-internal reference is an open question —
+see "What remains open" below. If it is a cap-table entry, the badge is simply
+part of that entry. If it is a kernel-internal reference, the badge is a sibling
+field on the Observer struct.)
 
-**5. Badge-closure notifications, if adopted, must use the endpoint queue.** D13
+**5. Badge-closure notifications, if adopted, must use the field queue.** D13
 commits to one delivery mechanism. Badge-closure notifications are messages to
-the endpoint's receive side. They go through the queue, consuming a slot,
-subject to the same overflow policy as any other message.
+the field's receive side. They go through the queue, consuming a slot, subject
+to the same overflow policy as any other message.
 
 ---
 
@@ -110,7 +110,7 @@ receiver with per-source state needs a translation layer. The badge
 distinguishes but does not identify — the mechanism serves the less-demanding
 use case while imposing overhead on the more-demanding one.
 
-Hybrid combines both but introduces two badge semantics on the same endpoint
+Hybrid combines both but introduces two badge semantics on the same field
 (minter-chosen vs. kernel-chosen). Collision risk between the two namespaces
 requires partitioning or a distinguishing bit. Complexity with no structural
 benefit over minter-assigned alone — minters who want uniqueness can generate
@@ -129,19 +129,19 @@ bits. Badge assignment during clone is a third independent authority — not eve
 holder of a send cap should be able to mint new badged copies.
 
 **Decision: mint is a third independent right in D8's rights mask (send,
-receive, mint).** The endpoint creator controls who gets the mint right. A
-client receives (send) only. A trusted nameserver receives (send, mint). The
-receiver typically holds (send, receive, mint) or at minimum (receive, mint).
+receive, mint).** The field creator controls who gets the mint right. A client
+receives (send) only. A trusted nameserver receives (send, mint). The receiver
+typically holds (send, receive, mint) or at minimum (receive, mint).
 
 This achieves two things:
 
 1. **D4 consistency.** Who can assign badges is capability-mediated, not
    ambient.
 2. **Budget alignment.** Badge tracking (if opt-in per-badge tracking is chosen
-   below) adds per-badge state to the endpoint. The endpoint creator controls
-   who can grow that state by controlling mint-right distribution. The creator
-   accepts the budget consequences of delegation — the same model as queue
-   capacity, where the creator funds the queue and senders fill it.
+   below) adds per-badge state to the field. The field creator controls who can
+   grow that state by controlling mint-right distribution. The creator accepts
+   the budget consequences of delegation — the same model as queue capacity,
+   where the creator funds the queue and senders fill it.
 
 ---
 
@@ -157,27 +157,27 @@ never learns about sender-side close events. Peer disconnection detection falls
 to userspace: timeouts, heartbeats, explicit disconnect messages.
 
 **L2: Per-badge closure notifications (always on).** Kernel tracks a refcount
-per (endpoint, badge) pair. When the last send cap with badge B is closed, the
+per (field, badge) pair. When the last send cap with badge B is closed, the
 kernel enqueues a closure notification.
 
-**L3: Per-endpoint last-sender-closed.** Kernel tracks total send-cap refcount.
+**L3: Per-field last-sender-closed.** Kernel tracks total send-cap refcount.
 Notification fires when all senders are gone.
 
-**L4: Opt-in per-badge tracking.** The endpoint creator specifies at creation
+**L4: Opt-in per-badge tracking.** The field creator specifies at creation
 whether per-badge tracking is enabled.
 
 ### Derivation
 
 **A3 (generic):** Not all workloads need disconnection detection. Stateless
-services, 1:1 endpoints, bulk data transfer — badges serve identification but
+services, 1:1 fields, bulk data transfer — badges serve identification but
 lifecycle tracking adds no value. No single workload pattern justifies forcing
-the cost on all endpoints.
+the cost on all fields.
 
 **A4 (purely reactive):** For workloads that DO need disconnection detection
 (session-oriented servers, fault handlers managing children, resource managers),
 polling-based detection (timeouts, heartbeats) requires periodic work with no
 triggering event — inconsistent with the reactive philosophy. Kernel-side
-event-driven notification, delivered through the endpoint queue (D13), is
+event-driven notification, delivered through the field queue (D13), is
 A4-consistent.
 
 **A5 (applied fractally):** Disconnection detection is the same essential
@@ -193,35 +193,35 @@ reimplement disconnection detection in userspace. The polling-based alternatives
 violate A4's reactive spirit — they require periodic timer-driven work. L1
 leaves D15's peer disconnection gap permanently open.
 
-**L2 rejected:** L2 imposes per-badge tracking on every endpoint, including
-those that don't need it. The per-badge map grows with distinct badge count
-(unbounded under A3), adds per-close overhead, and creates structural tensions:
+**L2 rejected:** L2 imposes per-badge tracking on every field, including those
+that don't need it. The per-badge map grows with distinct badge count (unbounded
+under A3), adds per-close overhead, and creates structural tensions:
 
 - D16 send-once caps are auto-consumed on use. If consumption triggers
   badge-closure, every RPC reply generates a spurious closure notification.
 - D14 Observer destroy closes all held caps, generating a burst of closure
-  notifications across multiple endpoints.
+  notifications across multiple fields.
 - D13 bounded queue: N simultaneous client disconnections = N notifications
   competing with real messages for queue space.
 
 These tensions are manageable (send-once exemption, queue capacity planning) but
-imposed on every endpoint regardless of need.
+imposed on every field regardless of need.
 
 **L3 considered but insufficient:** L3's "all senders gone" signal is useful for
-endpoint cleanup but does not identify which client disconnected. It does not
-solve D15's per-client peer disconnection gap. Minimal cost, minimal benefit.
+field cleanup but does not identify which client disconnected. It does not solve
+D15's per-client peer disconnection gap. Minimal cost, minimal benefit.
 
-**L4 chosen:** The receiver who wants closure notifications opts in at endpoint
+**L4 chosen:** The receiver who wants closure notifications opts in at field
 creation and pays for the per-badge map. Receivers who don't need it pay nothing
-— their endpoints are fixed-size objects with trivial close paths. The mint
-right (above) gives the creator control over who can grow the badge population.
+— their fields are fixed-size objects with trivial close paths. The mint right
+(above) gives the creator control over who can grow the badge population.
 
-**Decision: opt-in per-badge tracking (L4).** Endpoint creation takes a flag (or
+**Decision: opt-in per-badge tracking (L4).** Field creation takes a flag (or
 capacity parameter) specifying whether per-badge tracking is enabled. With
 tracking: per-badge refcount map, closure notifications on last-close. Without
 tracking: no per-badge state, no notifications.
 
-### Tensions accepted (for tracked endpoints)
+### Tensions accepted (for tracked fields)
 
 - **T1 (D16 send-once):** Send-once caps consumed by use must NOT trigger
   badge-closure (redundant — the reply already arrived). Send-once caps closed
@@ -244,7 +244,7 @@ tracking: no per-badge state, no notifications.
 
 **Badges are minter-assigned, per-capability identifiers. A mint right controls
 who can assign badges. Lifecycle visibility is opt-in per-badge tracking at
-endpoint creation.**
+field creation.**
 
 1. **Badge is a per-cap field** in D8's entry:
    `(object pointer, rights mask, badge, slot tag)`. Immutable after clone.
@@ -256,13 +256,13 @@ endpoint creation.**
    requiring receiver-controlled values.
 
 3. **Mint right.** Third independent right in D8's rights mask: send, receive,
-   mint. Controls who can assign badges when cloning. Endpoint creator controls
+   mint. Controls who can assign badges when cloning. Field creator controls
    mint-right distribution.
 
-4. **Opt-in per-badge tracking.** Endpoint creation flag enables per-badge
-   refcount tracking. When enabled: last close of all send caps with badge B
-   triggers a closure notification to the receive side (through the endpoint
-   queue, D13). When disabled: no per-badge state, no notifications.
+4. **Opt-in per-badge tracking.** Field creation flag enables per-badge refcount
+   tracking. When enabled: last close of all send caps with badge B triggers a
+   closure notification to the receive side (through the field queue, D13). When
+   disabled: no per-badge state, no notifications.
 
 5. **Badge size** deferred to implementation (64-bit natural default on ARM64).
 
@@ -275,7 +275,7 @@ journal/012 (badge assignment). The archive settled:
 
 - Minter-assigned, receiver-identifying, per-cap (archive/012)
 - Badge as `(object_ref, rights, badge)` in cap entry (archive/010)
-- Fault path stores `(endpoint_ref, badge)` (archive/012)
+- Fault path stores `(field_ref, badge)` (archive/012)
 
 The current chain arrives at the same conclusions for representation and
 assignment via D15 → identification need → receiver-controlled values →
@@ -301,28 +301,26 @@ pass through A2.
 - **Badge size.** 64-bit default; implementation detail. Resolve during
   implementation.
 - **Send-once exemption.** Consumed-by-use vs. closed-without-use — the kernel
-  must distinguish these for tracked endpoints. Encoding detail deferred with
-  D16's send-once right encoding.
+  must distinguish these for tracked fields. Encoding detail deferred with D16's
+  send-once right encoding.
 - **Badge on D16 kernel-created send-once caps.** Call() creates a send-once cap
-  to the caller's reply endpoint. What badge does the kernel assign? Interacts
-  with whether the caller uses a shared reply endpoint with badge
-  disambiguation.
-- **Max-badge-count / capacity semantics.** For tracked endpoints: pre-allocated
+  to the caller's reply field. What badge does the kernel assign? Interacts with
+  whether the caller uses a shared reply field with badge disambiguation.
+- **Max-badge-count / capacity semantics.** For tracked fields: pre-allocated
   map with creation-time capacity? Fault on overflow (D8 table-full pattern)?
 - **Fault handler representation.** Whether the fault handler reference is a
   cap-table entry or a kernel-internal reference determines whether
   badge-closure covers child Observer destruction. If cap-table entry: child
-  destruction closes the cap, triggering badge-closure on the handler's
-  endpoint. If kernel-internal: badge-closure doesn't cover it. This is a
-  connection between two open questions (fault handler attachment and badge
-  lifecycle).
+  destruction closes the cap, triggering badge-closure on the handler's field.
+  If kernel-internal: badge-closure doesn't cover it. This is a connection
+  between two open questions (fault handler attachment and badge lifecycle).
 - **Badge-closure message format.** Contents of the closure notification
   message.
 - **Badge-closure × overflow policy.** Notifications compete with regular
   messages for bounded queue space. Interacts with the still-open overflow
   policy.
 - **Per-badge tracking × coalescing.** D13's coalescing tension (capacity-1
-  overwrite + shared endpoint + multiple sources = cross-source data loss) may
+  overwrite + shared field + multiple sources = cross-source data loss) may
   interact with per-badge tracking — per-badge slots could serve as both
   tracking infrastructure and coalescing mechanism. Connection noted; not
   explored here.

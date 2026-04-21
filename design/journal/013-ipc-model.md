@@ -1,4 +1,4 @@
-# 013 — IPC model: queued endpoints with direct-switch fast path
+# 013 — IPC model: queued fields with direct-switch fast path
 
 **Date:** 2026-04-18 **Starting point:** D7 settled the split interaction model
 but deferred the IPC mechanism (sync/async/hybrid). D12 added a constraint:
@@ -35,18 +35,18 @@ Three candidate models survived the derivation:
 
 ### Option A: Sync rendezvous + bitmap notifications (seL4 model)
 
-Two IPC primitives. Endpoints are stateless rendezvous — no queue, no buffer.
+Two IPC primitives. Fields are stateless rendezvous — no queue, no buffer.
 Separate notification objects: word-sized coalescing bitmaps.
 
 Strengths: absolute minimum kernel complexity, no queue memory, formally proven
 (416 cycles ARM64), coalescing notifications solve interrupt delivery.
 
-Weaknesses: sender always blocks on endpoint send. Fan-out patterns (send to A,
+Weaknesses: sender always blocks on field send. Fan-out patterns (send to A,
 send to B, continue) break — require NBSend (lossy, drops message if no
 receiver) or multiple Observer threads. Every "fire and forget" communication
 must use the notification primitive (bitmap, no payload).
 
-### Option B: Queued endpoints with direct-switch fast path (archive model)
+### Option B: Queued fields with direct-switch fast path (archive model)
 
 One IPC primitive. Bounded queue. Sender deposits and continues (non-blocking
 unless queue full). When receiver is already waiting, direct process switch
@@ -60,7 +60,7 @@ interrupts, IPC through the same path.
 Weaknesses: kernel manages queue memory (charged to creator's Space budget per
 D8 pattern). Novel design — no exact deployment precedent. Coalescing gap:
 messages don't coalesce, which is a problem for interrupt delivery on shared
-endpoints.
+fields.
 
 ### Option C: Sync rendezvous + queued notifications (QNX-like)
 
@@ -99,41 +99,41 @@ requirement.
 ## The coalescing tension (Phase 5 finding)
 
 During evaluation, a three-way tension was identified between Option B,
-capacity- 1 overwrite-oldest (for coalescing), and shared endpoints:
+capacity- 1 overwrite-oldest (for coalescing), and shared fields:
 
-If an endpoint is shared among multiple sources (different badges) with
-capacity-1 and overwrite-oldest semantics, source A's message can overwrite
-source B's unprocessed message. This is cross-source data loss.
+If a field is shared among multiple sources (different badges) with capacity-1
+and overwrite-oldest semantics, source A's message can overwrite source B's
+unprocessed message. This is cross-source data loss.
 
 Possible resolutions explored:
 
 - **Per-badge slots:** each badge gets its own slot. Fixes cross-source loss but
-  changes the endpoint from a FIFO queue to a per-badge map — fundamentally
+  changes the field from a FIFO queue to a per-badge map — fundamentally
   different data structure. Per-source loss remains (which IS what coalescing
   means, by definition).
 - **Embedded bitmap:** FIFO queue + coalescing word inside one object. Two
   mechanisms in one object's coat.
-- **One endpoint per source:** avoids shared-endpoint coalescing entirely. Each
-  source gets its own endpoint. More endpoints, more capabilities, more Space.
-- **Accept it:** overwrite mode is opt-in per endpoint. Creator chooses it
+- **One field per source:** avoids shared-field coalescing entirely. Each source
+  gets its own field. More fields, more capabilities, more Space.
+- **Accept it:** overwrite mode is opt-in per field. Creator chooses it
   knowingly for latest-wins use cases. Cross-source clobbering is a consequence
-  the creator accepts by sharing an overwrite endpoint.
+  the creator accepts by sharing an overwrite field.
 
 None of these eliminate the tension cleanly — they move it around. The
-resolution is deferred as a downstream question of the endpoint shape
-exploration. The tension is documented so it is not rediscovered.
+resolution is deferred as a downstream question of the field shape exploration.
+The tension is documented so it is not rediscovered.
 
 ---
 
 ## The decision
 
-**Queued endpoints with direct-switch fast path (Option B).** The primary IPC
-mechanism is bounded queued endpoints. Messages accumulate. Sender deposits and
+**Queued fields with direct-switch fast path (Option B).** The primary IPC
+mechanism is bounded queued fields. Messages accumulate. Sender deposits and
 continues (non-blocking). When the receiver is already waiting, direct process
 switch occurs at rendezvous speed. All information delivery — IPC, faults (D12),
 interrupts, system signals — uses the same mechanism.
 
-The archive's "strictly dominates" argument: queued endpoints with direct-switch
+The archive's "strictly dominates" argument: queued fields with direct-switch
 fast path achieve rendezvous speed for the same-core, receiver-waiting case AND
 provide async fallback when the receiver is not waiting. The sync-only model
 cannot handle the async case at all; the queued model handles both.
@@ -146,17 +146,17 @@ cannot handle the async case at all; the queued model handles both.
 - Novel design — no exact deployed precedent. Closest comparisons: Zircon
   channels (async, queued, but bidirectional and no direct-switch as first-class
   feature), Mach ports (async, queued, but complex rights model).
-- Coalescing gap for shared endpoints remains open (documented above).
+- Coalescing gap for shared fields remains open (documented above).
 
 ---
 
 ## Why tentative
 
 This is accepted as tentative — not settled — because the downstream cluster is
-tightly coupled: overflow policy, coalescing, notification mechanism, endpoint
-shape, multi-endpoint wait, and message format all interact. Settling the IPC
-model in isolation risks discovering in a downstream exploration that queued
-endpoints don't compose with one of these concerns.
+tightly coupled: overflow policy, coalescing, notification mechanism, field
+shape, multi-field wait, and message format all interact. Settling the IPC model
+in isolation risks discovering in a downstream exploration that queued fields
+don't compose with one of these concerns.
 
 The tentative acceptance enables exploring those downstream questions with a
 concrete IPC model to reason against. If the downstream work reveals a
@@ -201,17 +201,17 @@ and SVC mechanism but does not choose between models. seL4 (sync) and Zircon
 Downstream cluster — all to be explored with Option B as the assumed IPC model:
 
 - **Overflow policy.** What happens when the queue is full? Error to sender
-  (archive), overwrite-oldest (ring buffer), fault the sender? Per-endpoint
-  policy at creation? This determines whether the coalescing gap is solvable
-  within the queued model.
+  (archive), overwrite-oldest (ring buffer), fault the sender? Per-field policy
+  at creation? This determines whether the coalescing gap is solvable within the
+  queued model.
 - **Coalescing / notification mechanism.** Can capacity-1 + overwrite-oldest
   serve as a coalescing notification? The three-way tension (Option B +
-  capacity-1 overwrite + shared endpoints) is documented above. May require a
+  capacity-1 overwrite + shared fields) is documented above. May require a
   separate lightweight primitive.
-- **Multi-endpoint wait.** How does an Observer wait on multiple endpoints
+- **Multi-field wait.** How does an Observer wait on multiple fields
   simultaneously? Port aggregator (Zircon)? Multi-receive syscall? Notification
   binding to Observer? This is the "select/epoll" problem for the queued model.
-- **Endpoint shape.** Unidirectional vs. bidirectional. Many-to-many vs.
+- **Field shape.** Unidirectional vs. bidirectional. Many-to-many vs.
   constrained topology. The archive chose unidirectional, many-to-many, topology
   via capabilities.
 - **Message format.** Size, slot count, capability transfer encoding, badge
@@ -220,8 +220,8 @@ Downstream cluster — all to be explored with Option B as the assumed IPC model
 - **Reply routing.** Reply cap in message (archive for IPC), resume() syscall
   (archive for faults). Does D7's split model require the distinction?
 - **D11 add-ons now explorable.** Badges (per-capability, attached by kernel to
-  messages) are a natural fit for queued endpoints. Endpoint rotation (destroy +
-  recreate for mass invalidation) requires endpoint lifecycle to be defined.
+  messages) are a natural fit for queued fields. Field rotation (destroy +
+  recreate for mass invalidation) requires field lifecycle to be defined.
 - **D12 fault delivery specifics.** How the kernel enqueues fault messages. How
   the pager receives them. How resume works.
 - **Queue capacity policy.** Fixed at creation? Growable? Maximum? Minimum?
