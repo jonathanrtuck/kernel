@@ -1460,10 +1460,11 @@ moving an Observer between cores, not a capability operation.
 
 Does NOT settle: ~~Time cardinality~~ (settled by D30: one or more), ~~Time
 parameters~~ (settled by D36: normalized compute units), Time clonability (D23
-uniformity suggests clonable but not derived), ~~Time creation authority~~
-(settled by D31: kernel holds pool, allocates via pager chain), Time donation
-mechanism (seL4 MCS pattern — deferred), ~~D2 scheduling property split~~
-(settled by D36: Time carries quantity (compute units), Observer carries
+uniformity suggests clonable but not derived; D37 constrains — D30 aggregate
+double-counts clones), ~~Time creation authority~~ (settled by D31: kernel holds
+pool, allocates via pager chain), ~~Time donation mechanism~~ (settled by D37:
+explicit cap transfer via user cap slot on Call()), ~~D2 scheduling property
+split~~ (settled by D36: Time carries quantity (compute units), Observer carries
 scheduling hints (D2)).
 
 - **Rests on:** D4 (designation = authority — Time is a bounded resource;
@@ -1508,9 +1509,11 @@ streams (the SMT paragraph). Multi-Time as additive resource claims on a single
 execution stream is a different concern. The Observer still has one register
 state, one PC, one execution stream.
 
-Does NOT settle: Time parameters (what a Time object carries), Time clonability,
-Time creation authority, Time donation mechanism, cross-core Time holding
-semantics (reservation for migration).
+Does NOT settle: ~~Time parameters~~ (settled by D36: normalized compute units),
+Time clonability (D37 constrains — D30 aggregate double-counts clones), ~~Time
+creation authority~~ (settled by D31), ~~Time donation mechanism~~ (settled by
+D37: explicit cap transfer via user cap slot), cross-core Time holding semantics
+(reservation for migration).
 
 - **Rests on:** A5 (kernel absorbs complexity — single-Time pushes multi-source
   coordination to userspace; multi-Time absorbs it via cached aggregate), D29
@@ -1864,10 +1867,12 @@ RT schedulers where the kernel knows the exact core and capacity factor. Best-
 effort scheduling absorbs the approximation.
 
 Does NOT settle: unit encoding (integer representation, bit width, global
-scale), minimum Time quantum, Time split syscall surface, Time clonability, Time
-donation on IPC, minimum abstract scheduling properties on the Observer (D2
-sibling question — the Observer/Time split is now concrete), capacity factor
-source (A2 implementation detail).
+scale), minimum Time quantum, Time split syscall surface, Time clonability (D37
+constrains — D30 aggregate double-counts clones), ~~Time donation on IPC~~
+(settled by D37: explicit cap transfer via user cap slot on Call()), minimum
+abstract scheduling properties on the Observer (D2 sibling question — the
+Observer/Time split is now concrete; D37 adds priority-level inheritance during
+IPC as a consideration), capacity factor source (A2 implementation detail).
 
 - **Rests on:** D30 (multi-Time additive aggregate requires composable numerical
   quantity — budget/period pairs don't compose for different periods), D2
@@ -1900,6 +1905,85 @@ source (A2 implementation detail).
   per-workload-class capacity factors if needed).
 - **Journal:** `journal/036-time-parameters.md`.
 
+### D37 — Time donation on IPC: explicit cap transfer
+
+Time donation on IPC is explicit capability transfer via the D28 user cap slot.
+On Call(), the caller may include a Time cap in the user cap slot. Standard move
+semantics: the Time cap transfers from the caller's table to the message, then
+to the server's table on Receive(). The server holds the donated Time alongside
+its own Time caps (D30 multi-Time additive). The server returns the Time cap in
+the reply message's cap slot.
+
+Donation is opt-in. A Call() without a Time cap works identically to today's
+model. The caller chooses whether to donate, and which of its Time caps to
+include. The kernel does not track or enforce Time return — if the server keeps
+the Time cap, that is a userspace protocol concern.
+
+Crash safety is not a kernel concern: if the server dies, D33's cascade destroys
+the donated Time (D32 asymmetry — capacity returns to kernel pool), but the
+caller is already stuck on its reply field with no one to reply. The Time loss
+is a symptom, not a separate catastrophe. Partial donation mitigates: the caller
+donates one Time cap and retains others (D30).
+
+Time transfer is necessarily a move, not a copy. D30's aggregate sums quantities
+across held caps (`total += cap.amount`). If two caps reference the same Time
+object (clone), the aggregate double-counts — violating "the kernel cannot
+over-allocate." This constrains the open Time clonability question.
+
+Scope: this transfers scheduling capacity (D36 compute units). It does not
+transfer scheduling priority (D2 hints). Priority-level inheritance during IPC
+is orthogonal, deferred to the D2 scheduling-hint exploration.
+
+Cases requiring both Time donation and a payload cap in the same Call()
+decompose: grant the authority via Send() first, then Call() with Time and data
+words — the same pattern D26 establishes for data (shared Space as data plane,
+message as signal). Adding more cap slots was rejected: the same conflict
+re-appears at N+1. One slot for the atomic authority-per-request is structurally
+right.
+
+Kernel-internal donation (seL4 MCS pattern) was rejected: creates a Time
+reference outside the capability graph for the Call/reply round-trip duration,
+contradicting D29's cap-graph completeness rationale. Kernel-injected dedicated
+Time field was rejected: solves a crash-safety problem that doesn't exist,
+requires D28 revision, grows every message slot.
+
+Does NOT settle: priority-level inheritance during IPC (D2 downstream), Time
+clonability (constrained by D30 aggregate — move-only for donation, but
+clonability not derived), server-side return protocol (userspace convention),
+Send() with Time caps (naturally follows from standard cap transfer).
+
+- **Rests on:** D28 (fixed-size message with 1 user cap slot — Time donation is
+  the natural use of the cap slot during Call(); "request + delegated authority"
+  pattern decomposes via D26), D30 (multi-Time — server holds multiple clients'
+  donated Time caps simultaneously; this was D30's motivating scenario), D36
+  (normalized compute units — donation transfers a concrete integer quantity;
+  composable via D30's aggregate), D31 (abstract capacity — donated compute
+  units are core-independent; no rebinding needed; structurally simpler than
+  seL4 MCS per-core donation), D4 (designation = authority — donation visible in
+  cap graph; kernel-internal donation rejected on cap-graph completeness), D16
+  (Call/reply — caller blocks on reply field; reply carries the returned Time
+  cap), D13 (queued fields — cap-in-queue follows D24 precedent; direct-switch
+  fast path eliminates transit for the common case), D24 (cap-in-transit
+  precedent — Space caps in transit are unmapped for both parties; Time caps in
+  transit are unscheduled for both parties), D32 + D33 (Time asymmetry + destroy
+  cascade — crash-loss analysis; not a kernel concern because the caller is
+  already stuck), D29 (Time is capability-held — donation uses existing cap
+  transfer; kernel-internal rejected on D29's own rationale),
+  `design/research/time-as-kernel-object.md` §2 (seL4 MCS donation: zero
+  fastpath overhead, passive server model), `design/landscape.md` §4.5 (priority
+  inversion handling — donation is one of four approaches surveyed).
+- **Archive convergence:** Strong. Archive claims.toml "events-carry-resources":
+  "Events can carry resource handles (Time, Space, routing capabilities). A
+  sender that donates Time cannot run (effectively blocked)." Same conclusion,
+  different path.
+- **Status:** settled — revisit if D28 is revised (different cap slot count or
+  message format changes the constraint), if D30 is revised (changes multi-Time
+  semantics), if D2 scheduling-hint exploration reveals that priority
+  inheritance requires coupling with Time donation (would reopen mechanism
+  choice), or if the Send()+Call() decomposition proves unworkable for a
+  critical workload class.
+- **Journal:** `journal/037-time-donation-on-ipc.md`.
+
 ---
 
 ## Open questions
@@ -1912,7 +1996,11 @@ source (A2 implementation detail).
   user-visible event at all.)
 - **Minimum abstract scheduling properties on an Observer.** D2 says Observers
   carry abstract scheduling properties, but the minimum set (priority? deadline?
-  IO-bound flag? period?) is not fixed.
+  IO-bound flag? period?) is not fixed. D37 adds a consideration: Time donation
+  transfers compute capacity but not scheduling priority. Priority-level
+  inheritance during IPC (the server temporarily runs at the caller's priority)
+  requires the D2 scheduling hints to be dynamically modifiable — this shapes
+  the minimum set.
 - ~~**Observer-Space cardinality formalization.**~~ Settled by D27: flat. An
   Observer holds multiple independent Space caps directly in its D8 table. No
   kernel-tracked hierarchy between Spaces. Grouping is userspace convention (D6
@@ -1992,18 +2080,23 @@ source (A2 implementation detail).
 - **Time clonability.** D23 settled all other types as clonable. The uniformity
   argument suggests clonable (multiple references to the same scheduling
   allocation, not a second allocation). Journal 014's assumption of
-  "non-clonable" was never derived.
+  "non-clonable" was never derived. D37 constrains: D30's aggregate
+  (`total += cap.amount`) double-counts if two caps reference the same Time
+  object — violating "the kernel cannot over-allocate." Move-only semantics for
+  donation are consistent with non-clonable Time. The tension is D23 uniformity
+  vs. D30 aggregate correctness.
 - ~~**Time creation authority.**~~ Settled by D31: the kernel holds unallocated
   scheduling capacity as per-core root Time objects internally. Observers
   acquire Time through the pager chain (resource request → fault handler → ... →
   kernel). The kernel allocates from its per-core pools. Initial Time
   distributed at boot as part of the root Observer's minimal resource grant.
-- **Time donation on IPC.** seL4 MCS donates scheduling context during IPC for
-  priority inversion prevention. Under D30 (multi-Time), donation via explicit
-  cap transfer is natural: the caller's Time cap appears in the server's table,
-  the server holds it alongside other clients' Time caps, and returns it on
-  reply. Kernel-internal donation on Call() (D16 parallel) remains an option.
-  Deferred.
+- ~~**Time donation on IPC.**~~ Settled by D37: explicit cap transfer via the
+  D28 user cap slot on Call(). Standard move semantics. The server holds the
+  donated Time (D30 multi-Time), returns it in the reply. Opt-in, no kernel
+  enforcement of return. Transfers scheduling capacity (D36 compute units), not
+  scheduling priority (D2 hints). Kernel-internal donation rejected (D29
+  cap-graph tension). Kernel-injected dedicated field rejected (unnecessary D28
+  revision). Priority-level inheritance deferred to D2.
 - **Can Observers share capability tables?** D8 settles per-Observer tables with
   no sharing. Under D26, Observers sharing Spaces hold independent caps to the
   same Spaces. Revisit as a D8 downstream: does the

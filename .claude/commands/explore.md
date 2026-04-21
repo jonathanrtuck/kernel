@@ -346,6 +346,12 @@ If any phase was skipped or merged, say so and offer to go back.
 1. Write or update the appropriate artifacts.
 2. Read back `design/spec.md` and check the entry is consistent with its
    neighbors.
+3. **Update `src/` stubs.** Per `src/CLAUDE.md` ("spec drives code"), check
+   whether any source modules reference the settled question as open (comments,
+   doc comments, module map). Update them to reflect the decision. Also update
+   `src/CLAUDE.md`'s module map if the derivation number is missing from a
+   module's key derivations column. This step is mechanical — it synchronizes
+   code comments with the spec, not code behavior.
 
 **Self-review (catches mechanical issues, not conceptual ones):**
 

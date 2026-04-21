@@ -25,6 +25,7 @@ pub struct Field {
 /// 4 untyped data words + 1 user cap slot + label (header) + badge
 /// (kernel-injected) + reply cap (kernel-injected, Call only).
 /// Data words and cap slots are structurally separate.
+/// On Call(), the user cap slot typically carries a Time cap (D37 donation).
 pub struct Message {
     // Layout open.
     // Fault messages use same format (D12 + D28).
