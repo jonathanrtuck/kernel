@@ -1608,6 +1608,71 @@ creation API config parameters, Time parameters, Time clonability.
   simpler boot model avoids.
 - **Journal:** `journal/032-resource-acquisition-and-boot.md`.
 
+### D32 — Kernel-internal memory accounting: type conversion model
+
+Object creation is type conversion: a Space is consumed entirely and becomes the
+object's functional backing. `create_endpoint(space_cap) → endpoint_cap`;
+`create_observer(space_cap, config) → observer_cap`. The Space is gone; the
+object exists. Destruction is the reverse: `destroy(object_cap) → space_cap`.
+The freed pages become a new Space returned to the destroyer. Conservation is
+structural: physical pages change purpose, not quantity.
+
+Per-object kernel metadata (queue headers, scheduling aggregates, tracking
+structs) is allocated from the kernel's root Space (D31). This cost is invisible
+to userspace, bounded per object (fixed-size), and small relative to the
+object's functional backing. Total system capacity is already opaque (D31 — root
+Space is kernel-internal), so metadata overhead introduces no new opacity.
+
+Page table subtree cost (L1/L2/L3 entries for a Space under D26) is baked into
+the Space at split time. The parent Space shrinks by
+`child_size + subtree_overhead`. The overhead is a deterministic function of
+Space size and page granularity. First holder: subtree populated from the
+Space's reserved capacity. Subsequent holders: reference count increment, no
+allocation. The cost is a property of the Space, not the holder.
+
+Cap table growth (D8 table-full fault): the handler provides a Space cap in the
+fault reply. The kernel allocates table pages from it (Space consumed — type
+conversion into cap table backing). The handler controls which Space pays. Most
+general protocol; optimizations (designated growth Space) can be added behind
+the same interface.
+
+Time is asymmetric: Time comes from the kernel's per-core pool (D31), not from
+Space. Destroying Time returns capacity to the pool. No Space involved.
+
+Boot structures (root Observer, initial objects) from kernel's root Space.
+Fixed, predictable cost.
+
+Observer destruction returns structural backing as Space cap. What happens to
+the Observer's held capabilities (caps in its table) is the destroy cascade
+question — deferred.
+
+Does NOT settle: destroy cascade protocol (held caps on Observer destroy), Space
+"create" right in the rights mask, overhead reporting (does the Observer see
+subtree overhead?), merge/join operation (reverse of split).
+
+- **Rests on:** D8 (typed-memory backing — the Observer pays for its structures
+  from its Spaces; unaccounted kernel allocation foreclosed), D31 (kernel holds
+  root Space — metadata charged there; pager chain for resource acquisition;
+  type conversion established for Endpoint/Observer creation), D9
+  (kernel-managed memory — kernel handles physical backing internally;
+  non-contiguous physical pages behind one Space is standard), D26 (per-Space
+  shared subtrees — reference-counted; subtree cost baked into Space at
+  creation), D11 (close on destroy — freed backing returns as Space or to root
+  Space if cap closed), D25 (expose real constraints — visible Space
+  consumption, no hidden overhead in Observer Spaces), D13 (queue memory from
+  creator's Spaces — extended to full type conversion), A4 (synchronous
+  accounting — charge at alloc, refund at dealloc), A5 (kernel absorbs
+  complexity — metadata invisible, accounting kernel-internal).
+- **Archive convergence:** Strong. Archive journal 013:
+  `open_wormhole → wormhole_handle`, `close_wormhole → space_handle`. Same
+  type-conversion model, same conservation argument.
+- **Status:** settled — revisit if D8 is revised (changes the typed-memory
+  backing principle), if D31 is revised (changes the root Space model or
+  creation mechanism), or if the destroy cascade derivation reveals that
+  type-conversion reversal creates essential complexity for multi-Space-backed
+  objects.
+- **Journal:** `journal/033-kernel-memory-accounting.md`.
+
 ---
 
 ## Open questions
@@ -1839,10 +1904,12 @@ creation API config parameters, Time parameters, Time clonability.
   Observer's fault handler (D12 mechanism). The handler grants (from own
   holdings), denies, or escalates. The chain terminates at the kernel, which
   allocates from its internal root Space.
-- **Kernel-internal memory on cap transfer.** When an Observer acquires a Space
-  cap, the kernel creates page table entries and base table entries for the new
-  holder. Whose Spaces back these structures? Interacts with D8
-  (typed-memory-backing pattern) and D26 (per-Observer page tables).
+- ~~**Kernel-internal memory on cap transfer.**~~ Settled by D32: page table
+  subtree cost is baked into the Space at split time (parent shrinks by
+  child_size + overhead). First holder populates from reserved capacity;
+  subsequent holders increment reference count. Per-Observer intermediate page
+  table pages (L1/L2) charged via D8 fault mechanism (handler provides Space in
+  fault reply). Kernel per-object metadata from root Space.
 
 ---
 
@@ -2049,6 +2116,14 @@ creation API config parameters, Time parameters, Time clonability.
   at EL0). Time revised to abstract scheduling capacity (core assignment
   kernel-internal, A5 parallel with D9/D26). Strong archive convergence: journal
   013 derived same model independently. Time abstraction is novel.
+- `033-kernel-memory-accounting.md` — reasoning for D32: kernel-internal memory
+  accounting via type conversion model. Object creation = Space consumed
+  entirely → becomes object backing. Destruction = reverse (object → new Space
+  cap returned to destroyer). Kernel per-object metadata from root Space
+  (invisible, bounded). Page table subtree cost baked into Space at split. Cap
+  table growth: handler provides Space in fault reply (2A). Time destruction
+  returns to kernel pool (asymmetric). Observer held-caps on destroy deferred to
+  destroy cascade. Strong archive convergence (journal 013 same model).
 
 ---
 
