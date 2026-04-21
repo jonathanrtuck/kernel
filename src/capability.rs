@@ -15,16 +15,23 @@ pub enum ObjectType {
     Observer,
 }
 
-/// Per-capability rights mask (D8, D15, D17, D33, D38).
+/// Per-capability rights mask (D8, D15, D17, D33, D38, D39).
 ///
 /// Rights are per-type, not universal (D38). Each object type defines its valid
 /// rights; clone appears in Space/Field/Observer but not Time.
+///
+/// Observer rights (D39): resume, destroy, install-cap, write-registers, clone,
+/// read-registers, suspend, change-handler, modify-scheduling. Nine bits.
 pub struct Rights {
-    // Settled rights: send, receive (D15), mint (D17), destroy (D33).
-    // D38: clone is per-type (Time excludes it; send-once excludes it).
+    // Settled rights:
+    //   Field:    send, receive (D15), mint (D17), send-once (D16), destroy (D33).
+    //   Observer: resume, destroy, install-cap, write-registers, clone,
+    //             read-registers, suspend, change-handler, modify-scheduling (D39).
+    //   Space:    read, write, execute, clone, destroy, create (D31). TBD.
+    //   Time:     split, destroy. No clone (D38). TBD.
     // Open:
-    //   send-once encoding (D16), grant (D28), Observer-specific ops
-    //   (D14 downstream), full per-type rights sets.
+    //   send-once encoding (D16), grant (D28), duplicate-control (D23 deferred,
+    //   D8 derivation — applies to all types uniformly).
 }
 
 /// Generational slot tag for ABA prevention (D11).
@@ -63,6 +70,8 @@ pub struct Entry {
 /// Flat array, kernel-managed. Backed by typed memory from the Observer's
 /// Spaces — not a kernel-internal pool.
 /// D21: slot 0 reserved for fault handler.
+/// D39: change-handler right gates writes to the reserved slot;
+/// install-cap gates writes to regular slots.
 pub struct Table {
     // Representation open.
     // Growth: fault on full, handler provides Space, retry (D8).

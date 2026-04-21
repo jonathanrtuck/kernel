@@ -1,11 +1,11 @@
 # Kernel structural map.
 #
-# Populated from design/spec.md derivations D1-D6, D8-D37, observations O2-O3,
+# Populated from design/spec.md derivations D1-D6, D8-D39, observations O2-O3,
 # and Vocabulary (Space, Time, Observer). Every box and edge has a corresponding
 # spec.md entry; items labeled "TBD" await downstream derivation.
 #
 # Intentionally absent (pending derivation): specific syscall surface, Observer
-# minimum schema, Observer rights model (D14 downstream; D35 settles creation),
+# minimum schema,
 # field details (multi-wait — D13/D15 downstream; overflow settled by D18;
 # message format settled by D28), revocation add-ons (generation, CDT — base
 # settled in D11; badges settled in D17), per-physical-core concerns (power,
@@ -103,7 +103,11 @@ kernel: {
     # create_observer(space, handler, badge) → inert Observer.
     # Configured via install_cap, write_registers, then resume.
     # install_cap is general-purpose (also serves fault resolution).
-    # Minimum schema, rights model TBD.
+    # D39: nine rights — resume, destroy, install-cap, write-registers,
+    # clone, read-registers, suspend, change-handler, modify-scheduling.
+    # Five Observer states: inert, runnable, blocked, faulted,
+    # externally-suspended (co-occurrence with blocked/faulted).
+    # Minimum schema TBD.
 
     capabilities: {
       label: Capability table

@@ -667,11 +667,13 @@ alternative (lifecycle through IPC indirection — archive/006, archive/011) and
 reversed it (archive/013) for the same structural reason. Every surveyed
 capability system makes the execution unit a capability-held object type.
 
-Does NOT settle: creation API shape (create-then-configure vs. all-params),
-Observer rights model beyond resume and destroy (suspend, inspect, configure),
-~~Observer handle clonability~~ (settled by D23: clonable), ~~fault handler
-attachment (per-Observer vs. per-address-space)~~ (settled by D20:
-per-Observer), Time reclamation on destroy, Observer minimum schema.
+Does NOT settle: ~~creation API shape (create-then-configure vs. all-params)~~
+(settled by D35: minimal create + separate start), ~~Observer rights model
+beyond resume and destroy (suspend, inspect, configure)~~ (settled by D39: nine
+rights), ~~Observer handle clonability~~ (settled by D23: clonable), ~~fault
+handler attachment (per-Observer vs. per-address-space)~~ (settled by D20:
+per-Observer), ~~Time reclamation on destroy~~ (dissolved by D29: cap-table
+close), Observer minimum schema.
 
 - **Rests on:** D12 (resume must exist — suspended Observer can't receive IPC;
   independent path), D7 (lifecycle ops are typed kernel syscalls; provides
@@ -904,10 +906,11 @@ invariant enforced at creation time). Redundant configuration when N Observers
 want the same handler is a userspace ergonomics cost, not kernel complexity — a
 library function absorbs it.
 
-Does NOT settle: fault handler mutability (part of Observer rights model), fault
-handler in Observer creation API shape, pager unavailability protocol,
-root/bootstrap fault handling. (Fault handler representation settled by D21:
-cap-table entry.)
+Does NOT settle: ~~fault handler mutability (part of Observer rights model)~~
+(settled by D39: change-handler is a separate right from install-cap), ~~fault
+handler in Observer creation API shape~~ (settled by D35), pager unavailability
+protocol, root/bootstrap fault handling. (Fault handler representation settled
+by D21: cap-table entry.)
 
 - **Rests on:** D6 (no kernel grouping — per-Observer is the natural attachment
   level; independent path), D4 (designation = authority — per-Observer allows
@@ -1095,9 +1098,10 @@ A duplicate-control right (Zircon's ZX_RIGHT_DUPLICATE model) can be added later
 as a rights-mask extension without affecting this decision. Deferred to the
 Observer rights model derivation.
 
-Does NOT settle: Observer rights model (which rights go in the mask), Observer
-creation API shape, Observer minimum schema, whether the duplicate-control right
-is adopted. These are one level down.
+Does NOT settle: ~~Observer rights model (which rights go in the mask)~~
+(settled by D39: nine rights), ~~Observer creation API shape~~ (settled by D35),
+Observer minimum schema, whether the duplicate-control right is adopted
+(deferred to D8 derivation). These are one level down.
 
 - **Rests on:** D4 (attenuation requires cloning — foreclosed by non-clonable;
   independent path), D8 (uniform flat table — non-clonable breaks uniformity
@@ -1112,8 +1116,9 @@ is adopted. These are one level down.
   handle_duplicate — uniform capability copying for all object types).
 - **Status:** settled — revisit if D11 is revised (changes the refcount/destroy
   model that makes multi-holder safe), if D20/D21 are revised (reopens handle =
-  handler unification), or if the Observer rights model derivation reveals that
-  clonability creates essential complexity that non-clonable would have avoided.
+  handler unification). D39 confirms clonability is load-bearing — rights
+  separation via attenuated clones is the primary access control mechanism for
+  the nine-right Observer model.
 - **Journal:** `journal/024-observer-handle-clonability.md`.
 
 ### D24 — Cap-mapping invariant: no cap → no mapping
@@ -1733,8 +1738,9 @@ list cleanup is O(1) per linkage (D18 intrusive list).
 
 Does NOT settle: cap table close ordering (whether ordering within the table
 matters), cross-core prompt-effect policy (strong vs. weak — D11 deferred), TLB
-shootdown batching (optimization, deferred), Observer "extract" operation
-(pulling caps from child's table before destroy — D14 downstream).
+shootdown batching (optimization, deferred), ~~Observer "extract" operation
+(pulling caps from child's table before destroy)~~ (evaluated and excluded by
+D39 — proactive cap sharing via D23 + D28 covers the use cases; deferred).
 
 - **Rests on:** D11 (base revocation — close-only + destroy provides the
   mechanism; dead-handle semantics ensure no visible intermediate state; ABA
@@ -1763,8 +1769,8 @@ shootdown batching (optimization, deferred), Observer "extract" operation
   discuss preemptibility.
 - **Status:** settled — revisit if D11 is revised (changes the base
   destroy/close mechanism), if D32 is revised (changes the type-conversion
-  return model), or if the Observer rights model derivation reveals that
-  "extract before destroy" makes the cascade protocol unnecessary.
+  return model). D39 evaluated "extract before destroy" and excluded it —
+  cascade protocol stands as the complete cleanup story.
 - **Journal:** `journal/034-destroy-cascade-protocol.md`.
 
 ### D35 — Observer creation API: minimal create, separate start, composable operations
@@ -1799,8 +1805,7 @@ post-creation operation exists independently of creation (no new kernel
 surface), and the syscall overhead (~1,000–2,000 extra cycles for 4–6 calls) is
 negligible on this cold path relative to Observer creation's structural weight.
 
-Does NOT settle: Observer rights model (D35 confirms install-cap,
-write-registers, and resume as rights; the complete set is one level down),
+Does NOT settle: ~~Observer rights model~~ (settled by D39: nine rights),
 Observer minimum schema (must support inert state), specific syscall encoding,
 reply field allocation timing (D16 downstream — compatible with either pre-
 allocated or lazy), cap-install slot selection policy (kernel-chosen default,
@@ -1835,9 +1840,9 @@ D8-consistent).
   after creation model).
 - **Status:** settled — revisit if D32 is revised (changes type conversion
   model), if D20/D21 are revised (changes fault handler requirement at
-  creation), or if the Observer rights model derivation reveals that the
-  install-cap / write-registers decomposition creates essential complexity that
-  a richer create call would have avoided.
+  creation). D39 confirms install-cap / write-registers decomposition — the
+  nine-right model builds on these composable operations without revealing
+  essential complexity that a richer create call would have avoided.
 - **Journal:** `journal/035-observer-creation-api.md`.
 
 ### D36 — Time parameters: normalized compute units
@@ -2047,6 +2052,92 @@ remaining), duplicate-control right for other types (D23 deferred).
   split operation provides the delegation path that clone provides for Observer.
 - **Journal:** `journal/038-time-clonability.md`.
 
+### D39 — Observer rights model: nine rights
+
+The Observer capability carries nine rights, each corresponding to a typed
+kernel syscall (D7) and a bit in D8's per-cap rights mask:
+
+| Right             | Syscall                                        | Source   |
+| ----------------- | ---------------------------------------------- | -------- |
+| resume            | observer_resume(cap)                           | D14, D35 |
+| destroy           | destroy(cap)                                   | D14, D34 |
+| install-cap       | observer_install_cap(cap, source_cap) → slot   | D35      |
+| write-registers   | observer_write_registers(cap, state)           | D35      |
+| clone             | clone(cap, reduced_rights) → new_cap           | D38      |
+| read-registers    | observer_read_registers(cap) → state           | D28, D39 |
+| suspend           | observer_suspend(cap)                          | D39      |
+| change-handler    | observer_change_handler(cap, field_cap, badge) | D39      |
+| modify-scheduling | observer_set_scheduling(cap, hints)            | D39      |
+
+Read-registers is derived mechanically from D28 (which assumes
+`inspect(observer_handle)` exists) and is the structural dual of write-registers
+(D35). Suspend adds a fifth Observer state (externally-suspended) alongside
+inert, runnable, blocked, and faulted. Change-handler is separate from
+install-cap because the handler slot is already structurally special (D21
+kernel-reserved) and D12 establishes the fault handler as the root of the
+Observer's supervision relationship — a fundamentally different authority from
+routine cap provisioning. Modify-scheduling gates external modification of D2
+scheduling hints (the concrete property set is D2's open question, not D39's).
+
+Extract-cap (reading caps from another Observer's table) was evaluated and
+excluded: the primary use case (pre-destroy resource recovery) is served by
+proactive cap sharing through IPC (D23 clonable + D28 user cap slot).
+Extract-cap compensates for userspace policy failures, not kernel mechanism
+gaps. Deferred — reconsider if a structural need emerges. Duplicate-control
+(Zircon ZX_RIGHT_DUPLICATE model, deferred from D23) is not Observer-specific;
+it belongs in a D8 derivation applicable to all types uniformly.
+
+Observer state machine: inert (D35), runnable, blocked (D13), faulted (D12),
+externally-suspended (D39). Suspended can co-occur with blocked or faulted.
+Resume is a single right covering all stopped→runnable transitions (landscape
+consensus: seL4, Zircon, Mach).
+
+Does NOT settle: Observer minimum schema (concrete struct fields — D39
+constrains: must track five states including co-occurrence), D2 minimum
+scheduling properties (modify-scheduling gates whatever D2 settles), self-
+reference capabilities (whether an Observer holds a cap to itself),
+duplicate-control right (D8 derivation), extract-cap (deferred), specific
+syscall encoding, concurrent scheduling modification semantics (external vs.
+kernel-internal priority inheritance ordering).
+
+- **Rests on:** D14 (resume and destroy as minimum; Observer as capability-held
+  type), D35 (install-cap, write-registers, resume as creation rights;
+  composable operations pattern), D38 (per-type rights; clone in Observer's
+  set), D34 (destroy in rights mask), D28 (assumes inspect(observer_handle)
+  exists — read-registers is the fulfillment), D7 (each right = typed kernel
+  syscall), D8 (per-cap rights mask; nine bits), D23 (clonable — rights
+  separation via attenuated clones is the access control mechanism), D20 + D21
+  (per-Observer fault handler at reserved cap-table slot — handler change is
+  separate authority from routine cap provisioning because D12 makes the handler
+  structurally critical), D2 (abstract scheduling properties on Observer —
+  external modification requires a right under D4), D36 (Time/ Observer split —
+  scheduling hints are Observer properties), D37 (priority- level inheritance
+  deferred to D2; modify-scheduling enables external complement), A3 (generic —
+  suspend required for debugging, checkpointing, resource pressure workloads),
+  D4 (designation = authority — handler change and scheduling modification are
+  meaningful authorities requiring capability mediation), D6 (no kernel grouping
+  — extract-cap's use case rests on supervision trees that are userspace policy;
+  proactive cap sharing via D23 + D28 serves the same patterns),
+  `design/research/syscall-landscape.md` (seL4 TCB operations, Zircon
+  thread/task operations, Mach thread operations, L4 ExchangeRegisters —
+  universal convergence on suspend, read-registers, scheduling modification),
+  `design/landscape.md` §1.5 (capability granularity — rights masks), §4.4
+  (scheduling parameters on thread object).
+- **Archive convergence:** Strong. Archive's 10-syscall set maps closely:
+  context_resume → resume, destroy_context → destroy, context_suspend → suspend,
+  read_context_state → read-registers, write_context_state → write-registers,
+  context_install_cap → install-cap, set_fault_handler → change-handler,
+  set_scheduling_params → modify-scheduling. Divergence: archive bundled
+  creation and Time-grant as Observer rights; D35/D30 settle those differently
+  (creation on Space cap, Time as regular install-cap). Convergence on handler
+  as separate operation.
+- **Status:** settled — revisit if D35 is revised (changes the composable
+  operations model), if D20/D21 are revised (changes the handler representation
+  that motivates separate change-handler), if D2 is revised (affects
+  modify-scheduling's scope), or if a downstream derivation reveals that
+  extract-cap serves a structural need that proactive cap sharing cannot.
+- **Journal:** `journal/039-observer-rights-model.md`.
+
 ---
 
 ## Open questions
@@ -2083,16 +2174,18 @@ remaining), duplicate-control right for other types (D23 deferred).
   entry (not a separate Observer struct field). D29 settles Time as capability-
   held; D30 settles multi-Time in regular cap-table slots (not reserved). D35
   settles that Observers support an inert state (created but not yet scheduled).
-  The concrete field set (register state, L0 page table pointer, capability
-  table pointer, cached scheduling aggregate (D30), scheduling state,
-  pending-list linkage (D18), Observer state: inert/runnable/blocked/faulted)
-  needs formal derivation in the current chain. Note: the fault handler lives in
-  the cap table at a reserved slot (D21). Time caps live in regular cap-table
-  slots (D30), but the cached scheduling aggregate is an Observer struct field.
-  Archive journal/004 derived a first-principles minimum. D12 confirms the fault
-  handler is structurally required. D14 confirms lifecycle state tracking is
-  required. D20 confirms per-Observer attachment. D21 confirms cap-table
-  representation. D29 confirms Time cap-table representation.
+  D39 settles the five-state machine: inert, runnable, blocked, faulted,
+  externally-suspended (suspended can co-occur with blocked or faulted). The
+  concrete field set (register state, L0 page table pointer, capability table
+  pointer, cached scheduling aggregate (D30), scheduling state including
+  suspension flag, pending-list linkage (D18)) needs formal derivation in the
+  current chain. Note: the fault handler lives in the cap table at a reserved
+  slot (D21). Time caps live in regular cap-table slots (D30), but the cached
+  scheduling aggregate is an Observer struct field. Archive journal/004 derived
+  a first-principles minimum. D12 confirms the fault handler is structurally
+  required. D14 confirms lifecycle state tracking is required. D20 confirms
+  per-Observer attachment. D21 confirms cap-table representation. D29 confirms
+  Time cap-table representation.
 - ~~**Address space binding mutability.**~~ Dissolved by D26: no address space
   object, no binding. Observers access Spaces through capabilities; the page
   table is updated automatically as caps are acquired and lost.
@@ -2104,24 +2197,24 @@ remaining), duplicate-control right for other types (D23 deferred).
   (forecloses decomposition; composable primitives + userspace library is
   A5-consistent). Remaining: Observer rights model (install-cap,
   write-registers, resume confirmed as rights; complete set one level down).
-- **Observer rights model.** D14 settles resume and destroy as minimum. D23
-  settles clonability, enabling rights separation across multiple caps. D35 adds
-  install-cap and write-registers as confirmed rights (needed for creation setup
-  and fault resolution). D38 settles that clone is a per-type right (not a
-  universal meta-operation) and that rights sets are defined per object type.
-  Open: suspend (external pause), inspect register state (debugging), modify
-  scheduling properties (D2), change fault handler (D20 — per-Observer, so this
-  is an Observer-cap right), duplicate-control right (Zircon ZX_RIGHT_DUPLICATE
-  model, deferred from D23). Each right = a typed kernel syscall under D7.
+- ~~**Observer rights model.**~~ Settled by D39: nine rights — resume, destroy,
+  install-cap, write-registers, clone, read-registers, suspend, change-handler,
+  modify-scheduling. Extract-cap excluded (proactive cap sharing via D23 + D28
+  serves the use cases). Duplicate-control deferred to D8 derivation (not
+  Observer-specific). Remaining downstream: Observer minimum schema (D39
+  constrains state machine), D2 scheduling properties (modify-scheduling gates
+  whatever D2 settles), self-reference capabilities.
 - ~~**Observer handle clonability.**~~ Settled by D23: clonable. Observer
   handles follow uniform capability rules (clone, attenuate, transfer)
   identically to all other kernel object types. Non-clonable rejected on five
   convergent structural arguments. Archive's "handle = handler unification"
   dissolved by D20/D21. Duplicate-control right deferred to Observer rights
   model.
-- **Suspend as distinct from faulted.** Is there external suspension (not caused
-  by fault)? If yes, Observer state has four values (runnable, blocked, faulted,
-  externally-suspended). Use cases: debugging, checkpointing, resource pressure.
+- ~~**Suspend as distinct from faulted.**~~ Settled by D39: yes. External
+  suspension exists as a fifth Observer state (alongside inert, runnable,
+  blocked, faulted). Suspend can co-occur with blocked or faulted. Resume clears
+  the suspension; underlying conditions remain. Use cases: debugging,
+  checkpointing, resource pressure.
 - ~~**Time reclamation on Observer destroy.**~~ Dissolved by D29: Time is a
   capability-held kernel object. Observer destroy closes the Time cap (D11 close
   semantics). If this was the last reference, the Time object is destroyed and
@@ -2263,8 +2356,11 @@ remaining), duplicate-control right for other types (D23 deferred).
   establishes inspect(observer_handle) as a typed kernel operation for reading
   Observer state (fault message decomposition). D35 adds create_observer(),
   observer_install_cap(), and observer_write_registers() as typed kernel
-  operations. The archive's 10-syscall design is a data point. Depends on IPC
-  model, Observer rights model, and D9 (memory objects).
+  operations. D39 adds observer_read_registers(), observer_suspend(),
+  observer_change_handler(), and observer_set_scheduling() as typed kernel
+  operations (completing the Observer rights set — nine rights, nine syscalls).
+  The archive's 10-syscall design is a data point. Depends on IPC model and D9
+  (memory objects).
 - ~~**Address space lifecycle.**~~ Dissolved by D26: no address space kernel
   object. The page table is kernel-internal; per-Observer L0 tables are
   destroyed with the Observer; per-Space subtrees are reference-counted and
@@ -2558,6 +2654,16 @@ remaining), duplicate-control right for other types (D23 deferred).
   — clone is a per-type right, not a universal meta-operation. Authority
   delegation uses split (new object), not clone (second reference). A1 parallel:
   linear Time caps map to Rust's move-only ownership.
+- `039-observer-rights-model.md` — reasoning for D39: nine Observer rights. Five
+  confirmed by prior derivations (resume, destroy, install-cap, write-registers,
+  clone). Read-registers derived mechanically from D28. Suspend included (A3,
+  100% landscape convergence). Change-handler separated from install-cap (D21
+  reserved slot is already structurally special; D12 handler criticality
+  justifies independent right). Modify-scheduling included (100% landscape
+  convergence; gates D2 scheduling hints). Extract-cap excluded (proactive cap
+  sharing via D23 + D28 covers use cases; extract compensates for policy
+  failures, not mechanism gaps). Duplicate-control deferred to D8 (not
+  Observer-specific). Strong archive convergence on operations.
 
 ---
 
