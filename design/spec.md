@@ -72,21 +72,29 @@ under "Rests on"; it exists so later sections can be precise.
   different claim of the same size). Which physical pages back a claim is a
   kernel-internal concern.
 
-- **Time.** A claim to a portion of the system's scheduling capacity. The total
-  scheduling capacity is bounded: each logical core provides 100% of scheduling
-  time. Time is cumulative over wall-clock (scheduling time consumed
-  accumulates) and fungible — multiple Time caps are additive. The Observer
-  holds abstract scheduling capacity without knowing which core it runs on; core
-  assignment, migration, and algorithm selection are kernel-internal concerns
-  (D31), parallel to how physical addresses and virtual addresses are
-  kernel-internal for Space (D9, D26). The Observer provides abstract scheduling
-  hints (D2: priority, CPU/IO classification, deadline); the kernel places the
-  Observer on an appropriate core. On SMT hardware, delivered compute
-  additionally depends on sibling logical-core contention for shared pipeline
-  resources; the kernel guarantees scheduling allocation, not
-  physical-compute-rate delivery. (Vocabulary revised by D31 — previously "a
-  fraction of a specific logical core's scheduling allocation." The per-core
-  framing exposed a hardware detail that A5 says the kernel should absorb.)
+- **Time.** A claim to a portion of the system's compute capacity, denominated
+  in normalized compute units. Each Time cap carries an integer quantity of
+  compute units calibrated to hardware-described core capacity factors (ARM
+  `capacity-dmips-mhz`, ACPI CPPC, or equivalent). A given number of compute
+  units represents approximately the same amount of work regardless of which
+  core executes it — the kernel translates to per-core scheduling time
+  internally. Total system capacity = sum of all core capacities; the kernel
+  cannot over-allocate. Time is fungible — multiple Time caps are additive
+  (D30). The Observer holds abstract compute capacity without knowing which core
+  it runs on or what that core's capability is; core assignment, migration,
+  algorithm selection, and the compute-unit-to-time translation are
+  kernel-internal concerns (D31, D36), parallel to how physical addresses and
+  virtual addresses are kernel-internal for Space (D9, D26). The Observer
+  provides abstract scheduling hints (D2: priority, CPU/IO classification,
+  deadline); the kernel places the Observer on an appropriate core and enforces
+  the compute allocation. On SMT hardware, delivered compute additionally
+  depends on sibling logical-core contention for shared pipeline resources; the
+  kernel guarantees compute allocation, not physical-compute-rate delivery.
+  (Vocabulary revised by D36 — previously "abstract scheduling capacity" as a
+  per-core fraction (D31). Per-core fractions leak core identity through the
+  provisioning chain on heterogeneous hardware (A2 big.LITTLE). Normalized
+  compute units restore the Space parallel: Space = bytes, Time = compute units
+  — both hardware-independent quantities with kernel-internal placement.)
 
 - **Observer.** A schedulable execution unit coupling Space and Time — the
   condition under which compute (Time) executes instructions within specific
@@ -1450,12 +1458,13 @@ capability operation, D1-consistent).~~ Superseded by D31: Time is abstract
 scheduling capacity; core assignment is kernel-internal; migration is the kernel
 moving an Observer between cores, not a capability operation.
 
-Does NOT settle: ~~Time cardinality~~ (settled by D30: one or more), Time
-parameters (budget/period, fraction, or claim-to-participate), Time clonability
-(D23 uniformity suggests clonable but not derived), ~~Time creation authority~~
+Does NOT settle: ~~Time cardinality~~ (settled by D30: one or more), ~~Time
+parameters~~ (settled by D36: normalized compute units), Time clonability (D23
+uniformity suggests clonable but not derived), ~~Time creation authority~~
 (settled by D31: kernel holds pool, allocates via pager chain), Time donation
-mechanism (seL4 MCS pattern — deferred), D2 scheduling property split (which
-abstract properties live on Time vs. Observer).
+mechanism (seL4 MCS pattern — deferred), ~~D2 scheduling property split~~
+(settled by D36: Time carries quantity (compute units), Observer carries
+scheduling hints (D2)).
 
 - **Rests on:** D4 (designation = authority — Time is a bounded resource;
   ambient scheduling privilege foreclosed; independent path), D21 (cap-table
@@ -1516,9 +1525,9 @@ semantics (reservation for migration).
   provides multi-time per execution unit — novel position, justified by server
   scenario).
 - **Status:** settled — revisit if D8 is revised (changes cap-table entry
-  model), if a downstream derivation (Time parameters) reveals that additive
-  aggregation is structurally incompatible with the chosen parameter model, or
-  if the cached-aggregate approach proves unimplementable without hot-path cost.
+  model), (D36 confirms additive aggregation is compatible — compute units
+  compose via integer addition), or if the cached-aggregate approach proves
+  unimplementable without hot-path cost.
 - **Journal:** `journal/031-time-cardinality.md`.
 
 ### D31 — Resource acquisition through pager chain; boot architecture
@@ -1823,6 +1832,74 @@ D8-consistent).
   a richer create call would have avoided.
 - **Journal:** `journal/035-observer-creation-api.md`.
 
+### D36 — Time parameters: normalized compute units
+
+A Time object carries a single numerical value: a quantity of normalized compute
+units. The unit is calibrated to hardware-described core capacity factors (ARM
+`capacity-dmips-mhz`, ACPI CPPC `highest_perf`, or equivalent), so that a given
+number of compute units represents approximately the same amount of work
+regardless of which core executes it. The kernel translates compute units to
+per-core scheduling time internally using precomputed capacity factors.
+
+This is the Time parallel to Space's bytes: Space = bytes (hardware-independent
+quantity, kernel manages physical placement), Time = compute units
+(hardware-independent quantity, kernel manages core placement). The Observer
+reasons about absolute compute quantities ("I need N compute units per frame"),
+not fractions of system capacity or core-specific time.
+
+The kernel charges consumed compute as `elapsed_time × core_capacity_factor`,
+making empirical measurement core-independent: an Observer that measures its
+per-frame compute requirement on any core gets a result valid on every core of
+the system.
+
+Conservation: total system capacity = sum of all core capacities. Per-core
+admission: sum of compute units of all Observers on a core ≤ that core's
+capacity. The kernel cannot over-allocate. On homogeneous hardware, all capacity
+factors are equal and compute units degenerate to per-core fractions.
+
+The capacity factor is a first-order approximation — actual speedup ratios vary
+by workload type (~1.2x to ~3.5x for a stated 2x factor). Hard-RT precision is
+achieved through D2's per-core algorithm heterogeneity: dedicated RT cores run
+RT schedulers where the kernel knows the exact core and capacity factor. Best-
+effort scheduling absorbs the approximation.
+
+Does NOT settle: unit encoding (integer representation, bit width, global
+scale), minimum Time quantum, Time split syscall surface, Time clonability, Time
+donation on IPC, minimum abstract scheduling properties on the Observer (D2
+sibling question — the Observer/Time split is now concrete), capacity factor
+source (A2 implementation detail).
+
+- **Rests on:** D30 (multi-Time additive aggregate requires composable numerical
+  quantity — budget/period pairs don't compose for different periods), D2
+  (quantity/policy split — algorithm-specific parameters forbidden on Time;
+  per-core scheduler derives enforcement from compute units + Observer hints),
+  D31 (abstract scheduling capacity, core assignment kernel-internal — extends
+  to core capability now also kernel-internal), D31 conservation (bounded total
+  requires absolute quantity, not relative weight), A2 (big.LITTLE asymmetric
+  cores — per-core fractions break the Space parallel on heterogeneous hardware;
+  ARM DT provides `capacity-dmips-mhz`), A5 (kernel absorbs hardware-dependent
+  translation — Observer never sees core capacities), D9 (Space parallel — Space
+  = bytes, Time = compute units; same pattern, different resource), D1 (cached
+  aggregate stores precomputed per-core fraction; cold-path conversion on cap
+  mutation), `design/research/time-as-kernel-object.md` (seL4 MCS budget/period
+  model, scheduling algorithm state placement), `design/landscape.md` §4
+  (scheduling algorithm survey, heterogeneous scheduling).
+- **Archive convergence:** Strong on the resource/requirements split and
+  fraction-as-quantity. Archive journal 008 independently derived: Time =
+  fraction (single value), conservation, fungibility, Space parallel. Divergence
+  on per-core fraction (archive) vs. normalized compute units (this derivation),
+  explained by D31's core-independence requirement and A2's asymmetric hardware
+  — the archive did not address big.LITTLE normalization.
+- **Status:** settled — revisit if D31 is revised (changes the core-independence
+  requirement that motivates compute units over raw fractions), if D2 is revised
+  (changes the quantity/policy split that forbids algorithm-specific parameters
+  on Time), if D30 is revised (changes the composability requirement), or if the
+  capacity factor approximation proves too imprecise for the workloads the
+  kernel must support (the ~1.2x–3.5x range for a stated 2x factor is accepted
+  as adequate for scheduling; a downstream derivation could add
+  per-workload-class capacity factors if needed).
+- **Journal:** `journal/036-time-parameters.md`.
+
 ---
 
 ## Open questions
@@ -1904,12 +1981,14 @@ D8-consistent).
   Time" to "one or more Times." D6's "Multi-Time Observers" rejection was about
   execution streams, not resource accumulation — superseded for this
   interpretation.
-- **Time parameters.** What does a Time object carry? Budget/period (seL4 MCS
-  sporadic server model — hard-RT capable), a fraction of core scheduling
-  capacity (vocabulary-literal), or just a claim-to-participate with quantity
-  determined by the scheduler. Interacts with cardinality: if multi-Time, each
-  cap's parameters define its quantum; the per-core scheduler works with the
-  Observer's total allocation.
+- ~~**Time parameters.**~~ Settled by D36: normalized compute units. Each Time
+  cap carries an integer quantity of compute units calibrated to hardware core
+  capacity factors. The kernel translates to per-core scheduling time
+  internally. Space = bytes, Time = compute units — both hardware-independent
+  quantities with kernel-internal placement. Budget/period foreclosed by D2 +
+  D30; per-core fraction foreclosed by D31 + A2 (breaks Space parallel on
+  heterogeneous hardware). Remaining: unit encoding, minimum quantum, Time split
+  syscall surface.
 - **Time clonability.** D23 settled all other types as clonable. The uniformity
   argument suggests clonable (multiple references to the same scheduling
   allocation, not a second allocation). Journal 014's assumption of
@@ -2296,6 +2375,18 @@ D8-consistent).
   negligible on this cold path. Archive divergence: archive used all-params;
   explained by D31 (removes Time), D26 (removes VSpace), and cap-install reuse
   argument.
+- `036-time-parameters.md` — reasoning for D36: normalized compute units as
+  Time's parameter model. D30 + D2 + D31 foreclose budget/period (algorithm-
+  specific, non-composable), no-parameter (aggregate requires quantity), and
+  algorithm-specific parameters. Per-core fraction breaks the Space parallel on
+  heterogeneous hardware (A2 big.LITTLE) — leaks core identity through the
+  provisioning chain. Normalized compute units restore the parallel: Space =
+  bytes, Time = compute units, both hardware-independent quantities with
+  kernel-internal placement. Calibrated to ARM `capacity-dmips-mhz` / ACPI CPPC.
+  Capacity factor is a first-order approximation (~1.2x–3.5x for a stated 2x);
+  hard-RT precision on dedicated cores (D2). Strong archive convergence on the
+  resource/requirements split; divergence on per-core fraction vs. compute units
+  explained by D31 and A2.
 
 ---
 

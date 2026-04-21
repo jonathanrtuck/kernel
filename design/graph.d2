@@ -1,6 +1,6 @@
 # Kernel structural map.
 #
-# Populated from design/spec.md derivations D1-D6, D8-D33, observations O2-O3,
+# Populated from design/spec.md derivations D1-D6, D8-D36, observations O2-O3,
 # and Vocabulary (Space, Time, Observer). Every box and edge has a corresponding
 # spec.md entry; items labeled "TBD" await downstream derivation.
 #
@@ -129,13 +129,17 @@ kernel: {
     style.multiple: true
     # D29: capability-held kernel object type (fourth type).
     # D30: one or more per Observer, in regular cap-table slots.
-    # A claim to a portion of the system's scheduling capacity.
-    # Designated by capabilities. Multiple Time caps are additive —
-    # kernel maintains cached aggregate per Observer (D30).
-    # D31: Time is abstract — core assignment is kernel-internal
-    # (A5 parallel with D9/D26). Observers don't see core identity.
+    # D36: each Time cap carries normalized compute units —
+    # calibrated to hardware core capacity factors so that a given
+    # quantity represents approximately the same work on any core.
+    # Kernel translates to per-core scheduling time internally.
+    # Space = bytes, Time = compute units (D36 parallel).
+    # Multiple Time caps are additive — kernel maintains cached
+    # aggregate per Observer (D30).
+    # D31: core assignment is kernel-internal (A5 parallel with
+    # D9/D26). Observers don't see core identity or capability.
     # Kernel allocates from per-core root Time pools via pager chain.
-    # Parameters, clonability TBD.
+    # Clonability TBD.
   }
 
   field: {
