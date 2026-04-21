@@ -8,7 +8,12 @@
 
 #[cfg(target_os = "none")]
 pub mod arch;
+pub mod capability;
 pub mod config;
+pub mod endpoint;
 pub mod firmware;
+pub mod observer;
 #[cfg(target_os = "none")]
 pub mod print;
+pub mod space;
+pub mod time;
