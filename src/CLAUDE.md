@@ -42,9 +42,9 @@ comments link to `design/spec.md`.
 
 | Module          | Design concept                   | Key derivations         |
 | --------------- | -------------------------------- | ----------------------- |
-| `capability.rs` | Authority mechanism              | D4, D8, D11, D17        |
+| `capability.rs` | Authority mechanism              | D4, D8, D11, D17, D38   |
 | `space.rs`      | Memory object                    | D9, D25, D26, D27       |
-| `time.rs`       | Compute allocation               | D29, D30, D31, D36, D37 |
+| `time.rs`       | Compute allocation               | D29, D30, D31, D36–D38  |
 | `field.rs`      | IPC mechanism + message format   | D13, D15, D16, D28, D37 |
 | `observer.rs`   | Execution unit                   | D6, D14, D20, D21       |
 | `arch/`         | Hardware abstraction (core half) | A2, D1, D5              |

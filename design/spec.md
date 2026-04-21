@@ -80,21 +80,24 @@ under "Rests on"; it exists so later sections can be precise.
   core executes it — the kernel translates to per-core scheduling time
   internally. Total system capacity = sum of all core capacities; the kernel
   cannot over-allocate. Time is fungible — multiple Time caps are additive
-  (D30). The Observer holds abstract compute capacity without knowing which core
-  it runs on or what that core's capability is; core assignment, migration,
-  algorithm selection, and the compute-unit-to-time translation are
-  kernel-internal concerns (D31, D36), parallel to how physical addresses and
-  virtual addresses are kernel-internal for Space (D9, D26). The Observer
-  provides abstract scheduling hints (D2: priority, CPU/IO classification,
-  deadline); the kernel places the Observer on an appropriate core and enforces
-  the compute allocation. On SMT hardware, delivered compute additionally
-  depends on sibling logical-core contention for shared pipeline resources; the
-  kernel guarantees compute allocation, not physical-compute-rate delivery.
-  (Vocabulary revised by D36 — previously "abstract scheduling capacity" as a
-  per-core fraction (D31). Per-core fractions leak core identity through the
-  provisioning chain on heterogeneous hardware (A2 big.LITTLE). Normalized
-  compute units restore the Space parallel: Space = bytes, Time = compute units
-  — both hardware-independent quantities with kernel-internal placement.)
+  (D30). Time caps are linear: at most one capability reference per Time object,
+  non-clonable (D38). Authority delegation uses split (new object with a portion
+  of the original's quantity), not clone. The Observer holds abstract compute
+  capacity without knowing which core it runs on or what that core's capability
+  is; core assignment, migration, algorithm selection, and the
+  compute-unit-to-time translation are kernel-internal concerns (D31, D36),
+  parallel to how physical addresses and virtual addresses are kernel-internal
+  for Space (D9, D26). The Observer provides abstract scheduling hints (D2:
+  priority, CPU/IO classification, deadline); the kernel places the Observer on
+  an appropriate core and enforces the compute allocation. On SMT hardware,
+  delivered compute additionally depends on sibling logical-core contention for
+  shared pipeline resources; the kernel guarantees compute allocation, not
+  physical-compute-rate delivery. (Vocabulary revised by D36 — previously
+  "abstract scheduling capacity" as a per-core fraction (D31). Per-core
+  fractions leak core identity through the provisioning chain on heterogeneous
+  hardware (A2 big.LITTLE). Normalized compute units restore the Space parallel:
+  Space = bytes, Time = compute units — both hardware-independent quantities
+  with kernel-internal placement.)
 
 - **Observer.** A schedulable execution unit coupling Space and Time — the
   condition under which compute (Time) executes instructions within specific
@@ -1067,18 +1070,21 @@ injection).
 
 ### D23 — Observer capabilities are clonable
 
-Observer handles follow uniform capability rules: clone, attenuate, transfer —
-identically to every other kernel object type (Spaces, fields). Multiple
-entities can hold capabilities to the same Observer, each with independent
-rights masks. No type-specific exceptions in D8's table management.
+Observer handles follow standard capability rules: clone, attenuate, transfer.
+Multiple entities can hold capabilities to the same Observer, each with
+independent rights masks. Clone is a per-type right (D38), not a universal
+meta-operation; Observer's rights set includes clone. No type-specific
+exceptions in D8's table management for Observer.
 
 Non-clonable was rejected on five convergent structural arguments: D4
 attenuation requires cloning (foreclosed), D8 uniformity requires no
 type-specific exceptions (broken), D12/D20 fault delivery requires cap-copy
 (requires new mechanism), D11 close creates orphan risk (requires new
-mechanism), and type consistency (Observer would be the sole non-clonable type
-among four). Non-clonable's sole benefit — kernel-enforced single-manager — is
-achievable through capability discipline under clonable.
+mechanism), and type consistency. Non-clonable's sole benefit — kernel-enforced
+single-manager — is achievable through capability discipline under clonable.
+Note: D38 shows that non-clonable is correct for Time, where different
+structural arguments apply (D30 aggregate soundness). D23's reasoning is
+Observer-specific, not a universal law.
 
 The archive's "handle = handler unification" concept (if non-clonable, the
 handle holder is necessarily the fault handler) is dissolved by D20/D21: the
@@ -1459,13 +1465,12 @@ scheduling capacity; core assignment is kernel-internal; migration is the kernel
 moving an Observer between cores, not a capability operation.
 
 Does NOT settle: ~~Time cardinality~~ (settled by D30: one or more), ~~Time
-parameters~~ (settled by D36: normalized compute units), Time clonability (D23
-uniformity suggests clonable but not derived; D37 constrains — D30 aggregate
-double-counts clones), ~~Time creation authority~~ (settled by D31: kernel holds
-pool, allocates via pager chain), ~~Time donation mechanism~~ (settled by D37:
-explicit cap transfer via user cap slot on Call()), ~~D2 scheduling property
-split~~ (settled by D36: Time carries quantity (compute units), Observer carries
-scheduling hints (D2)).
+parameters~~ (settled by D36: normalized compute units), ~~Time clonability~~
+(settled by D38: non-clonable — D30 aggregate soundness), ~~Time creation
+authority~~ (settled by D31: kernel holds pool, allocates via pager chain),
+~~Time donation mechanism~~ (settled by D37: explicit cap transfer via user cap
+slot on Call()), ~~D2 scheduling property split~~ (settled by D36: Time carries
+quantity (compute units), Observer carries scheduling hints (D2)).
 
 - **Rests on:** D4 (designation = authority — Time is a bounded resource;
   ambient scheduling privilege foreclosed; independent path), D21 (cap-table
@@ -1947,10 +1952,10 @@ contradicting D29's cap-graph completeness rationale. Kernel-injected dedicated
 Time field was rejected: solves a crash-safety problem that doesn't exist,
 requires D28 revision, grows every message slot.
 
-Does NOT settle: priority-level inheritance during IPC (D2 downstream), Time
-clonability (constrained by D30 aggregate — move-only for donation, but
-clonability not derived), server-side return protocol (userspace convention),
-Send() with Time caps (naturally follows from standard cap transfer).
+Does NOT settle: priority-level inheritance during IPC (D2 downstream), ~~Time
+clonability~~ (settled by D38: non-clonable), server-side return protocol
+(userspace convention), Send() with Time caps (naturally follows from standard
+cap transfer).
 
 - **Rests on:** D28 (fixed-size message with 1 user cap slot — Time donation is
   the natural use of the cap slot during Call(); "request + delegated authority"
@@ -1983,6 +1988,64 @@ Send() with Time caps (naturally follows from standard cap transfer).
   choice), or if the Send()+Call() decomposition proves unworkable for a
   critical workload class.
 - **Journal:** `journal/037-time-donation-on-ipc.md`.
+
+### D38 — Time capabilities are non-clonable
+
+Time caps are linear: at most one capability reference exists per Time object.
+Clone is structurally forbidden. Time caps can be transferred (moved) but not
+duplicated.
+
+D30's cached scheduling aggregate maintains a conservation invariant:
+`total += cap.amount` on acquisition, `total -= cap.amount` on loss. Each cap
+must reference a distinct Time object. Clone creates two references to the same
+object, double-counting its compute units — the kernel believes more capacity
+exists than is real. This violates "the kernel cannot over-allocate."
+
+D37's move-only donation reinforces independently: if Time were clonable, the
+caller could clone before donating, retaining scheduling capacity while the
+server also counts it. D16 send-once provides precedent for non-clonable caps
+(single-use invariant, structurally same pattern as Time's conservation
+invariant).
+
+D23's "identically to every other kernel object type" is narrowed: clone is a
+per-type right, not a universal meta-operation. Each object type defines its
+valid rights; clone appears in the rights sets of Space, Field, and Observer but
+not Time. From the Observer's perspective, the distinction between
+"meta-operations" and "type-specific rights" does not surface — a cap has a type
+and a set of things you can do with it (A5: simple interface, kernel absorbs
+dispatch complexity).
+
+Authority delegation for Time uses split (creating a new Time object with a
+portion of the original's quantity), not clone. Split creates two objects whose
+quantities sum to the original — conservation holds. This is the Time analog of
+Space split.
+
+A1 parallel: linear Time caps map to Rust's ownership model — a move-only type
+with no `Clone` impl.
+
+Does NOT settle: Observer rights model (clone is confirmed as a per-type right,
+shaping how rights masks are structured), Time split syscall surface (D36
+remaining), duplicate-control right for other types (D23 deferred).
+
+- **Rests on:** D30 (multi-Time additive aggregate — the conservation invariant
+  that clone violates; load-bearing), D37 (move-only donation — clone would
+  defeat capacity transfer; independent reinforcement), D29 (Time is
+  capability-held — clone is a cap-level operation that must be evaluated per
+  type), D16 (send-once precedent — non-clonable caps already exist in the
+  design for structural soundness reasons), D23 (Observer clonability — correct
+  for Observer, but universality framing narrowed; D23's structural arguments do
+  not apply to Time because Time's soundness constraint is different), A5
+  (per-type rights set is simpler interface than meta-operation/type-specific
+  split).
+- **Archive convergence:** Archive journal/014 assumed non-clonable Time but
+  never derived it. Same conclusion, different path — archive assumed it as a
+  property; this chain derives it from D30 soundness.
+- **Status:** settled — revisit if D30 is revised (changes the aggregate model
+  that makes clone unsound), or if a downstream derivation reveals that
+  non-clonable Time creates essential complexity (orphan risk, authority
+  delegation gaps) analogous to what D23 found for Observer — noting that Time's
+  split operation provides the delegation path that clone provides for Observer.
+- **Journal:** `journal/038-time-clonability.md`.
 
 ---
 
@@ -2044,11 +2107,12 @@ Send() with Time caps (naturally follows from standard cap transfer).
 - **Observer rights model.** D14 settles resume and destroy as minimum. D23
   settles clonability, enabling rights separation across multiple caps. D35 adds
   install-cap and write-registers as confirmed rights (needed for creation setup
-  and fault resolution). Open: suspend (external pause), inspect register state
-  (debugging), modify scheduling properties (D2), change fault handler (D20 —
-  per-Observer, so this is an Observer-cap right), duplicate-control right
-  (Zircon ZX_RIGHT_DUPLICATE model, deferred from D23). Each right = a typed
-  kernel syscall under D7.
+  and fault resolution). D38 settles that clone is a per-type right (not a
+  universal meta-operation) and that rights sets are defined per object type.
+  Open: suspend (external pause), inspect register state (debugging), modify
+  scheduling properties (D2), change fault handler (D20 — per-Observer, so this
+  is an Observer-cap right), duplicate-control right (Zircon ZX_RIGHT_DUPLICATE
+  model, deferred from D23). Each right = a typed kernel syscall under D7.
 - ~~**Observer handle clonability.**~~ Settled by D23: clonable. Observer
   handles follow uniform capability rules (clone, attenuate, transfer)
   identically to all other kernel object types. Non-clonable rejected on five
@@ -2077,14 +2141,13 @@ Send() with Time caps (naturally follows from standard cap transfer).
   D30; per-core fraction foreclosed by D31 + A2 (breaks Space parallel on
   heterogeneous hardware). Remaining: unit encoding, minimum quantum, Time split
   syscall surface.
-- **Time clonability.** D23 settled all other types as clonable. The uniformity
-  argument suggests clonable (multiple references to the same scheduling
-  allocation, not a second allocation). Journal 014's assumption of
-  "non-clonable" was never derived. D37 constrains: D30's aggregate
-  (`total += cap.amount`) double-counts if two caps reference the same Time
-  object — violating "the kernel cannot over-allocate." Move-only semantics for
-  donation are consistent with non-clonable Time. The tension is D23 uniformity
-  vs. D30 aggregate correctness.
+- ~~**Time clonability.**~~ Settled by D38: non-clonable. Time caps are linear —
+  at most one capability reference per Time object. D30's aggregate
+  (`total += cap.amount`) double-counts clones, violating the conservation
+  invariant. D37's move-only donation reinforces. D16 send-once provides
+  precedent. D23's universality framing narrowed: clone is a per-type right, not
+  a universal meta-operation. Authority delegation for Time uses split (new
+  object with a portion of the original's quantity), not clone.
 - ~~**Time creation authority.**~~ Settled by D31: the kernel holds unallocated
   scheduling capacity as per-core root Time objects internally. Observers
   acquire Time through the pager chain (resource request → fault handler → ... →
@@ -2480,6 +2543,21 @@ Send() with Time caps (naturally follows from standard cap transfer).
   hard-RT precision on dedicated cores (D2). Strong archive convergence on the
   resource/requirements split; divergence on per-core fraction vs. compute units
   explained by D31 and A2.
+- `037-time-donation-on-ipc.md` — reasoning for D37: four options evaluated
+  (explicit cap transfer, kernel-internal donation, no donation, kernel-injected
+  dedicated field). Explicit cap transfer via D28 user cap slot chosen —
+  standard move semantics, opt-in, no kernel tracking. Kernel-internal rejected
+  on D29 cap-graph completeness. Crash safety is not a kernel concern (caller
+  already stuck on reply field). Time transfer is necessarily a move (D30
+  aggregate double-counts clones). Donation transfers capacity (D36) not
+  priority (D2). Strong archive convergence ("events-carry-resources").
+- `038-time-clonability.md` — reasoning for D38: D30 aggregate soundness
+  requires each cap to reference a distinct Time object; clone double-counts,
+  violating conservation. D37 reinforces (clone defeats move-only donation). D16
+  send-once provides non-clonable precedent. D23's universality framing narrowed
+  — clone is a per-type right, not a universal meta-operation. Authority
+  delegation uses split (new object), not clone (second reference). A1 parallel:
+  linear Time caps map to Rust's move-only ownership.
 
 ---
 

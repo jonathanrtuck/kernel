@@ -15,12 +15,16 @@ pub enum ObjectType {
     Observer,
 }
 
-/// Per-capability rights mask (D8, D15, D17, D33).
+/// Per-capability rights mask (D8, D15, D17, D33, D38).
+///
+/// Rights are per-type, not universal (D38). Each object type defines its valid
+/// rights; clone appears in Space/Field/Observer but not Time.
 pub struct Rights {
     // Settled rights: send, receive (D15), mint (D17), destroy (D33).
+    // D38: clone is per-type (Time excludes it; send-once excludes it).
     // Open:
     //   send-once encoding (D16), grant (D28), Observer-specific ops
-    //   (D14 downstream).
+    //   (D14 downstream), full per-type rights sets.
 }
 
 /// Generational slot tag for ABA prevention (D11).

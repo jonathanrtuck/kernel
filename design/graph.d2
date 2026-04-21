@@ -96,9 +96,9 @@ kernel: {
     # D20: per-Observer fault handler (field ref + badge).
     # D21: fault handler is a cap-table entry at reserved slot
     # (not a separate Observer struct field). D11/D17/D8 apply.
-    # D23: Observer handles are clonable — uniform with all
-    # other kernel object types. Rights separation via multiple
-    # caps with different masks.
+    # D23: Observer handles are clonable. Rights separation via
+    # multiple caps with different masks. D38: clone is a per-type
+    # right (not universal); Observer includes clone, Time does not.
     # D35: creation is minimal create + separate start.
     # create_observer(space, handler, badge) → inert Observer.
     # Configured via install_cap, write_registers, then resume.
@@ -139,7 +139,9 @@ kernel: {
     # D31: core assignment is kernel-internal (A5 parallel with
     # D9/D26). Observers don't see core identity or capability.
     # Kernel allocates from per-core root Time pools via pager chain.
-    # Clonability TBD.
+    # D38: non-clonable (linear). At most one cap per Time object.
+    # D30 aggregate soundness requires distinct references.
+    # Authority delegation via split (new object), not clone.
   }
 
   field: {
