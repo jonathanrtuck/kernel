@@ -2138,6 +2138,86 @@ kernel-internal priority inheritance ordering).
   extract-cap serves a structural need that proactive cap sharing cannot.
 - **Journal:** `journal/039-observer-rights-model.md`.
 
+### D40 — Pager fault resolution protocol: per-fault-type resolution via typed kernel syscalls
+
+The pager's fault resolution sequence is per-fault-type, using existing typed
+kernel syscalls (D7). No new kernel surface is introduced.
+
+1. **Resource requests (D31):** `observer_install_cap(obs, cap)` +
+   `observer_resume(obs)`. The Observer explicitly requested resources; the
+   handler provides; the Observer adapts to the new VA base. install_cap IS the
+   mapping operation under D26 (holding a Space cap = having access; cap-table
+   mutation triggers page table update via D24).
+
+2. **Cap-table-full (D8):** `observer_install_cap(obs, growth_space)` to a
+   reserved growth slot + `observer_resume(obs)`. The kernel consumes the Space
+   for table growth (D32 type conversion) and retries the original operation.
+   The reserved growth slot follows D21's pattern (kernel-reserved cap-table
+   slot). The slot is always writable regardless of regular-slot fullness. D32
+   (line 1667): "optimizations (designated growth Space) can be added behind the
+   same interface."
+
+3. **VM page faults (out-of-bounds):** Dispatched to handler per D12 as error
+   notification. The handler cannot resolve by providing a new Space — D26's
+   kernel-assigned VA bases mean a new Space doesn't cover the faulting VA
+   (`base_of(S) + offset` where offset exceeds S's size). Handler's response:
+   destroy, or cooperative recovery via write-registers (D39) to redirect the
+   Observer's PC to a pre-arranged trampoline. Memory growth uses the explicit
+   D31 resource request path. Transparent demand paging requires Space resize
+   (D9 open question).
+
+4. **Lazy PTE population:** Kernel-internal per D12's preserved fast-path
+   optimization. If the kernel lazily populates page table entries (D26 open
+   sub-question), faults within owned Spaces are resolved by the kernel directly
+   — no pager involvement. D9 guarantees physical backing exists.
+
+5. **No kernel validation** of fault resolution before resume(). The kernel
+   trusts the handler (D12's trust model). If the handler calls resume() without
+   resolving the fault, the Observer re-faults (self-correcting).
+
+install_cap + resume is the general-purpose pattern. D35's structural reuse
+holds: the same operations serve Observer creation, resource request resolution,
+and cap-table growth.
+
+Does NOT settle: Observer handle rights in fault message (downstream of fault
+message content question), Space resize (D9 open — would enable transparent
+demand paging), fault message content per type (D28 downstream), pager
+unavailability protocol (separate question), VA assignment policy details (D26
+open).
+
+- **Rests on:** D12 (fault delegation — kernel dispatches, doesn't contain
+  policy), D14 (resume as typed kernel syscall; Observer handle in fault
+  message), D26 + D24 (capability-addressed memory — holding Space cap = access;
+  page table as materialized cap state; kernel-assigned VA bases create the
+  demand-paging constraint), D35 (install_cap as general-purpose primitive —
+  serves creation, fault resolution, dynamic delegation; no new kernel surface),
+  D32 (type conversion — Space consumed for table growth; D8 table-full fault
+  pattern), D21 (reserved cap-table slot precedent — growth slot follows same
+  pattern), D28 (fault message format — type label enables per-fault-type
+  dispatch by handler), D31 (resource requests through fault mechanism — the
+  primary use case for install_cap + resume), D9 (Spaces always physically
+  backed — lazy-population faults are kernel-internal), D39 (write-registers
+  right enables cooperative recovery via PC surgery), D7 (typed kernel syscalls
+  — resolution is syscall sequence, not IPC),
+  `design/research/page-fault-routing.md` (seL4 map+reply, L4 fpage-in-reply,
+  Mach data_provided, Zircon supply_pages — all assume pager-controlled VA; this
+  kernel's D26 model diverges), `design/landscape.md` §2.4 (three fault handling
+  patterns), §5.3 (fault delivery mechanisms).
+- **Archive convergence:** Divergent. Archive (journal/011) unified IPC reply
+  and fault resume as "send to reply/control endpoint" — IPC-based resolution.
+  Current chain: D14 decoupled fault resume as typed syscall, D16 settled IPC
+  reply as send-to-field. Archive did not have D26 and implicitly assumed
+  VA-controlled mapping (traditional demand paging). Divergence explained by D7
+  (typed syscalls for Observer operations), D14 (resume is not IPC), and D26
+  (kernel-assigned VA bases limit demand paging).
+- **Status:** settled — revisit if D9 is revised (Space resize enables
+  transparent demand paging — OOB faults become resolvable instead of error
+  notifications), if D26 VA assignment policy allows pager-influenced placement
+  (changes the demand-paging constraint), or if a downstream derivation reveals
+  that the error-notification model for OOB faults creates essential complexity
+  that transparent demand paging would have avoided.
+- **Journal:** `journal/040-pager-fault-resolution-protocol.md`.
+
 ---
 
 ## Open questions
@@ -2298,13 +2378,15 @@ kernel-internal priority inheritance ordering).
   backed (D26 + D24 — page faults can't occur on initial memory). Resource
   requests handled by kernel allocating from its pools. The kernel's policy is
   trivially simple (allocate-or-deny); real policy in userspace pagers.
-- **Pager reply/resume mechanism.** D14 settles the resume half:
-  resume(observer_handle) as a typed kernel syscall. The Observer handle reaches
-  the pager via capability transfer in the fault message (D13). Remaining: how
-  does the pager signal that it has resolved the fault and prepared the address
-  space? Is resume() alone sufficient, or does the pager also need to perform
-  memory operations (provide physical backing for the faulting Space) before
-  calling resume()? The sequence shapes the pager's syscall pattern.
+- ~~**Pager reply/resume mechanism.**~~ Settled by D40: per-fault-type
+  resolution via typed kernel syscalls. Resource requests (D31): install_cap +
+  resume. Cap-table-full (D8): install_cap to reserved growth slot + resume
+  (kernel consumes Space for table growth). VM page faults (OOB): error
+  notification to handler (D26's kernel-assigned VA bases prevent resolution by
+  providing a new Space; transparent demand paging requires Space resize). Lazy
+  PTE population: kernel-internal. No kernel validation of fault resolution.
+  install_cap + resume is the general-purpose pattern; D35's structural reuse
+  holds across creation, resource requests, and table growth.
 - **D7 classification of fault traffic.** D12 says fault notifications go to
   pager Observers. D13 says all information delivery uses queued fields. Fault
   delivery is through normal IPC fields (kernel-as-sender). D18 settles the
@@ -2664,6 +2746,16 @@ kernel-internal priority inheritance ordering).
   sharing via D23 + D28 covers use cases; extract compensates for policy
   failures, not mechanism gaps). Duplicate-control deferred to D8 (not
   Observer-specific). Strong archive convergence on operations.
+- `040-pager-fault-resolution-protocol.md` — reasoning for D40: per-fault-type
+  resolution via typed kernel syscalls. D26 transforms the question —
+  install_cap IS the mapping operation (cap-table mutation triggers page table
+  update). D26 also structurally limits demand paging (kernel-assigned VA bases
+  mean new Spaces can't cover faulting VAs). Resource requests: install_cap +
+  resume. Cap-table-full: reserved growth slot (D21 pattern) + resume; kernel
+  consumes Space (D32) and retries. VM page faults: error notification (handler
+  destroys or does PC surgery via write-registers). Lazy PTE population:
+  kernel-internal. No new kernel surface. Archive divergence: archive unified
+  fault resume with IPC reply, lacked D26.
 
 ---
 

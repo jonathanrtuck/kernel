@@ -1,6 +1,6 @@
 # Kernel structural map.
 #
-# Populated from design/spec.md derivations D1-D6, D8-D39, observations O2-O3,
+# Populated from design/spec.md derivations D1-D6, D8-D40, observations O2-O3,
 # and Vocabulary (Space, Time, Observer). Every box and edge has a corresponding
 # spec.md entry; items labeled "TBD" await downstream derivation.
 #
@@ -260,7 +260,15 @@ userspace -> userspace: IPC via queued fields (D7+D13+D15+D28, capability-mediat
 # D20: fault handler attaches per-Observer (field ref + badge).
 # D14: Resume via resume(observer_handle) typed kernel syscall.
 # Observer handle delivered in fault message via cap transfer (D13).
-kernel -> userspace: fault delegation (D12+D14+D20, pager notification + resume)
+# D40: Per-fault-type resolution protocol:
+#   Resource requests: install_cap + resume (Observer adapts to new VA base).
+#   Cap-table-full: install_cap to reserved growth slot + resume
+#     (kernel consumes Space for table growth, retries).
+#   VM page faults (OOB): error notification — handler destroys or
+#     does cooperative recovery (write-registers + resume).
+#     Demand paging not supported (D26 VA placement constraint).
+#   Lazy PTE population: kernel-internal (D12 fast path).
+kernel -> userspace: fault delegation (D12+D14+D20+D40, per-fault-type resolution)
 # D31: Resource requests routed through same fault mechanism.
 # Observer syscall → kernel routes to fault handler → pager resolves.
 # Chain: handler → handler's handler → ... → kernel (root pager).
