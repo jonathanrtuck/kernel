@@ -1646,7 +1646,8 @@ Observer destruction returns structural backing as Space cap. What happens to
 the Observer's held capabilities (caps in its table) is the destroy cascade
 question — deferred.
 
-Does NOT settle: destroy cascade protocol (held caps on Observer destroy), Space
+Does NOT settle: ~~destroy cascade protocol~~ (settled by D33: preemptible
+cascade, structural-backing-only return, cascade-freed to root Space), Space
 "create" right in the rights mask, overhead reporting (does the Observer see
 subtree overhead?), merge/join operation (reverse of split).
 
@@ -1673,6 +1674,73 @@ subtree overhead?), merge/join operation (reverse of split).
   objects.
 - **Journal:** `journal/033-kernel-memory-accounting.md`.
 
+### D33 — Preemptible destroy cascade with structural-backing-only return
+
+Object destruction cascades through held capabilities: each cap is closed, and
+objects reaching refcount zero are destroyed too. Only Observers cascade (only
+Observers hold caps; Spaces, Endpoints, Times don't). Single Observer destroy is
+O(N + M): N cap table entries closed, M badge-closure checks. Cascade depth is
+bounded by exclusively-held Observer chains.
+
+The object is dead before cleanup begins (D11 — dead handles created at destroy
+time). The cascade is cleanup of an already-dead object. No partially-alive
+state is externally visible.
+
+The cascade is preemptible: the kernel processes cleanup in bounded steps.
+Between steps, the timer interrupt can preempt and the scheduler can run
+higher-priority Observers. The kernel saves continuation state: position in cap
+table iteration plus a stack of cascading objects. seL4 MCS demonstrates
+feasibility. Inline (run-to-completion) is a special case — preemptible
+forecloses nothing; inline forecloses bounded destroy time.
+
+The top-level destroy returns one Space cap: the destroyed object's structural
+backing (D32). Cascade-freed backing (refcount-zero objects destroyed during the
+cascade) goes to the kernel's root Space (D31). Three arguments: shared
+resources break the return model (last holder is arbitrary), internal
+reorganization makes returns unpredictable, and structural backing is
+predictable.
+
+Destroy requires a "destroy" right in D8's per-cap rights mask. D4 requires
+capability-mediated authority. Same pattern as send/receive/mint (D17). Badge-
+closure during cascade is best-effort (D18 applies unchanged). Pending fault
+list cleanup is O(1) per linkage (D18 intrusive list).
+
+Does NOT settle: cap table close ordering (whether ordering within the table
+matters), cross-core prompt-effect policy (strong vs. weak — D11 deferred), TLB
+shootdown batching (optimization, deferred), Observer "extract" operation
+(pulling caps from child's table before destroy — D14 downstream).
+
+- **Rests on:** D11 (base revocation — close-only + destroy provides the
+  mechanism; dead-handle semantics ensure no visible intermediate state; ABA
+  tags protect reused slots), D17 (badge-closure — up to M checks per Observer
+  destroy; T5 tension accepted), D18 (overflow — badge-closure dropped on full
+  queue; deferred faults cleaned up on endpoint destroy), D32 (type conversion —
+  structural backing returned to destroyer; cascade-freed has no caller), D31
+  (root Space — cascade-freed backing destination; pager chain for
+  re-acquisition), D8 (flat cap table — iteration is O(N); rights mask holds
+  destroy right), D4 (capability-mediated authority — destroy right is D4-
+  consistent), D26 (page table cleanup — last holder triggers subtree detach;
+  cross-core TLB shootdown on last system-wide holder), A4 (purely reactive — no
+  background cleanup; preemptible cascade uses timer preemption within syscall
+  context), A3 (generic — RT workloads require bounded preemption latency;
+  preemptible cascade is RT-compatible), D1 (cold-path — destroy is infrequent
+  but must not block hot-path work indefinitely),
+  `design/research/capability-revocation.md` (seL4 MCS preemptible revocation,
+  Barrelfish cross-core costs, cost table), `design/landscape.md` §1.4
+  (revocation approaches across surveyed systems).
+- **Archive convergence:** Partial. Archive converges on cascade through owned
+  resources ("subtree destroyed, resources reclaimed"). Diverges on return
+  destination: archive returns resources to supervisor (ownership tree model);
+  this derivation returns structural backing to destroyer and cascade-freed to
+  root Space (flat caps + refcounting, no ownership tree). Divergence explained
+  by D6 (no kernel grouping) and D27 (flat cardinality). Archive does not
+  discuss preemptibility.
+- **Status:** settled — revisit if D11 is revised (changes the base
+  destroy/close mechanism), if D32 is revised (changes the type-conversion
+  return model), or if the Observer rights model derivation reveals that
+  "extract before destroy" makes the cascade protocol unnecessary.
+- **Journal:** `journal/034-destroy-cascade-protocol.md`.
+
 ---
 
 ## Open questions
@@ -1693,13 +1761,13 @@ subtree overhead?), merge/join operation (reverse of split).
   deferred as kernel-internal optimization.
 - **Revocation add-ons.** D11 settles the base primitive (close-only + destroy
   - ABA slot tag). D17 settles badge semantics (minter-assigned, opt-in
-    per-badge tracking with closure notifications). Remaining add-ons: endpoint
-    rotation via destroy (D11 provides destroy; endpoint lifecycle needed);
-    generation-as-revocation (O(1) mass invalidation; alternative is endpoint
-    rotation). Still deferred: CDT (selective revocation of a subtree); who
-    authorizes destroy; strong vs. weak cross-core prompt-effect policy; destroy
-    cleanup protocol (inline vs. preemptible — D17's destroy cascade tension
-    amplifies this question).
+    per-badge tracking with closure notifications). D33 settles the destroy
+    cascade protocol (preemptible, structural-backing-only return, destroy right
+    in rights mask). Remaining add-ons: endpoint rotation via destroy (D11
+    provides destroy; endpoint lifecycle needed); generation-as-revocation (O(1)
+    mass invalidation; alternative is endpoint rotation). Still deferred: CDT
+    (selective revocation of a subtree); strong vs. weak cross-core
+    prompt-effect policy.
 - **Observer minimum schema.** D6 settles that an Observer is a single execution
   unit. D14 settles that Observer is a capability-held kernel object type. D20
   settles per-Observer fault handler. D21 settles the handler as a cap-table
@@ -2124,6 +2192,15 @@ subtree overhead?), merge/join operation (reverse of split).
   table growth: handler provides Space in fault reply (2A). Time destruction
   returns to kernel pool (asymmetric). Observer held-caps on destroy deferred to
   destroy cascade. Strong archive convergence (journal 013 same model).
+- `034-destroy-cascade-protocol.md` — reasoning for D33: preemptible destroy
+  cascade with structural-backing-only return. Object dead before cleanup (D11).
+  Only Observers cascade (only they hold caps). Preemptible in bounded steps
+  with saved continuation (seL4 MCS precedent). Structural backing to destroyer;
+  cascade-freed to root Space (shared resources break return model). Destroy
+  right in rights mask (D4). Badge-closure best-effort (D18). Partial archive
+  convergence (cascade through owned resources); divergence on return
+  destination (archive returns to supervisor via ownership tree; this design
+  uses flat caps + root Space).
 
 ---
 
