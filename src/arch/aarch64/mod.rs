@@ -9,6 +9,7 @@ pub use gic as interrupts;
 mod mmio;
 pub mod mmu;
 pub mod platform;
+pub mod register_state;
 pub mod serial;
 mod sysreg;
 pub mod timer;
@@ -29,14 +30,17 @@ pub fn disable_interrupts() {
 /// panic message has the precise source location.
 pub fn dump_panic_registers() {
     let lr: u64;
+
     // SAFETY: Copies the link register (x30) into a general-purpose register.
     // Pure register-to-register move — no memory or system side effects. No
     // `nomem` because the project policy restricts it to an explicit approved
     // list (immutable `mrs`, hint instructions).
     unsafe { core::arch::asm!("mov {lr}, x30", lr = out(reg) lr, options(nostack)) };
+
     let elr = sysreg::elr_el1();
     let spsr = sysreg::spsr_el1();
     let esr = sysreg::esr_el1();
+
     crate::println!("  LR:   0x{lr:016x}");
     crate::println!("  ELR:  0x{elr:016x}");
     crate::println!("  SPSR: 0x{spsr:016x}");

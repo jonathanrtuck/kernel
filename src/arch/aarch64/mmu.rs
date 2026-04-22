@@ -132,6 +132,7 @@ pub fn init() {
     // MAIR_EL1: memory attribute definitions
     // -----------------------------------------------------------------------
     let mair = MAIR_DEVICE_NGNRNE | (MAIR_NORMAL_WB << 8);
+
     sysreg::set_mair_el1(mair);
 
     // -----------------------------------------------------------------------
@@ -141,6 +142,7 @@ pub fn init() {
     // Device MMIO: 0x08000000–0x0BFFFFFF (L2 indices 4–5).
     // Device-nGnRnE, RW, no execute.
     let device_attrs = ATTR_DEVICE | AP_RW_EL1 | PXN | UXN;
+
     for idx in l2_index(platform::GIC_DIST_BASE)..=l2_index(0x0BFF_FFFF) {
         l2[idx] = l2_block(idx * L2_BLOCK_SIZE, device_attrs);
     }
@@ -148,6 +150,7 @@ pub fn init() {
     // RAM block containing the kernel (0x40000000–0x41FFFFFF, L2 index 32):
     // table descriptor pointing to L3 for fine-grained W^X.
     let l3_pa = L3_KERNEL.0.get() as usize;
+
     l2[l2_index(platform::ram_base())] = l2_table_desc(l3_pa);
 
     // Remaining RAM: 0x42000000–0x4FFFFFFF (L2 indices 33–39).
@@ -156,6 +159,7 @@ pub fn init() {
     let ram_start_idx = l2_index(platform::ram_base()) + 1;
     let ram_end_idx =
         l2_index(platform::ram_base() + platform::ram_size() - 1).min(ENTRIES_PER_TABLE - 1);
+
     for idx in ram_start_idx..=ram_end_idx {
         l2[idx] = l2_block(idx * L2_BLOCK_SIZE, ram_rw);
     }
@@ -170,11 +174,10 @@ pub fn init() {
     let rodata_end = linker_addr(&raw const __rodata_end);
     let data_start = linker_addr(&raw const __data_start);
     let kernel_end = linker_addr(&raw const __kernel_end);
-
     let block_base = platform::ram_base();
+
     for i in 0..ENTRIES_PER_TABLE {
         let pa = block_base + i * PAGE_SIZE;
-
         let attrs = if pa >= text_start && pa < text_end {
             // Kernel text: read-only, executable at EL1.
             ATTR_NORMAL | AP_RO_EL1 | UXN
@@ -218,12 +221,14 @@ pub fn init() {
         | (0b11    << 28)  // SH1: Inner Shareable
         | (0b01    << 30)  // TG1: 16 KiB granule
         | (pa_range << 32); // IPS: from hardware (ID_AA64MMFR0_EL1.PARange)
+
     sysreg::set_tcr_el1(tcr);
 
     // -----------------------------------------------------------------------
     // TTBR0_EL1: point to L2 root table
     // -----------------------------------------------------------------------
     let l2_pa = L2_ROOT.0.get() as u64;
+
     sysreg::set_ttbr0_el1(l2_pa);
 
     // -----------------------------------------------------------------------
@@ -247,6 +252,7 @@ pub fn init() {
     // The trampoline is the single transition point from physical to virtual
     // addressing — see mmu.S for why this must be in assembly.
     let mut sctlr = sysreg::sctlr_el1();
+
     sctlr |= 1 << 0; // M: MMU enable
     sctlr |= 1 << 2; // C: data cache enable
     sctlr |= 1 << 12; // I: instruction cache enable

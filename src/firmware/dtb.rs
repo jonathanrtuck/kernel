@@ -47,13 +47,14 @@ pub fn scan(dtb_ptr: usize) -> Option<BootInfo> {
     // We're in single-threaded physical-mode boot. Read just the header first
     // to discover totalsize, then create the full slice.
     let header = unsafe { core::slice::from_raw_parts(dtb_ptr as *const u8, HEADER_SIZE) };
-
     let magic = read_be_u32(header, 0);
+
     if magic != FDT_MAGIC {
         return None;
     }
 
     let totalsize = read_be_u32(header, 4) as usize;
+
     if totalsize < HEADER_SIZE {
         return None;
     }
@@ -75,11 +76,13 @@ pub fn scan_blob(blob: &[u8]) -> Option<BootInfo> {
     }
 
     let magic = read_be_u32(blob, 0);
+
     if magic != FDT_MAGIC {
         return None;
     }
 
     let totalsize = read_be_u32(blob, 4) as usize;
+
     if totalsize < HEADER_SIZE || totalsize > blob.len() {
         return None;
     }
@@ -93,29 +96,26 @@ pub fn scan_blob(blob: &[u8]) -> Option<BootInfo> {
     }
 
     let struct_end = off_struct.checked_add(size_struct)?;
+
     if struct_end > totalsize {
         return None;
     }
 
     let structs = blob.get(off_struct..struct_end)?;
     let strings = blob.get(off_strings..totalsize)?;
-
     let mut info = BootInfo {
         ram_base: 0,
         ram_size: 0,
         core_count: 0,
     };
-
     // Per-node state (reset at each depth-2 BEGIN_NODE, committed at END_NODE).
     let mut is_memory = false;
     let mut reg_base: u64 = 0;
     let mut reg_size: u64 = 0;
     let mut has_reg = false;
-
     // /cpus tracking.
     let mut in_cpus = false;
     let mut cpus_depth: usize = 0;
-
     let mut depth: usize = 0;
     let mut offset: usize = 0;
     let mut seen_end = false;
@@ -126,21 +126,25 @@ pub fn scan_blob(blob: &[u8]) -> Option<BootInfo> {
         }
 
         let token = read_be_u32(structs, offset);
+
         offset += 4;
 
         match token {
             FDT_BEGIN_NODE => {
                 // Read the node name (null-terminated, padded to 4 bytes).
                 let name_start = offset;
+
                 while offset < structs.len() && structs[offset] != 0 {
                     offset += 1;
                 }
+
                 let name = &structs[name_start..offset];
+
                 if offset < structs.len() {
                     offset += 1;
                 }
-                offset = align4(offset);
 
+                offset = align4(offset);
                 depth += 1;
 
                 if depth == 2 {
@@ -148,6 +152,7 @@ pub fn scan_blob(blob: &[u8]) -> Option<BootInfo> {
                     is_memory = false;
                     has_reg = false;
                     in_cpus = name == NODE_CPUS;
+
                     if in_cpus {
                         cpus_depth = depth;
                     }
@@ -161,6 +166,7 @@ pub fn scan_blob(blob: &[u8]) -> Option<BootInfo> {
                         info.ram_base = reg_base as usize;
                         info.ram_size = reg_size as usize;
                     }
+
                     if depth == cpus_depth {
                         in_cpus = false;
                     }
@@ -171,9 +177,13 @@ pub fn scan_blob(blob: &[u8]) -> Option<BootInfo> {
                 if offset + 8 > structs.len() {
                     return None;
                 }
+
                 let len = read_be_u32(structs, offset) as usize;
+
                 offset += 4;
+
                 let nameoff = read_be_u32(structs, offset) as usize;
+
                 offset += 4;
 
                 if offset + len > structs.len() {
@@ -200,6 +210,7 @@ pub fn scan_blob(blob: &[u8]) -> Option<BootInfo> {
             FDT_NOP => {}
             FDT_END => {
                 seen_end = true;
+
                 break;
             }
             _ => return None, // Unknown token — corrupted struct block.
@@ -250,10 +261,13 @@ fn read_cstr(data: &[u8], offset: usize) -> &str {
     if offset >= data.len() {
         return "";
     }
+
     let mut end = offset;
+
     while end < data.len() && data[end] != 0 {
         end += 1;
     }
+
     core::str::from_utf8(&data[offset..end]).unwrap_or("")
 }
 
@@ -263,6 +277,7 @@ fn read_cstr(data: &[u8], offset: usize) -> &str {
 /// terminator. This checks for an exact match — not a prefix match.
 fn data_eq_str(data: &[u8], expected: &str) -> bool {
     let bytes = expected.as_bytes();
+
     // Property data must contain the string + null terminator.
     data.len() > bytes.len() && &data[..bytes.len()] == bytes && data[bytes.len()] == 0
 }
@@ -280,12 +295,11 @@ mod tests {
     extern crate alloc;
     extern crate std;
 
+    use super::*;
     use alloc::format;
     use alloc::vec;
     use alloc::vec::Vec;
     use std::collections::HashMap;
-
-    use super::*;
 
     // -----------------------------------------------------------------------
     // FDT builder (test helper)
@@ -323,6 +337,7 @@ mod tests {
 
         fn prop_u32(&mut self, name: &'static str, val: u32) {
             let nameoff = self.intern(name);
+
             self.push_token(FDT_PROP);
             self.push_be_u32(4);
             self.push_be_u32(nameoff);
@@ -332,6 +347,7 @@ mod tests {
         fn prop_string(&mut self, name: &'static str, val: &str) {
             let nameoff = self.intern(name);
             let bytes: Vec<u8> = val.bytes().chain(core::iter::once(0)).collect();
+
             self.push_token(FDT_PROP);
             self.push_be_u32(bytes.len() as u32);
             self.push_be_u32(nameoff);
@@ -341,6 +357,7 @@ mod tests {
 
         fn prop_reg(&mut self, addr: u64, size: u64) {
             let nameoff = self.intern("reg");
+
             self.push_token(FDT_PROP);
             self.push_be_u32(16);
             self.push_be_u32(nameoff);
@@ -356,8 +373,8 @@ mod tests {
             let struct_off = header_size + rsvmap_size;
             let strings_off = struct_off + self.structs.len() as u32;
             let totalsize = strings_off + self.strings.len() as u32;
-
             let mut blob = Vec::new();
+
             be_u32(&mut blob, FDT_MAGIC);
             be_u32(&mut blob, totalsize);
             be_u32(&mut blob, struct_off);
@@ -368,9 +385,11 @@ mod tests {
             be_u32(&mut blob, 0); // boot_cpuid_phys
             be_u32(&mut blob, self.strings.len() as u32);
             be_u32(&mut blob, self.structs.len() as u32);
+
             blob.extend_from_slice(&[0u8; 16]); // empty rsvmap
             blob.extend_from_slice(&self.structs);
             blob.extend_from_slice(&self.strings);
+
             blob
         }
 
@@ -396,10 +415,13 @@ mod tests {
             if let Some(&off) = self.string_offsets.get(name) {
                 return off;
             }
+
             let off = self.strings.len() as u32;
+
             self.string_offsets.insert(name, off);
             self.strings.extend_from_slice(name.as_bytes());
             self.strings.push(0);
+
             off
         }
     }
@@ -423,15 +445,18 @@ mod tests {
         b.begin_node("cpus");
         b.prop_u32("#address-cells", 1);
         b.prop_u32("#size-cells", 0);
+
         for i in 0..cpu_count {
             b.begin_node(&format!("cpu@{i}"));
             b.prop_string("device_type", "cpu");
             b.prop_u32("reg", i as u32);
             b.end_node();
         }
+
         b.end_node();
 
         b.end_node();
+
         b.finish()
     }
 
@@ -443,6 +468,7 @@ mod tests {
     fn parse_qemu_virt_layout() {
         let blob = build_test_dtb(0x4000_0000, 256 * 1024 * 1024, 4);
         let info = scan_blob(&blob).expect("scan should succeed");
+
         assert_eq!(info.ram_base, 0x4000_0000);
         assert_eq!(info.ram_size, 256 * 1024 * 1024);
         assert_eq!(info.core_count, 4);
@@ -452,6 +478,7 @@ mod tests {
     fn parse_different_ram_size() {
         let blob = build_test_dtb(0x4000_0000, 512 * 1024 * 1024, 8);
         let info = scan_blob(&blob).expect("scan should succeed");
+
         assert_eq!(info.ram_size, 512 * 1024 * 1024);
         assert_eq!(info.core_count, 8);
     }
@@ -460,19 +487,23 @@ mod tests {
     fn parse_single_core() {
         let blob = build_test_dtb(0x4000_0000, 128 * 1024 * 1024, 1);
         let info = scan_blob(&blob).expect("scan should succeed");
+
         assert_eq!(info.core_count, 1);
     }
 
     #[test]
     fn reject_bad_magic() {
         let mut blob = build_test_dtb(0x4000_0000, 256 * 1024 * 1024, 4);
+
         blob[0] = 0;
+
         assert!(scan_blob(&blob).is_none());
     }
 
     #[test]
     fn reject_truncated_header() {
         let blob = vec![0xD0, 0x0D, 0xFE, 0xED];
+
         assert!(scan_blob(&blob).is_none());
     }
 
@@ -484,6 +515,7 @@ mod tests {
     #[test]
     fn reject_no_memory_node() {
         let mut b = FdtBuilder::new();
+
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
@@ -492,13 +524,16 @@ mod tests {
         b.end_node();
         b.end_node();
         b.end_node();
+
         let blob = b.finish();
+
         assert!(scan_blob(&blob).is_none());
     }
 
     #[test]
     fn nop_tokens_are_skipped() {
         let mut b = FdtBuilder::new();
+
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.nop();
@@ -508,14 +543,17 @@ mod tests {
         b.prop_reg(0x4000_0000, 0x1000_0000);
         b.end_node();
         b.end_node();
+
         let blob = b.finish();
         let info = scan_blob(&blob).expect("scan should succeed despite NOPs");
+
         assert_eq!(info.ram_base, 0x4000_0000);
     }
 
     #[test]
     fn memory_controller_not_classified_as_ram() {
         let mut b = FdtBuilder::new();
+
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
@@ -524,7 +562,9 @@ mod tests {
         b.prop_reg(0x5000_0000, 0x1000);
         b.end_node();
         b.end_node();
+
         let blob = b.finish();
+
         assert!(
             scan_blob(&blob).is_none(),
             "memory-controller must not be classified as RAM"
@@ -534,6 +574,7 @@ mod tests {
     #[test]
     fn real_memory_with_memory_controller_present() {
         let mut b = FdtBuilder::new();
+
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
@@ -546,8 +587,10 @@ mod tests {
         b.prop_reg(0x4000_0000, 0x1000_0000);
         b.end_node();
         b.end_node();
+
         let blob = b.finish();
         let info = scan_blob(&blob).expect("should find real memory node");
+
         assert_eq!(info.ram_base, 0x4000_0000);
         assert_eq!(info.ram_size, 0x1000_0000);
     }
@@ -560,7 +603,9 @@ mod tests {
         // the memory node was parsed successfully before truncation.
         let current_size = u32::from_be_bytes([blob[36], blob[37], blob[38], blob[39]]);
         let truncated = (current_size / 2).to_be_bytes();
+
         blob[36..40].copy_from_slice(&truncated);
+
         assert!(
             scan_blob(&blob).is_none(),
             "truncated struct block must be rejected"
@@ -575,8 +620,10 @@ mod tests {
         // is 16 bytes, so the struct block starts at header + 16 + 16 = 56 + rsvmap.
         // Actually, use the header's off_dt_struct to find it precisely.
         let off_struct = u32::from_be_bytes([blob[8], blob[9], blob[10], blob[11]]) as usize;
+
         // Write an invalid token (0xFF) at the start of the struct block.
         blob[off_struct..off_struct + 4].copy_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+
         assert!(scan_blob(&blob).is_none(), "unknown token must be rejected");
     }
 
@@ -584,6 +631,7 @@ mod tests {
     fn different_ram_base_is_reported_correctly() {
         let blob = build_test_dtb(0x8000_0000, 1024 * 1024 * 1024, 2);
         let info = scan_blob(&blob).expect("scan should succeed");
+
         assert_eq!(info.ram_base, 0x8000_0000);
         assert_eq!(info.ram_size, 1024 * 1024 * 1024);
     }

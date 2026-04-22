@@ -131,6 +131,7 @@ fn init_distributor(dist_base: usize) {
 fn init_redistributor(redist_base: usize) {
     // Wake the redistributor.
     let waker = mmio::read32(redist_base + GICR_WAKER);
+
     mmio::write32(
         redist_base + GICR_WAKER,
         waker & !GICR_WAKER_PROCESSOR_SLEEP,
@@ -139,11 +140,15 @@ fn init_redistributor(redist_base: usize) {
     // Wait for ChildrenAsleep to clear (redistributor is awake).
     // spin_loop() emits a YIELD hint for power-efficient polling.
     let mut timeout = 1_000_000u32;
+
     while mmio::read32(redist_base + GICR_WAKER) & GICR_WAKER_CHILDREN_ASLEEP != 0 {
         core::hint::spin_loop();
+
         timeout -= 1;
+
         if timeout == 0 {
             crate::println!("gic: redistributor wake timeout");
+
             break;
         }
     }
@@ -172,6 +177,7 @@ fn init_redistributor(redist_base: usize) {
 fn init_cpu_interface() {
     // Enable the system register interface.
     let sre = sysreg::icc_sre_el1();
+
     sysreg::set_icc_sre_el1(sre | (1 << 0)); // SRE bit
     sysreg::isb();
 

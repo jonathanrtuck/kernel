@@ -27,6 +27,7 @@ macro_rules! sysreg_read {
         #[inline(always)]
         pub fn $name() -> u64 {
             let val: u64;
+
             // SAFETY: MRS reads a system register into a GPR. All registers
             // below are accessible from EL1.
             unsafe {
@@ -36,6 +37,7 @@ macro_rules! sysreg_read {
                     options(nostack),
                 );
             }
+
             val
         }
     };
@@ -49,6 +51,7 @@ macro_rules! sysreg_read_const {
         #[inline(always)]
         pub fn $name() -> u64 {
             let val: u64;
+
             // SAFETY: MRS of an immutable ID/configuration register. The value
             // is fixed at reset and never changes. nomem is safe — the
             // instruction does not access or affect memory.
@@ -59,6 +62,7 @@ macro_rules! sysreg_read_const {
                     options(nomem, nostack),
                 );
             }
+
             val
         }
     };
@@ -269,6 +273,7 @@ sysreg_write!(set_tpidr_el1, "tpidr_el1");
 pub fn rndr() -> Option<u64> {
     let val: u64;
     let success: u64;
+
     // SAFETY: RNDR (S3_3_C2_C4_0) reads from the hardware RNG. It sets
     // NZCV: Z=0 on success, Z=1 on failure (entropy exhausted). The `cset`
     // captures the Z flag immediately. No `nomem` — RNDR has side effects
@@ -282,5 +287,6 @@ pub fn rndr() -> Option<u64> {
             options(nostack),
         );
     }
+
     if success != 0 { Some(val) } else { None }
 }

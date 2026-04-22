@@ -89,16 +89,18 @@ under "Rests on"; it exists so later sections can be precise.
   parallel to how physical addresses and virtual addresses are kernel-internal
   for Space (D9, D26). The Observer provides a three-value scheduling profile
   (D42): responsiveness, throughput, and precision, sharing a fixed per-Observer
-  budget. Spending on one dimension takes from the other two. The kernel places
-  the Observer on an appropriate core and enforces the compute allocation. On
-  SMT hardware, delivered compute additionally depends on sibling logical-core
-  contention for shared pipeline resources; the kernel guarantees compute
-  allocation, not physical-compute-rate delivery. (Vocabulary revised by D36 —
-  previously "abstract scheduling capacity" as a per-core fraction (D31).
-  Per-core fractions leak core identity through the provisioning chain on
-  heterogeneous hardware (A2 big.LITTLE). Normalized compute units restore the
-  Space parallel: Space = bytes, Time = compute units — both
-  hardware-independent quantities with kernel-internal placement.)
+  budget. Spending on one dimension takes from the other two. One set of values
+  — no base/effective split; scheduling adjustment during IPC is a userspace
+  concern via modify-scheduling (D43). The kernel places the Observer on an
+  appropriate core and enforces the compute allocation. On SMT hardware,
+  delivered compute additionally depends on sibling logical-core contention for
+  shared pipeline resources; the kernel guarantees compute allocation, not
+  physical-compute-rate delivery. (Vocabulary revised by D36 — previously
+  "abstract scheduling capacity" as a per-core fraction (D31). Per-core
+  fractions leak core identity through the provisioning chain on heterogeneous
+  hardware (A2 big.LITTLE). Normalized compute units restore the Space parallel:
+  Space = bytes, Time = compute units — both hardware-independent quantities
+  with kernel-internal placement.)
 
 - **Observer.** A schedulable execution unit coupling Space and Time — the
   condition under which compute (Time) executes instructions within specific
@@ -2345,17 +2347,17 @@ The precision value provides what the archive's tolerance parameters provided,
 but with a self-enforcing per-Observer cost (spending on precision takes from
 responsiveness and throughput).
 
-Scheduling inheritance during IPC Call(): the kernel may temporarily boost the
-server's effective responsiveness to the caller's level. The Observer struct
-distinguishes base values (set by supervisor via modify-scheduling, D39) from
-effective values (potentially boosted during IPC). Whether this inheritance is
-automatic or supervisor-driven is one level down.
+Scheduling inheritance during IPC is a userspace concern (D43). The Observer
+struct holds one set of R/T/P values — no base/effective split. The server's
+scheduling profile is determined by the server's work, not by who requested it.
+If a supervisor wants to adjust a server's profile before dispatching a
+latency-sensitive request, it uses modify-scheduling (D39). The kernel provides
+the mechanism; userspace provides the policy.
 
 Does NOT settle: budget size and encoding (100 points, 256, or other —
-implementation detail), scheduling inheritance mechanism (which values are
-inherited, automatic vs. explicit), default profile for newly-created Observers,
-timer syscall surface, Observer minimum schema (constrained: needs three
-scheduling fields and possibly effective variants for inheritance), admission
+implementation detail), default profile for newly-created Observers, timer
+syscall surface, ~~Observer minimum schema~~ (settled by D43: three scheduling
+fields, no effective variants — inheritance is userspace policy), admission
 control details on RT cores (how precision + Time + timer period compose).
 
 - **Rests on:** D2 (per-core schedulers may run different algorithms — the
@@ -2401,6 +2403,91 @@ control details on RT cores (how precision + Time + timer period compose).
   structurally required scheduling scenario.
 - **Journal:** `journal/042-scheduling-properties.md`.
 
+### D43 — Observer minimum schema
+
+The Observer metadata struct contains eight field clusters, mechanically derived
+from settled decisions. The Observer physically splits into two regions: a small
+metadata struct (root Space, D32 "bounded, small") and large structural backing
+(consumed Space, D35 type conversion — register save area, cap table pages, L0
+page table root).
+
+**Forced fields (metadata struct):**
+
+| Field                         | Type                                                           | Source      | Path                |
+| ----------------------------- | -------------------------------------------------------------- | ----------- | ------------------- |
+| Register save pointer         | pointer                                                        | D6/D35/D32  | Hot (ctx switch)    |
+| TTBR0 value                   | u64                                                            | D5/D26/D1   | Hot (ctx switch)    |
+| Cap table pointer             | pointer                                                        | D4/D8       | Hot (syscall entry) |
+| Scheduling state              | enum {inert, runnable, blocked, faulted} + suspended flag      | D39         | Hot (scheduler)     |
+| Cached compute-unit aggregate | integer                                                        | D30/D31/D36 | Hot (scheduler)     |
+| Responsiveness                | integer                                                        | D42         | Hot (scheduler)     |
+| Throughput                    | integer                                                        | D42         | Hot (scheduler)     |
+| Precision                     | integer                                                        | D42         | Hot (scheduler)     |
+| Wait-state linkage            | enum {None, Single(prev/next/field), Multi(allocated entries)} | D18/D19     | Cold (block/wake)   |
+| Reference count               | integer                                                        | D11/D33     | Cold (cap ops)      |
+
+**Excluded from the struct:**
+
+- Fault handler → cap-table reserved slot (D21)
+- Reply field → cap-table reserved slot (D16 + D21 pattern)
+- Time caps → cap-table regular slots (D30)
+- Algorithm-specific scheduler state → per-core (D2)
+- Core assignment → transient, re-decided per runnable transition (D31)
+- Effective/base scheduling split → none; one set of R/T/P values, userspace
+  manages dynamic adjustment via modify-scheduling (D39)
+
+**Key design decisions:**
+
+1. _No kernel-side scheduling inheritance._ The scheduling profile values are
+   the Observer's current values, period. No base/effective split. Scheduling
+   adjustment during IPC (priority inheritance) is a userspace policy concern —
+   the server's optimal profile is determined by the server's work, not by who
+   requested it. The kernel provides mechanism (modify-scheduling); userspace
+   provides policy.
+
+2. _Transient core assignment._ No core ID field. The kernel makes a fresh
+   placement decision each time an Observer transitions to runnable. Every
+   wake-up is an implicit migration opportunity. Cache affinity is a per-core
+   scheduler hint, not a per-Observer field.
+
+3. _Wait-state as Rust enum._ Inline single-field variant (zero allocation for
+   the common case) with allocated multi-field variant (supports future
+   multi-receive without schema rework). A1-idiomatic enum-as-state-machine.
+
+4. _Reply field follows D21 pattern._ The three arguments that settled D21 (D11
+   destroy-invalidation, D17 badge-closure, D8 ABA protection) apply
+   identically. Second reserved cap-table slot.
+
+Does NOT settle: wait-state allocation source for multi-field, cap table
+capacity tracking placement (implementation optimization), register save area
+layout within structural backing, budget size/encoding (D42 deferred), default
+scheduling profile, self-reference capabilities.
+
+- **Rests on:** D32 (type conversion — metadata from root Space, structural
+  backing from consumed Space; "bounded, small" forces pointer indirection for
+  registers), D35 (creation — consumed Space becomes cap table + L0 root +
+  register save area; inert state), D6 (one register state, one PC), D5/D26
+  (per-Observer L0 page table, TTBR0), D4/D8 (flat cap table, pointer in
+  struct), D39 (five-state machine with co-occurrence), D30/D31/D36 (cached
+  aggregate of compute units), D42 (three scheduling profile values), D18/D19
+  (intrusive wait-state linkage, multi-field accommodation), D11/D33 (reference
+  count from close/destroy semantics), D21 (fault handler and reply field as
+  cap-table entries — not struct fields), D2 (algorithm-specific state
+  per-core), D31 (core assignment kernel-internal — transient), A1 (Rust enum
+  for wait state), A2 (register file size → pointer indirection), A4 (reactive —
+  struct must contain everything for resumption), A5 (modify-scheduling is
+  mechanism; inheritance policy is userspace).
+- **Archive convergence:** Strong on register state, TTBR, scheduling state,
+  wait-state linkage. Divergent on fault handler placement (D21 moved it),
+  cached aggregate (D30 multi-Time created the need), scheduling profile (D42
+  vs. archive's timing declarations), reference count (D11/D33). See journal.
+- **Status:** settled — revisit if D32 is revised (changes the metadata/backing
+  split), if D39 is revised (changes the state machine), if D42 is revised
+  (changes the scheduling profile), if D18/D19 is revised (changes wait-state
+  requirements), or if a downstream derivation reveals a structurally required
+  field not present in this set.
+- **Journal:** `journal/043-observer-minimum-schema.md`.
+
 ---
 
 ## Open questions
@@ -2419,10 +2506,9 @@ control details on RT cores (how precision + Time + timer period compose).
   costs the other two). CPU/IO kernel-inferred from the profile. Deadline
   kernel-derived from timer period + Time + precision value. Hard RT via
   dedicated cores (D2) with EDF admission using Time + timer + precision.
-  Scheduling inheritance during IPC (D37 deferred question resolved in
-  principle; automatic vs. explicit mechanism is one level down). Remaining:
-  budget encoding, inheritance mechanism, default profile, timer syscall
-  surface, RT admission control details.
+  Scheduling inheritance during IPC settled by D43 as a userspace concern
+  (modify-scheduling mechanism, not kernel policy). Remaining: budget encoding,
+  default profile, timer syscall surface, RT admission control details.
 - ~~**Observer-Space cardinality formalization.**~~ Settled by D27: flat. An
   Observer holds multiple independent Space caps directly in its D8 table. No
   kernel-tracked hierarchy between Spaces. Grouping is userspace convention (D6
@@ -2436,28 +2522,19 @@ control details on RT cores (how precision + Time + timer period compose).
     destroy; field lifecycle needed); generation-as-revocation (O(1) mass
     invalidation; alternative is field rotation). Still deferred: CDT (selective
     revocation of a subtree); strong vs. weak cross-core prompt-effect policy.
-- **Observer minimum schema.** D6 settles that an Observer is a single execution
-  unit. D14 settles that Observer is a capability-held kernel object type. D20
-  settles per-Observer fault handler. D21 settles the handler as a cap-table
-  entry (not a separate Observer struct field). D29 settles Time as capability-
-  held; D30 settles multi-Time in regular cap-table slots (not reserved). D35
-  settles that Observers support an inert state (created but not yet scheduled).
-  D39 settles the five-state machine: inert, runnable, blocked, faulted,
-  externally-suspended (suspended can co-occur with blocked or faulted). D42
-  settles the scheduling properties as a three-value budget (responsiveness,
-  throughput, precision — base + possibly effective variants for inheritance).
-  The concrete field set (register state, L0 page table pointer, capability
-  table pointer, cached scheduling aggregate (D30), scheduling state including
-  suspension flag, pending-list linkage (D18), scheduling profile (D42:
-  responsiveness, throughput, precision — base + possibly effective variants for
-  inheritance)) needs formal derivation in the current chain. Note: the fault
-  handler lives in the cap table at a reserved slot (D21). Time caps live in
-  regular cap-table slots (D30), but the cached scheduling aggregate and the
-  responsiveness value are Observer struct fields. Archive journal/004 derived a
-  first-principles minimum. D12 confirms the fault handler is structurally
-  required. D14 confirms lifecycle state tracking is required. D20 confirms
-  per-Observer attachment. D21 confirms cap-table representation. D29 confirms
-  Time cap-table representation. D42 confirms the scheduling profile fields.
+- ~~**Observer minimum schema.**~~ Settled by D43: eight field clusters in the
+  metadata struct — register save pointer, TTBR0, cap table pointer, scheduling
+  state (D39 five-state enum + suspended flag), cached compute-unit aggregate,
+  scheduling profile (R, T, P — one set, no base/effective split), wait-state
+  linkage (Rust enum: inline single-field, allocated multi-field), reference
+  count. Observer physically splits into metadata struct (root Space, ~80–100
+  bytes) and structural backing (consumed Space: registers, cap table, L0 page
+  table). Fault handler and reply field are cap-table reserved slots (D21
+  pattern). Core assignment is transient (no struct field). Scheduling
+  inheritance is a userspace concern (modify-scheduling mechanism, not kernel
+  policy). Remaining: wait-state allocation source for multi-field, cap table
+  capacity tracking placement, register save area layout, budget encoding,
+  default profile, self-reference capabilities.
 - ~~**Address space binding mutability.**~~ Dissolved by D26: no address space
   object, no binding. Observers access Spaces through capabilities; the page
   table is updated automatically as caps are acquired and lost.

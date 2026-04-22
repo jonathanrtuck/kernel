@@ -13,6 +13,7 @@ static HAS_RNDR: AtomicBool = AtomicBool::new(false);
 /// Detect FEAT_RNG and cache the result.
 pub fn init() {
     let rndr_field = (sysreg::id_aa64isar0_el1() >> 60) & 0xF;
+
     HAS_RNDR.store(rndr_field != 0, Ordering::Relaxed);
 }
 

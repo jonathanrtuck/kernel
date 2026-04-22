@@ -70,6 +70,7 @@ pub fn init() {
     // __vectors is the assembly vector table, 2KB-aligned by `.align 11`
     // in exception.S. The `unsafe extern` block above covers the access.
     let vbar = (&raw const __vectors) as u64;
+
     sysreg::set_vbar_el1(vbar);
     sysreg::isb();
 }

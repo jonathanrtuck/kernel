@@ -1,11 +1,11 @@
 # Kernel structural map.
 #
-# Populated from design/spec.md derivations D1-D6, D8-D41, observations O2-O3,
+# Populated from design/spec.md derivations D1-D6, D8-D43, observations O2-O3,
 # and Vocabulary (Space, Time, Observer). Every box and edge has a corresponding
 # spec.md entry; items labeled "TBD" await downstream derivation.
 #
-# Intentionally absent (pending derivation): specific syscall surface, Observer
-# minimum schema, field details (multi-wait — D13/D15 downstream; overflow
+# Intentionally absent (pending derivation): specific syscall surface,
+# field details (multi-wait — D13/D15 downstream; overflow
 # settled by D18; message format settled by D28), revocation add-ons
 # (generation, CDT — base settled in D11; badges settled in D17),
 # per-physical-core concerns (power, thermal, shared cache/TLB).
@@ -112,7 +112,14 @@ kernel: {
     # externally-suspended (co-occurrence with blocked/faulted).
     # D42: three-value scheduling profile — responsiveness, throughput,
     # precision — sharing a fixed per-Observer budget. No priority integer.
-    # Minimum schema TBD (D42 constrains: add three scheduling fields).
+    # D43: minimum schema settled. Metadata struct (root Space, ~80-100 bytes):
+    #   register save pointer, TTBR0, cap table pointer, scheduling state
+    #   (5-state enum + suspended flag), cached compute-unit aggregate,
+    #   R/T/P (one set, no base/effective), wait-state enum, refcount.
+    # Structural backing (consumed Space): registers, cap table, L0 page table.
+    # Fault handler + reply field: cap-table reserved slots (D21 pattern).
+    # Core assignment: transient (no struct field).
+    # Scheduling inheritance: userspace concern (modify-scheduling).
 
     capabilities: {
       label: Capability table

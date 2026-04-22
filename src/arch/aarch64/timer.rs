@@ -11,9 +11,8 @@
 //! CNTV_TVAL_EL0 in the handler re-arms the timer — HVF detects the
 //! CNTV_CVAL change and unmasks automatically.
 
-use core::sync::atomic::{AtomicU64, Ordering};
-
 use super::sysreg;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Tick rate in Hz (100 Hz = 10 ms interval).
 const TICK_HZ: u64 = 100;
@@ -54,6 +53,7 @@ pub fn init() {
 /// committed before returning to the exception handler.
 pub fn tick() {
     TICK_COUNT.fetch_add(1, Ordering::Relaxed);
+
     sysreg::set_cntv_tval_el0(interval());
     sysreg::isb();
 }

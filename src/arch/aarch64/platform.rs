@@ -64,6 +64,7 @@ pub fn init(dtb_ptr: usize) {
                 // the MMU tables would not cover the kernel, and enabling
                 // the MMU would fault immediately.
                 let expected = RAM_BASE_VAL.load(Ordering::Relaxed);
+
                 if info.ram_base != expected {
                     panic!(
                         "dtb ram_base {:#x} != expected {:#x}",

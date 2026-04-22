@@ -8,7 +8,6 @@
 //! All output goes through [`Writer`]'s [`core::fmt::Write`] implementation.
 
 use super::mmio;
-
 use super::platform;
 
 const TX_TIMEOUT: u32 = 1_000_000;
@@ -28,6 +27,7 @@ impl core::fmt::Write for Writer {
             if byte == b'\n' {
                 putc(b'\r');
             }
+
             putc(byte);
         }
 
@@ -41,6 +41,7 @@ fn putc(c: u8) {
 
     while mmio::read32(uart0_fr()) & TXFF != 0 {
         timeout -= 1;
+
         if timeout == 0 {
             break;
         }
