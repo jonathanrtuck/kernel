@@ -34,8 +34,8 @@ kernel: {
       label: Time manager
       # Per Core manager (spec.md#D2).
       # Scheduling algorithm is a leaf-node, swappable per core.
-      # Carries algorithm-specific state; Observer carries only abstract
-      # scheduling properties.
+      # Carries algorithm-specific state; Observer carries only a three-value
+      # scheduling profile: responsiveness, throughput, precision (D42).
       # D29: manages Time objects for this core.
       # D31: retains unallocated per-core scheduling capacity.
       # Allocates to Observers via pager chain on request.
@@ -44,7 +44,7 @@ kernel: {
 
       interface: {
         shape: class
-        # In: Observer's abstract scheduling properties.
+        # In: Observer's scheduling profile (D42: R, T, P), Time aggregate (D30).
         # Out: next Observer to resume.
         # D2: algorithm-specific state stays inside.
       }
@@ -110,7 +110,9 @@ kernel: {
     # read-registers, suspend, change-handler, modify-scheduling.
     # Five Observer states: inert, runnable, blocked, faulted,
     # externally-suspended (co-occurrence with blocked/faulted).
-    # Minimum schema TBD.
+    # D42: three-value scheduling profile — responsiveness, throughput,
+    # precision — sharing a fixed per-Observer budget. No priority integer.
+    # Minimum schema TBD (D42 constrains: add three scheduling fields).
 
     capabilities: {
       label: Capability table

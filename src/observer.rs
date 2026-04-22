@@ -8,6 +8,8 @@
 //! D30: one or more Time caps in regular cap-table slots.
 //! D39: nine rights — resume, destroy, install-cap, write-registers, clone,
 //!      read-registers, suspend, change-handler, modify-scheduling.
+//! D42: three-value scheduling profile — responsiveness, throughput, precision.
+//!      No priority integer. modify-scheduling gates these values.
 
 /// The condition under which compute (Time) executes instructions within
 /// specific memory (Space).
@@ -16,10 +18,11 @@
 /// (D30). "Process" is a userspace convention (group of Observers sharing Space
 /// caps).
 pub struct Observer {
-    // Settled fields (D6, D14, D20, D30, D35, D36, D39):
+    // Settled fields (D6, D14, D20, D30, D35, D36, D39, D42):
     //   register state, capability table, cached scheduling aggregate (D36:
     //   total compute units, precomputed per-core fraction), lifecycle state,
-    //   pending-list linkage (D18).
+    //   pending-list linkage (D18), scheduling profile (D42: responsiveness,
+    //   throughput, precision — base + possibly effective variants).
     //
     // Lifecycle state (D39):
     //   inert, runnable, blocked, faulted, externally-suspended.

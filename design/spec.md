@@ -87,17 +87,18 @@ under "Rests on"; it exists so later sections can be precise.
   is; core assignment, migration, algorithm selection, and the
   compute-unit-to-time translation are kernel-internal concerns (D31, D36),
   parallel to how physical addresses and virtual addresses are kernel-internal
-  for Space (D9, D26). The Observer provides abstract scheduling hints (D2:
-  priority, CPU/IO classification, deadline); the kernel places the Observer on
-  an appropriate core and enforces the compute allocation. On SMT hardware,
-  delivered compute additionally depends on sibling logical-core contention for
-  shared pipeline resources; the kernel guarantees compute allocation, not
-  physical-compute-rate delivery. (Vocabulary revised by D36 — previously
-  "abstract scheduling capacity" as a per-core fraction (D31). Per-core
-  fractions leak core identity through the provisioning chain on heterogeneous
-  hardware (A2 big.LITTLE). Normalized compute units restore the Space parallel:
-  Space = bytes, Time = compute units — both hardware-independent quantities
-  with kernel-internal placement.)
+  for Space (D9, D26). The Observer provides a three-value scheduling profile
+  (D42): responsiveness, throughput, and precision, sharing a fixed per-Observer
+  budget. Spending on one dimension takes from the other two. The kernel places
+  the Observer on an appropriate core and enforces the compute allocation. On
+  SMT hardware, delivered compute additionally depends on sibling logical-core
+  contention for shared pipeline resources; the kernel guarantees compute
+  allocation, not physical-compute-rate delivery. (Vocabulary revised by D36 —
+  previously "abstract scheduling capacity" as a per-core fraction (D31).
+  Per-core fractions leak core identity through the provisioning chain on
+  heterogeneous hardware (A2 big.LITTLE). Normalized compute units restore the
+  Space parallel: Space = bytes, Time = compute units — both
+  hardware-independent quantities with kernel-internal placement.)
 
 - **Observer.** A schedulable execution unit coupling Space and Time — the
   condition under which compute (Time) executes instructions within specific
@@ -219,8 +220,11 @@ is re-derived by the destination scheduler.
   A3 (a generic kernel cannot mandate one scheduling algorithm as the right
   answer), `design/landscape.md` (no surveyed system cleanly separates per-core
   scheduler algorithms as a first-class feature — novel position).
-- **Status:** settled — revisit when the minimum abstract-property set on the
-  Observer proves unexpressible across the candidate scheduling-algorithm space.
+- **Status:** settled — D42 settles the minimum property set as a three-value
+  profile (responsiveness, throughput, precision). The revisit trigger (property
+  set proves unexpressible) does not fire: the three values are interpretable by
+  fixed-priority, fair-share, and deadline-based algorithms. Revisit if D42 is
+  revised.
 - **Journal:** `journal/002-per-core-schedulers.md`.
 
 ### D3 — One logical Space manager
@@ -1882,10 +1886,11 @@ effort scheduling absorbs the approximation.
 Does NOT settle: unit encoding (integer representation, bit width, global
 scale), minimum Time quantum, Time split syscall surface, Time clonability (D37
 constrains — D30 aggregate double-counts clones), ~~Time donation on IPC~~
-(settled by D37: explicit cap transfer via user cap slot on Call()), minimum
-abstract scheduling properties on the Observer (D2 sibling question — the
-Observer/Time split is now concrete; D37 adds priority-level inheritance during
-IPC as a consideration), capacity factor source (A2 implementation detail).
+(settled by D37: explicit cap transfer via user cap slot on Call()), ~~minimum
+abstract scheduling properties on the Observer~~ (settled by D42: three-value
+profile — responsiveness, throughput, precision; D37's priority-level
+inheritance becomes scheduling inheritance), capacity factor source (A2
+implementation detail).
 
 - **Rests on:** D30 (multi-Time additive aggregate requires composable numerical
   quantity — budget/period pairs don't compose for different periods), D2
@@ -2080,7 +2085,8 @@ install-cap because the handler slot is already structurally special (D21
 kernel-reserved) and D12 establishes the fault handler as the root of the
 Observer's supervision relationship — a fundamentally different authority from
 routine cap provisioning. Modify-scheduling gates external modification of D2
-scheduling hints (the concrete property set is D2's open question, not D39's).
+scheduling hints (settled by D42: three-value profile — responsiveness,
+throughput, precision).
 
 Extract-cap (reading caps from another Observer's table) was evaluated and
 excluded: the primary use case (pre-destroy resource recovery) is served by
@@ -2096,12 +2102,13 @@ Resume is a single right covering all stopped→runnable transitions (landscape
 consensus: seL4, Zircon, Mach).
 
 Does NOT settle: Observer minimum schema (concrete struct fields — D39
-constrains: must track five states including co-occurrence), D2 minimum
-scheduling properties (modify-scheduling gates whatever D2 settles), self-
-reference capabilities (whether an Observer holds a cap to itself),
-duplicate-control right (D8 derivation), extract-cap (deferred), specific
-syscall encoding, concurrent scheduling modification semantics (external vs.
-kernel-internal priority inheritance ordering).
+constrains: must track five states including co-occurrence), ~~D2 minimum
+scheduling properties~~ (settled by D42: three-value profile — responsiveness,
+throughput, precision; modify-scheduling gates these values), self-reference
+capabilities (whether an Observer holds a cap to itself), duplicate-control
+right (D8 derivation), extract-cap (deferred), specific syscall encoding,
+concurrent scheduling modification semantics (external vs. kernel-internal
+responsiveness inheritance ordering).
 
 - **Rests on:** D14 (resume and destroy as minimum; Observer as capability-held
   type), D35 (install-cap, write-registers, resume as creation rights;
@@ -2300,6 +2307,100 @@ wording), COW/clone (D9 deferred, orthogonal), complete Space rights mask.
   realistic workloads).
 - **Journal:** `journal/041-space-merge-and-split.md`.
 
+### D42 — Three-value scheduling profile: responsiveness, throughput, precision
+
+The minimum abstract scheduling properties on an Observer are three values
+sharing a fixed per-Observer budget: **responsiveness**, **throughput**, and
+**precision**. The Observer distributes points across the three dimensions (R +
+T + P ≤ budget). Each dimension controls an aspect of how the Observer's Time
+allocation is delivered:
+
+- **Responsiveness:** how quickly the Observer is scheduled when runnable.
+- **Throughput:** how long the Observer runs when scheduled (uninterrupted
+  slices).
+- **Precision:** how accurately the scheduler hits timing targets (low jitter,
+  deadline accuracy).
+
+Spending on one dimension takes from the other two. The trade-offs are
+physically grounded: high responsiveness costs context-switch overhead
+(~1000–5000 cycles per switch on ARM64), high throughput costs scheduling
+latency, high precision constrains the scheduler's flexibility for the other
+two. Every Observer gets the same budget. No dimension is strictly better — the
+right distribution depends on the workload. This dissolves the priority
+inflation problem: there is no single value to max out, and maximizing any
+dimension costs real capability in the other two. No MCP-style delegation bound
+is needed.
+
+D2's parenthetical "(priority, CPU/IO classification, optional deadline)" is
+replaced entirely. There is no priority integer. CPU/IO classification is
+kernel-inferred from the profile. Core placement is kernel-internal
+(D31/D36/A5). Deadline is kernel-derived from timer-programmed periods + the
+precision value.
+
+Hard real-time scheduling uses Time allocation (compute budget, D36) +
+kernel-programmed timer period (the kernel knows T because it set the timer) +
+the precision value (how tight the guarantee must be). On a dedicated RT core
+(D2 per-core scheduler), EDF admission uses these for the schedulability test.
+The precision value provides what the archive's tolerance parameters provided,
+but with a self-enforcing per-Observer cost (spending on precision takes from
+responsiveness and throughput).
+
+Scheduling inheritance during IPC Call(): the kernel may temporarily boost the
+server's effective responsiveness to the caller's level. The Observer struct
+distinguishes base values (set by supervisor via modify-scheduling, D39) from
+effective values (potentially boosted during IPC). Whether this inheritance is
+automatic or supervisor-driven is one level down.
+
+Does NOT settle: budget size and encoding (100 points, 256, or other —
+implementation detail), scheduling inheritance mechanism (which values are
+inherited, automatic vs. explicit), default profile for newly-created Observers,
+timer syscall surface, Observer minimum schema (constrained: needs three
+scheduling fields and possibly effective variants for inheritance), admission
+control details on RT cores (how precision + Time + timer period compose).
+
+- **Rests on:** D2 (per-core schedulers may run different algorithms — the
+  three-value profile must be interpretable by all algorithm families; per-core
+  RT schedulers use precision + Time + timer period for admission), D36 (Time
+  carries compute quantity, Observer carries scheduling hints — the profile
+  values are scheduling hints; qualitative, not quantitative), D37 (Time
+  donation transfers compute not scheduling properties — scheduling inheritance
+  during IPC is the complement; deferred from D37), D39 (modify-scheduling right
+  gates external modification of the profile; three structural use cases:
+  supervisor adjustment, scheduling inheritance, load-balancing policy), D1
+  (hot-path — scheduler reads effective profile from Observer struct; three
+  integers, O(1)), D31 (core assignment kernel-internal — the kernel uses the
+  profile + Time to inform placement decisions without exposing core identity),
+  D13 (queued fields — timer delivery through the existing field mechanism; the
+  kernel-as-sender pattern provides period information to the scheduler), A2
+  (big.LITTLE — the profile provides core-placement information without naming
+  core types), A3 (generic — the three dimensions span all workload types from
+  interrupt handlers to batch compute to RT control loops), A5 (kernel absorbs
+  complexity — three values from Observer, kernel derives timing parameters from
+  timer requests and Time allocation; structured timing declarations would push
+  parameter management to userspace), `design/landscape.md` §4.2 (scheduling
+  algorithm survey), §4.5 (priority inversion — scheduling inheritance is the
+  analog), §4.6 (real-time guarantees — precision dimension covers the RT
+  spectrum), §4.7–4.8 (energy-aware scheduling, interactive responsiveness —
+  kernel-internal, informed by the profile),
+  `design/research/time-object-content.md` (Observer vs. Time object split
+  taxonomy — priority/QoS on execution unit, quantity on Time object).
+- **Archive convergence:** Strong. Both derivations separate resource (Time)
+  from scheduling preference, reject priority integers, and require every
+  parameter to have a cost. The archive's six parameters (mode + d + dt +
+  denom + tol) collapse to three values because the kernel already knows period
+  (timer-programmed) and compute budget (Time allocation). The precision
+  dimension captures the archive's tolerance spectrum (tight = hard-RT, loose =
+  best-effort) with a self-enforcing per-Observer cost. See journal for full
+  convergence analysis.
+- **Status:** settled — revisit if D2 is revised (changes the per-core algorithm
+  heterogeneity that allows RT cores), if D36 is revised (changes the
+  Time/Observer split), if the timer mechanism derivation reveals that the
+  kernel cannot derive sufficient timing information from timer requests (would
+  reopen explicit timing declarations on the Observer), or if a downstream
+  derivation reveals that three values are insufficient to express a
+  structurally required scheduling scenario.
+- **Journal:** `journal/042-scheduling-properties.md`.
+
 ---
 
 ## Open questions
@@ -2310,13 +2411,18 @@ wording), COW/clone (D9 deferred, orthogonal), complete Space rights mask.
   cap doesn't change when the kernel moves it to another core. (Previously
   dissolved by D29 as a cap operation; D31 supersedes — migration is no longer a
   user-visible event at all.)
-- **Minimum abstract scheduling properties on an Observer.** D2 says Observers
-  carry abstract scheduling properties, but the minimum set (priority? deadline?
-  IO-bound flag? period?) is not fixed. D37 adds a consideration: Time donation
-  transfers compute capacity but not scheduling priority. Priority-level
-  inheritance during IPC (the server temporarily runs at the caller's priority)
-  requires the D2 scheduling hints to be dynamically modifiable — this shapes
-  the minimum set.
+- ~~**Minimum abstract scheduling properties on an Observer.**~~ Settled by D42:
+  three-value budget — responsiveness, throughput, precision — sharing a fixed
+  per-Observer point allocation. D2's parenthetical "(priority, CPU/IO
+  classification, optional deadline)" replaced entirely. No priority integer
+  (inflation problem dissolved by budget trade-offs — maximizing any dimension
+  costs the other two). CPU/IO kernel-inferred from the profile. Deadline
+  kernel-derived from timer period + Time + precision value. Hard RT via
+  dedicated cores (D2) with EDF admission using Time + timer + precision.
+  Scheduling inheritance during IPC (D37 deferred question resolved in
+  principle; automatic vs. explicit mechanism is one level down). Remaining:
+  budget encoding, inheritance mechanism, default profile, timer syscall
+  surface, RT admission control details.
 - ~~**Observer-Space cardinality formalization.**~~ Settled by D27: flat. An
   Observer holds multiple independent Space caps directly in its D8 table. No
   kernel-tracked hierarchy between Spaces. Grouping is userspace convention (D6
@@ -2337,17 +2443,21 @@ wording), COW/clone (D9 deferred, orthogonal), complete Space rights mask.
   held; D30 settles multi-Time in regular cap-table slots (not reserved). D35
   settles that Observers support an inert state (created but not yet scheduled).
   D39 settles the five-state machine: inert, runnable, blocked, faulted,
-  externally-suspended (suspended can co-occur with blocked or faulted). The
-  concrete field set (register state, L0 page table pointer, capability table
-  pointer, cached scheduling aggregate (D30), scheduling state including
-  suspension flag, pending-list linkage (D18)) needs formal derivation in the
-  current chain. Note: the fault handler lives in the cap table at a reserved
-  slot (D21). Time caps live in regular cap-table slots (D30), but the cached
-  scheduling aggregate is an Observer struct field. Archive journal/004 derived
-  a first-principles minimum. D12 confirms the fault handler is structurally
+  externally-suspended (suspended can co-occur with blocked or faulted). D42
+  settles the scheduling properties as a three-value budget (responsiveness,
+  throughput, precision — base + possibly effective variants for inheritance).
+  The concrete field set (register state, L0 page table pointer, capability
+  table pointer, cached scheduling aggregate (D30), scheduling state including
+  suspension flag, pending-list linkage (D18), scheduling profile (D42:
+  responsiveness, throughput, precision — base + possibly effective variants for
+  inheritance)) needs formal derivation in the current chain. Note: the fault
+  handler lives in the cap table at a reserved slot (D21). Time caps live in
+  regular cap-table slots (D30), but the cached scheduling aggregate and the
+  responsiveness value are Observer struct fields. Archive journal/004 derived a
+  first-principles minimum. D12 confirms the fault handler is structurally
   required. D14 confirms lifecycle state tracking is required. D20 confirms
   per-Observer attachment. D21 confirms cap-table representation. D29 confirms
-  Time cap-table representation.
+  Time cap-table representation. D42 confirms the scheduling profile fields.
 - ~~**Address space binding mutability.**~~ Dissolved by D26: no address space
   object, no binding. Observers access Spaces through capabilities; the page
   table is updated automatically as caps are acquired and lost.
@@ -2364,8 +2474,9 @@ wording), COW/clone (D9 deferred, orthogonal), complete Space rights mask.
   modify-scheduling. Extract-cap excluded (proactive cap sharing via D23 + D28
   serves the use cases). Duplicate-control deferred to D8 derivation (not
   Observer-specific). Remaining downstream: Observer minimum schema (D39
-  constrains state machine), D2 scheduling properties (modify-scheduling gates
-  whatever D2 settles), self-reference capabilities.
+  constrains state machine), ~~D2 scheduling properties~~ (settled by D42:
+  three-value profile — responsiveness, throughput, precision; modify-scheduling
+  gates these values), self-reference capabilities.
 - ~~**Observer handle clonability.**~~ Settled by D23: clonable. Observer
   handles follow uniform capability rules (clone, attenuate, transfer)
   identically to all other kernel object types. Non-clonable rejected on five
@@ -2850,6 +2961,17 @@ wording), COW/clone (D9 deferred, orthogonal), complete Space rights mask.
   complexity pushed to userspace. Partial archive convergence on split
   ("distinguishable children"); archive didn't derive merge (VA-addressed model
   allowed traditional demand paging without it; D26 divergence).
+- `042-scheduling-properties.md` — reasoning for D42: minimum abstract
+  scheduling properties are a three-value budget — responsiveness, throughput,
+  precision — sharing a fixed per-Observer point allocation. Priority integers
+  dissolved (inflation problem — maximizing any dimension costs the other two).
+  Each dimension has a physical trade-off. Precision captures the archive's
+  tolerance spectrum with a self-enforcing per-Observer cost. CPU/IO
+  kernel-inferred from profile, deadline kernel-derived from timer period +
+  Time + precision. Hard RT via dedicated cores (D2) with EDF admission using
+  Time + timer + precision. Archive convergence: strong on resource/preference
+  split and "every parameter must have a cost." Archive's six parameters
+  collapse to three because the kernel already knows period and compute budget.
 
 ---
 
