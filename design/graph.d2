@@ -1,15 +1,15 @@
 # Kernel structural map.
 #
-# Populated from design/spec.md derivations D1-D6, D8-D40, observations O2-O3,
+# Populated from design/spec.md derivations D1-D6, D8-D41, observations O2-O3,
 # and Vocabulary (Space, Time, Observer). Every box and edge has a corresponding
 # spec.md entry; items labeled "TBD" await downstream derivation.
 #
 # Intentionally absent (pending derivation): specific syscall surface, Observer
-# minimum schema,
-# field details (multi-wait — D13/D15 downstream; overflow settled by D18;
-# message format settled by D28), revocation add-ons (generation, CDT — base
-# settled in D11; badges settled in D17), per-physical-core concerns (power,
-# thermal, shared cache/TLB). See spec.md#Open questions.
+# minimum schema, field details (multi-wait — D13/D15 downstream; overflow
+# settled by D18; message format settled by D28), revocation add-ons
+# (generation, CDT — base settled in D11; badges settled in D17),
+# per-physical-core concerns (power, thermal, shared cache/TLB).
+# See spec.md#Open questions.
 #
 # Render with: d2 --layout elk graph.d2
 
@@ -22,26 +22,25 @@ kernel: {
     label: Core manager
     style.multiple: true
     # Per logical core (spec.md#D1).
-    # Owns the per-core hot path: exception entry, state update,
-    # next-Observer selection, resumption.
+    # Owns the per-core hot path: exception entry, state update, next-Observer
+    # selection, resumption.
     #
-    # External entry surface (exception vector) is intentionally
-    # not drawn as a single interface node — the three sources
-    # (userspace syscall, hardware exceptions, cross-core IPI)
-    # are heterogeneous and the unifying contract is not yet
-    # derived. See spec.md#Open questions.
+    # External entry surface (exception vector) is intentionally not drawn as a
+    # single interface node — the three sources (userspace syscall, hardware
+    # exceptions, cross-core IPI) are heterogeneous and the unifying contract is
+    # not yet derived. See spec.md#Open questions.
 
     time-manager: {
       label: Time manager
       # Per Core manager (spec.md#D2).
       # Scheduling algorithm is a leaf-node, swappable per core.
-      # Carries algorithm-specific state; Observer carries only
-      # abstract scheduling properties.
+      # Carries algorithm-specific state; Observer carries only abstract
+      # scheduling properties.
       # D29: manages Time objects for this core.
       # D31: retains unallocated per-core scheduling capacity.
       # Allocates to Observers via pager chain on request.
-      # Core assignment is kernel-internal — Observers don't
-      # see which core they run on.
+      # Core assignment is kernel-internal — Observers don't see which core they
+      # run on.
 
       interface: {
         shape: class
@@ -55,11 +54,11 @@ kernel: {
   space-manager: {
     label: Space manager
     # Single logical interface (spec.md#D3).
-    # Internal strategy (partitioning, NUMA-awareness, per-core
-    # caches, cross-node fallback) is a leaf-node concern below
-    # this layer and intentionally not represented here.
-    # D31: retains unallocated physical memory as kernel-internal
-    # root Space. Allocates to Observers via pager chain on request.
+    # Internal strategy (partitioning, NUMA-awareness, per-core caches,
+    # cross-node fallback) is a leaf-node concern below this layer and
+    # intentionally not represented here.
+    # D31: retains unallocated physical memory as kernel-internal root Space.
+    # Allocates to Observers via pager chain on request.
 
     interface: {
       shape: class
@@ -70,15 +69,19 @@ kernel: {
     label: Space
     style.multiple: true
     # D9: variable-size, kernel-managed memory object.
-    # Designated by capabilities. Access via (Space, offset)
-    # pairs (D26) — holding the cap is sufficient for access.
-    # Each Space has a kernel-assigned VA base (per-Space,
-    # same for all holders). Physical backing is kernel-internal.
+    # Designated by capabilities. Access via (Space, offset) pairs (D26) —
+    # holding the cap is sufficient for access.
+    # Each Space has a kernel-assigned VA base (per-Space, same for all
+    # holders). Physical backing is kernel-internal.
     # Sharing: multiple Observers hold caps to same Space.
     # D25: page size exposed — minimum Space size = page size.
     # D27: flat cardinality — Observers hold multiple independent
     # Space caps. No kernel-tracked parent/child hierarchy.
     # Grouping is userspace convention (D6 parallel).
+    # D41: merge (two → one) and split (one → two) change Space boundaries.
+    # Merge absorbs source into target (VA extends).
+    # Split extracts portion into new Space (new VA base).
+    # Conservation: pages change membership, not quantity.
   }
 
   observer: {
@@ -86,25 +89,25 @@ kernel: {
     style.multiple: true
     # D6: single schedulable execution unit.
     # D14: capability-held kernel object type (fourth type).
-    # Lifecycle operations (resume, destroy, potentially more)
-    # are typed kernel syscalls (D7) taking Observer handles.
-    # One register state, one or more Time caps in regular slots (D29+D30),
-    # one capability table. Cached scheduling aggregate on Observer struct (D30).
+    # Lifecycle operations (resume, destroy, potentially more) are typed kernel
+    # syscalls (D7) taking Observer handles.
+    # One register state, one or more Time caps in regular slots (D29+D30), one
+    # capability table. Cached scheduling aggregate on Observer struct (D30).
     # Accesses Spaces via (cap, offset) — D26.
-    # "Process" is a userspace convention (group of Observers
-    # sharing Space caps).
+    # "Process" is a userspace convention (group of Observers sharing Space
+    # caps).
     # D20: per-Observer fault handler (field ref + badge).
     # D21: fault handler is a cap-table entry at reserved slot
     # (not a separate Observer struct field). D11/D17/D8 apply.
-    # D23: Observer handles are clonable. Rights separation via
-    # multiple caps with different masks. D38: clone is a per-type
-    # right (not universal); Observer includes clone, Time does not.
+    # D23: Observer handles are clonable. Rights separation via multiple caps
+    # with different masks. D38: clone is a per-type right (not universal);
+    # Observer includes clone, Time does not.
     # D35: creation is minimal create + separate start.
     # create_observer(space, handler, badge) → inert Observer.
     # Configured via install_cap, write_registers, then resume.
     # install_cap is general-purpose (also serves fault resolution).
-    # D39: nine rights — resume, destroy, install-cap, write-registers,
-    # clone, read-registers, suspend, change-handler, modify-scheduling.
+    # D39: nine rights — resume, destroy, install-cap, write-registers, clone,
+    # read-registers, suspend, change-handler, modify-scheduling.
     # Five Observer states: inert, runnable, blocked, faulted,
     # externally-suspended (co-occurrence with blocked/faulted).
     # Minimum schema TBD.
@@ -113,18 +116,17 @@ kernel: {
       label: Capability table
       # D8: kernel-managed flat array, per-Observer (D4 + D1).
       # Each entry: (kernel object ref, rights mask, badge, slot tag).
-      # D17: badge is minter-assigned, immutable, kernel-attached
-      # to messages. Rights mask includes send, receive, mint (D17).
-      # Handles carry a generational slot tag (D11) — bumped on
-      # slot reuse, prevents stale-handle aliasing. ABA defense,
-      # not revocation; does not invalidate live capabilities.
+      # D17: badge is minter-assigned, immutable, kernel-attached to messages.
+      # Rights mask includes send, receive, mint (D17).
+      # Handles carry a generational slot tag (D11) — bumped on slot reuse,
+      # prevents stale-handle aliasing. ABA defense, not revocation; does not
+      # invalidate live capabilities.
       # Backed by typed memory from the Observer's Spaces.
       # O(1) lookup via handle index.
-      # Revocation primitive: close-only (refcount on drop) +
-      # authoritative destroy (D11). Badge-closure notifications
-      # on tracked fields (D17).
-      # Table sharing: whether Observers sharing Spaces should
-      # share cap tables is open (D8 downstream).
+      # Revocation primitive: close-only (refcount on drop) + authoritative
+      # destroy (D11). Badge-closure notifications on tracked fields (D17).
+      # Table sharing: whether Observers sharing Spaces should share cap tables
+      # is open (D8 downstream).
     }
   }
 
@@ -133,13 +135,13 @@ kernel: {
     style.multiple: true
     # D29: capability-held kernel object type (fourth type).
     # D30: one or more per Observer, in regular cap-table slots.
-    # D36: each Time cap carries normalized compute units —
-    # calibrated to hardware core capacity factors so that a given
-    # quantity represents approximately the same work on any core.
+    # D36: each Time cap carries normalized compute units — calibrated to
+    # hardware core capacity factors so that a given quantity represents
+    # approximately the same work on any core.
     # Kernel translates to per-core scheduling time internally.
     # Space = bytes, Time = compute units (D36 parallel).
-    # Multiple Time caps are additive — kernel maintains cached
-    # aggregate per Observer (D30).
+    # Multiple Time caps are additive — kernel maintains cached aggregate per
+    # Observer (D30).
     # D31: core assignment is kernel-internal (A5 parallel with
     # D9/D26). Observers don't see core identity or capability.
     # Kernel allocates from per-core root Time pools via pager chain.
@@ -154,23 +156,23 @@ kernel: {
     # D13: queued fields with direct-switch fast path (tentative).
     # D15: unidirectional, many-to-many, send/receive as object-rights.
     # D16: reply via pre-allocated reply field with send-once cap.
-    # D17: badge semantics — minter-assigned, mint-right-controlled,
-    # opt-in per-badge lifecycle tracking.
+    # D17: badge semantics — minter-assigned, mint-right-controlled, opt-in
+    # per-badge lifecycle tracking.
     # Single kernel object: bounded queue + waiters list.
     # Optionally: per-badge refcount map (creation-time opt-in, D17).
     # Topology via capability distribution (not kernel-enforced).
-    # Rights: send, receive, mint (D17), send-once (D16) —
-    # independently grantable through D8 rights mask.
+    # Rights: send, receive, mint (D17), send-once (D16) — independently
+    # grantable through D8 rights mask.
     # All information delivery (IPC, faults, interrupts, badge-closure
     # notifications on tracked fields) through the same mechanism.
     # Kernel is a sender for fault/interrupt/closure messages (D12, D17).
     # D22: interrupts are field traffic — no separate IRQ type.
-    # Kernel routes hardware IRQs to fields, delivers with badge +
-    # send-once ack cap (D16). Split/combine for IRQ range delegation.
-    # Each Observer has a pre-allocated reply field; Call() creates
-    # a send-once cap for RPC reply (D16).
-    # D18: overflow = error-to-sender. Deferred fault delivery via
-    # per-field pending list (intrusive, through Observer objects).
+    # Kernel routes hardware IRQs to fields, delivers with badge + send-once ack
+    # cap (D16). Split/combine for IRQ range delegation.
+    # Each Observer has a pre-allocated reply field; Call() creates a send-once
+    # cap for RPC reply (D16).
+    # D18: overflow = error-to-sender. Deferred fault delivery via per-field
+    # pending list (intrusive, through Observer objects).
     # Badge-closure dropped on full queue.
     # Coalescing lives in shared memory, not field (D18 dissolves D13 tension).
     # D28: message format settled — 4 data words + 1 user cap slot +
@@ -198,13 +200,13 @@ hardware: {
   }
   core: {
     style.multiple: true
-    # Logical core. Per-physical-core concerns (power, thermal,
-    # shared L1/TLB on SMT) belong to components not yet derived.
+    # Logical core. Per-physical-core concerns (power, thermal, shared L1/TLB on
+    # SMT) belong to components not yet derived.
   }
 }
 
-# Cross-core coordination (O2): IPIs are the only wake mechanism
-# because A4 means there is no kernel thread to poll.
+# Cross-core coordination (O2): IPIs are the only wake mechanism because A4
+# means there is no kernel thread to poll.
 kernel.core-manager -> kernel.core-manager: IPI
 
 # Hardware -> kernel (A2, O3)
@@ -219,8 +221,8 @@ kernel.core-manager.time-manager -> hardware.core: timer programming
 kernel.space -> hardware.mmu: page table translation (D5, D26)
 hardware.mmu -> hardware.memory: translated access
 
-# D4: Core manager resolves capabilities from the running Observer's
-# table during syscall handling (hot path, per-core).
+# D4: Core manager resolves capabilities from the running Observer's table
+# during syscall handling (hot path, per-core).
 kernel.core-manager -> kernel.observer.capabilities: resolve (hot path)
 
 # D5 + D26: Core manager loads Observer's L0 page table TTBR on context switch
@@ -228,8 +230,8 @@ kernel.core-manager -> kernel.observer.capabilities: resolve (hot path)
 kernel.core-manager -> hardware.mmu: TTBR load (hot path)
 
 # Capabilities designate kernel objects (Space, Time, field, Observer — D29).
-# The capability table connects Observers to the resources they
-# are authorized to use. Space caps grant memory access (D26).
+# The capability table connects Observers to the resources they are authorized
+# to use. Space caps grant memory access (D26).
 kernel.observer.capabilities -> kernel.space: access via (cap, offset) (D4, D9, D26)
 kernel.observer.capabilities -> kernel.field: send/receive (D4, D15)
 kernel.observer.capabilities -> kernel.observer: lifecycle ops (D4, D14)
@@ -243,13 +245,12 @@ kernel.observer.capabilities -> kernel.time: scheduling allocation (D4, D29)
 # External interface: two mechanism families (D7).
 # 1. Typed kernel operation syscalls (Observer -> Kernel, always synchronous).
 # 2. IPC syscalls (Observer <-> Observer, mechanism TBD).
-# Both are capability-mediated (D4). The split reflects the
-# trust-model asymmetry: kernel is exception handler (A4),
-# not a peer.
+# Both are capability-mediated (D4). The split reflects the trust-model
+# asymmetry: kernel is exception handler (A4), not a peer.
 userspace -> kernel.core-manager: kernel op syscalls (D7, capability-mediated)
 # D13+D15: Queued fields, unidirectional, many-to-many.
-# Bounded queue, non-blocking send, direct process switch when
-# receiver waiting. One mechanism for IPC, faults, interrupts.
+# Bounded queue, non-blocking send, direct process switch when receiver waiting.
+# One mechanism for IPC, faults, interrupts.
 # Send/receive rights via D8 capability rights mask.
 # D18: error-to-sender on full queue; deferred fault delivery.
 # Remaining: multi-wait. Message format settled (D28).
@@ -262,11 +263,11 @@ userspace -> userspace: IPC via queued fields (D7+D13+D15+D28, capability-mediat
 # Observer handle delivered in fault message via cap transfer (D13).
 # D40: Per-fault-type resolution protocol:
 #   Resource requests: install_cap + resume (Observer adapts to new VA base).
-#   Cap-table-full: install_cap to reserved growth slot + resume
-#     (kernel consumes Space for table growth, retries).
-#   VM page faults (OOB): error notification — handler destroys or
-#     does cooperative recovery (write-registers + resume).
-#     Demand paging not supported (D26 VA placement constraint).
+#   Cap-table-full: install_cap to reserved growth slot + resume (kernel
+#     consumes Space for table growth, retries).
+#   VM page faults (OOB): handler merges source Space into faulting
+#     Space (D41), then resumes. Error notification remains available.
+#     D41 resolves D26 VA placement constraint for demand paging.
 #   Lazy PTE population: kernel-internal (D12 fast path).
 kernel -> userspace: fault delegation (D12+D14+D20+D40, per-fault-type resolution)
 # D31: Resource requests routed through same fault mechanism.

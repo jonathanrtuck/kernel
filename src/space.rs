@@ -5,6 +5,7 @@
 //! D27: flat cardinality — Observers hold multiple independent Space caps.
 //! D25: page size exposed (minimum Space size = page size).
 //! D32: created by type conversion (Space consumed → becomes object backing).
+//! D41: merge (two → one) and split (one → two) change Space boundaries.
 
 /// A claim to a portion of the system's bounded memory resource.
 ///

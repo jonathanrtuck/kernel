@@ -455,9 +455,10 @@ violate D5's CHERI forward-compatibility note, and cause capability
 proliferation.
 
 Does NOT settle: ~~page size exposure (byte-addressed vs. page-addressed
-interface)~~ (settled by D25: exposed; hiding rejected), specific operations on
-Spaces (split, COW/clone, resize), Space rights, fault delegation, or how an
-Observer acquires additional Spaces at runtime.
+interface)~~ (settled by D25: exposed; hiding rejected), ~~specific operations
+on Spaces (split, COW/clone, resize)~~ (merge and split settled by D41;
+COW/clone remains open), Space rights, ~~fault delegation~~ (settled by D12), or
+~~how an Observer acquires additional Spaces at runtime~~ (settled by D31).
 
 - **Rests on:** A5 (kernel absorbs complexity — same argument that rejected
   CNode trees in D8 applies to memory management), D5 (MMU-backed virtual
@@ -1301,9 +1302,10 @@ relationship in the flat table), D6 (grouping is userspace policy), D4
 forecloses non-tree memory patterns such as shared libraries or peer ring
 buffers).
 
-Does NOT settle: Space operations (split, resize, COW/clone — D9 downstream),
-provenance tracking (deferred as a potential kernel-internal optimization,
-orthogonal to user-facing cardinality).
+Does NOT settle: ~~Space operations (split, resize, COW/clone — D9 downstream)~~
+(merge and split settled by D41; COW/clone remains open), provenance tracking
+(deferred as a potential kernel-internal optimization, orthogonal to user-facing
+cardinality).
 
 - **Rests on:** D8 (flat cap table — no inter-entry relationships; Space caps
   follow existing independent-entry pattern), D6 (no kernel grouping — Space
@@ -1680,7 +1682,8 @@ question — deferred.
 Does NOT settle: ~~destroy cascade protocol~~ (settled by D33: preemptible
 cascade, structural-backing-only return, cascade-freed to root Space), Space
 "create" right in the rights mask, overhead reporting (does the Observer see
-subtree overhead?), merge/join operation (reverse of split).
+subtree overhead?), ~~merge/join operation (reverse of split)~~ (settled by D41:
+merge is the reverse of split).
 
 - **Rests on:** D8 (typed-memory backing — the Observer pays for its structures
   from its Spaces; unaccounted kernel allocation foreclosed), D31 (kernel holds
@@ -2180,10 +2183,10 @@ holds: the same operations serve Observer creation, resource request resolution,
 and cap-table growth.
 
 Does NOT settle: Observer handle rights in fault message (downstream of fault
-message content question), Space resize (D9 open — would enable transparent
-demand paging), fault message content per type (D28 downstream), pager
-unavailability protocol (separate question), VA assignment policy details (D26
-open).
+message content question), ~~Space resize (D9 open — would enable transparent
+demand paging)~~ (settled by D41: merge enables demand paging), fault message
+content per type (D28 downstream), pager unavailability protocol (separate
+question), VA assignment policy details (D26 open).
 
 - **Rests on:** D12 (fault delegation — kernel dispatches, doesn't contain
   policy), D14 (resume as typed kernel syscall; Observer handle in fault
@@ -2210,13 +2213,92 @@ open).
   VA-controlled mapping (traditional demand paging). Divergence explained by D7
   (typed syscalls for Observer operations), D14 (resume is not IPC), and D26
   (kernel-assigned VA bases limit demand paging).
-- **Status:** settled — revisit if D9 is revised (Space resize enables
-  transparent demand paging — OOB faults become resolvable instead of error
-  notifications), if D26 VA assignment policy allows pager-influenced placement
-  (changes the demand-paging constraint), or if a downstream derivation reveals
-  that the error-notification model for OOB faults creates essential complexity
-  that transparent demand paging would have avoided.
+- **Status:** settled — D41 settles Space merge, enabling transparent demand
+  paging. The OOB fault path gains a resolution option: handler merges a source
+  Space into the faulting Space, then resumes. The error-notification path
+  remains available for cases where the handler chooses not to grow. Revisit if
+  D26 VA assignment policy allows pager-influenced placement (changes the
+  demand-paging constraint), or if D41 is revised.
 - **Journal:** `journal/040-pager-fault-resolution-protocol.md`.
+
+### D41 — Space merge and split
+
+Spaces support two topology-changing operations: merge (two → one) and split
+(one → two). These are the only operations that change Space boundaries.
+
+**Merge:** a source Space is absorbed into a target Space. The source ceases to
+exist as an independent Space. The target's VA range extends upward from its
+fixed base (D26 — base is stable). All holders see the extended range
+immediately (D24 — page table is materialized cap state). The source's physical
+pages and page table subtree memory are absorbed. Follows D32 conservation:
+pages change membership, not quantity. Merge can fail if no adjacent VA space is
+available (kernel-internal VA layout policy, D26).
+
+**Split:** a portion of a target Space is extracted into a new independent
+Space. The new Space receives its own kernel-assigned VA base (D26). The
+target's VA range contracts. Holders of the target may lose access to the
+extracted portion (no automatic cap to the new Space — parallels D11 destroy
+visibility). Follows D32 conservation: total pages unchanged.
+
+Both are typed kernel syscalls (D7), cold-path (D1), require dedicated rights in
+the Space rights mask (D4/D8), and operate at page granularity (D25). Split
+requires cross-core TLB invalidation for shared Spaces (O2); merge likely does
+not on ARM64 (the architecture does not cache translation faults for unmapped
+ranges).
+
+The conceptual model: Space is physical memory — it persists. Objects _occupy_
+Space (D32 type conversion); merge and split change boundaries, not material.
+"Grow" and "shrink" are the wrong framing because they imply creation or
+destruction of material. Nothing appears or vanishes — boundaries move.
+
+Split was already established as a pattern: D31/D32/D33 all use "the parent
+Space shrinks by the allocation cost" — that is split. Merge is the genuinely
+new primitive. It resolves D40's demand-paging gap: a pager handling an
+out-of-bounds fault can merge a source Space into the faulting Space to cover
+the offset, then resume the Observer. The existing pager protocol (install_cap +
+resume) is unchanged — merge is an additional step before resume.
+
+D32's unsettled "merge/join operation (reverse of split)" is resolved: merge is
+the reverse of split.
+
+Does NOT settle: syscall signatures (all-or-nothing merge vs. partial; split
+extraction end), separate merge/split rights or single topology right, VA
+headroom policy (kernel-internal), Space vocabulary refinement ("not cumulative"
+wording), COW/clone (D9 deferred, orthogonal), complete Space rights mask.
+
+- **Rests on:** D9 (variable-size kernel-managed Spaces — merge and split
+  operate on D9 Spaces), D26 (capability-addressed memory — kernel-assigned VA
+  bases create the demand-paging constraint that motivates merge; VA base
+  stability determines that merge extends upward from fixed base; VA layout is
+  kernel-internal), D32 (type conversion / conservation — merge follows the
+  consumption pattern; split follows the existing delegation pattern; pages
+  change membership, not quantity), D24 (cap-mapping invariant — all holders see
+  topology changes immediately via page table updates), D40 (pager fault
+  resolution — merge resolves the OOB demand-paging gap; the pager protocol is
+  unchanged), D33 (page table subtree cost — extends from one-shot to
+  incremental; source Space provides subtree memory on merge), D25 (page size
+  exposed — operations are page-aligned), D4 + D8 (authority — dedicated rights
+  in Space rights mask), D7 (typed kernel syscalls, not IPC), D1 (cold-path),
+  A5 + O4 (merge absorbs demand-paging complexity into the kernel; the
+  cooperative recovery alternative pushes essential complexity to userspace),
+  D27 (flat cardinality — no hierarchy between Spaces; merge/split operate on
+  individual Spaces without cascade), D11 (split visibility parallels destroy —
+  holders learn of access loss via fault), `design/landscape.md` §2.1 (memory
+  object models — Zircon VMOs resizable via `zx_vmo_set_size`; Barrelfish lists
+  `resize` as capability operation), `design/research/syscall-landscape.md`
+  §Barrelfish (resize in capability operations).
+- **Archive convergence:** Partial. Archive (claims.toml
+  "space-non-fungibility") noted "Space splitting produces distinguishable
+  children" — same conclusion for split. Archive did not derive merge; its
+  VA-addressed Space model ("space-named-by-virtual-address") allowed
+  traditional demand paging without merge. Divergence explained by D26
+  (kernel-assigned VA bases).
+- **Status:** settled — revisit if D26 is revised (different VA model may change
+  the demand-paging constraint), if D32 is revised (changes the conservation
+  model), or if a downstream derivation reveals that the VA adjacency constraint
+  on merge creates essential complexity (merge failure rates unacceptable under
+  realistic workloads).
+- **Journal:** `journal/041-space-merge-and-split.md`.
 
 ---
 
@@ -2381,12 +2463,13 @@ open).
 - ~~**Pager reply/resume mechanism.**~~ Settled by D40: per-fault-type
   resolution via typed kernel syscalls. Resource requests (D31): install_cap +
   resume. Cap-table-full (D8): install_cap to reserved growth slot + resume
-  (kernel consumes Space for table growth). VM page faults (OOB): error
-  notification to handler (D26's kernel-assigned VA bases prevent resolution by
-  providing a new Space; transparent demand paging requires Space resize). Lazy
-  PTE population: kernel-internal. No kernel validation of fault resolution.
-  install_cap + resume is the general-purpose pattern; D35's structural reuse
-  holds across creation, resource requests, and table growth.
+  (kernel consumes Space for table growth). VM page faults (OOB): D41 settles
+  Space merge, enabling transparent demand paging — handler merges a source
+  Space into the faulting Space, then resumes. Error notification remains
+  available when the handler chooses not to grow. Lazy PTE population:
+  kernel-internal. No kernel validation of fault resolution. install_cap +
+  resume is the general-purpose pattern; D35's structural reuse holds across
+  creation, resource requests, and table growth.
 - **D7 classification of fault traffic.** D12 says fault notifications go to
   pager Observers. D13 says all information delivery uses queued fields. Fault
   delivery is through normal IPC fields (kernel-as-sender). D18 settles the
@@ -2756,6 +2839,17 @@ open).
   destroys or does PC surgery via write-registers). Lazy PTE population:
   kernel-internal. No new kernel surface. Archive divergence: archive unified
   fault resume with IPC reply, lacked D26.
+- `041-space-merge-and-split.md` — reasoning for D41: Space merge (two → one)
+  and split (one → two) as topology-changing operations. Framing shift from
+  "resize" to merge/split — conservation is structural (boundaries move,
+  material doesn't appear or vanish). Merge motivated by D26's demand-paging gap
+  (new Spaces can't cover faulting VAs; merge extends the faulting Space
+  in-place). Split already established as pattern (D31/D32/D33). Both follow D32
+  conservation, require Space rights (D4/D8), operate at page granularity (D25).
+  Cooperative recovery (D40 alternative) rejected on A5/O4 grounds — essential
+  complexity pushed to userspace. Partial archive convergence on split
+  ("distinguishable children"); archive didn't derive merge (VA-addressed model
+  allowed traditional demand paging without it; D26 divergence).
 
 ---
 
