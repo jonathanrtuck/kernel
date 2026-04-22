@@ -5,14 +5,15 @@
 //! D11: close-only + destroy, generational slot tags.
 //! D17: badges (minter-assigned, immutable, kernel-attached to messages).
 
-/// Kernel object types designated by capabilities (D14).
+/// Kernel object types designated by capabilities (D14, D44).
 ///
-/// Exactly four. Exhaustive — no extension point.
+/// Exactly five. Exhaustive — no extension point.
 pub enum ObjectType {
     Space,
     Time,
     Field,
     Observer,
+    Pulsar,
 }
 
 /// Per-capability rights mask (D8, D15, D17, D33, D38, D39).
@@ -29,6 +30,7 @@ pub struct Rights {
     //             read-registers, suspend, change-handler, modify-scheduling (D39).
     //   Space:    read, write, execute, clone, destroy, create (D31). TBD.
     //   Time:     split, destroy. No clone (D38). TBD.
+    //   Pulsar:   TBD (D44 — rights mask one level down).
     // Open:
     //   send-once encoding (D16), grant (D28), duplicate-control (D23 deferred,
     //   D8 derivation — applies to all types uniformly).

@@ -121,19 +121,33 @@ under "Rests on"; it exists so later sections can be precise.
   queued, unidirectional, many-to-many IPC object: multiple Observers may send
   to the same Field, and multiple may receive from it, with access governed by
   capability rights (send, receive, mint). All information delivery — peer
-  messages, fault notifications, interrupt signals, badge-closure events — flows
-  through Fields. The metaphor is from physics: a field mediates interaction
-  between observers, and any number of participants can disturb or sense the
-  same field. Which queue slots are occupied, the waiters list, and optional
-  per-badge tracking state are kernel-internal concerns.
+  messages, fault notifications, interrupt signals, timer fires, badge-closure
+  events — flows through Fields. The metaphor is from physics: a field mediates
+  interaction between observers, and any number of participants can disturb or
+  sense the same field. Which queue slots are occupied, the waiters list, and
+  optional per-badge tracking state are kernel-internal concerns.
+
+- **Pulsar.** A timer that the kernel programs on behalf of an Observer and
+  delivers as a Field message when it fires. A Pulsar is a capability-held
+  kernel object (D44) created from Space (D32) with a delivery Field, badge,
+  deadline, and period. Period = 0 means one-shot; period > 0 means repeating
+  with kernel-managed re-arm and drift compensation. The kernel enqueues a
+  message to the designated Field with the designated badge when the deadline
+  arrives — the same kernel-as-sender pattern used for fault notifications (D12)
+  and interrupt delivery (D22). The Pulsar's period is an explicit input to D42
+  EDF admission (T in the C/T test). Overflow: when the delivery Field is full,
+  the kernel stops re-arming until a slot opens, then delivers with an overrun
+  count. Observers needing adaptive timing use one-shot Pulsars in a loop. The
+  metaphor is from astrophysics: a pulsar emits regular, precisely-timed signals
+  — an Observer listens.
 
 _Capitalized-vs-lowercase convention:_ Capitalized terms (Space, Time, Observer,
-Field) are kernel proper nouns — names of specific concepts in this kernel's
-design, with the semantics defined here. Lowercase equivalents from broader OS
-literature (memory object, thread) refer to the same kind of thing but without
-claiming this kernel's specific semantics. The two are interchangeable in prose;
-capitalization signals "speaking of our concept" vs. "speaking of the general
-concept."
+Field, Pulsar) are kernel proper nouns — names of specific concepts in this
+kernel's design, with the semantics defined here. Lowercase equivalents from
+broader OS literature (memory object, thread) refer to the same kind of thing
+but without claiming this kernel's specific semantics. The two are
+interchangeable in prose; capitalization signals "speaking of our concept" vs.
+"speaking of the general concept."
 
 _Naming note:_ these terms are for internal thinking and will not necessarily
 appear in public API names. Public naming is deferred until v0.1.
@@ -2488,6 +2502,74 @@ scheduling profile, self-reference capabilities.
   field not present in this set.
 - **Journal:** `journal/043-observer-minimum-schema.md`.
 
+### D44 — Pulsar: capability-held timer object with kernel-managed delivery
+
+Pulsar is the fifth kernel object type (Space, Time, Observer, Field, Pulsar). A
+Pulsar is a timer that the kernel programs on behalf of an Observer and delivers
+as a field message when it fires. Creation consumes Space (D32 type conversion).
+The Pulsar is armed on creation with a delivery field cap, badge, deadline, and
+period.
+
+**Delivery:** kernel-as-sender to the designated field with the designated badge
+(D13/D17 pattern, parallel to D22 interrupts and D12 faults). Message includes
+actual fire time in a data word.
+
+**Repeating:** For period > 0, the kernel re-arms automatically with
+drift-compensated deadlines (`next = scheduled + period`). The Observer does not
+participate in re-arm. Period = 0 means one-shot.
+
+**Overflow:** When the delivery field is full, the kernel stops re-arming. On
+the next receive that frees a slot, the kernel re-arms and includes an overrun
+count. Parallels D22 mask-on-delivery.
+
+**Scheduler input:** The Pulsar's period is T in D42's EDF admission test (Σ
+C_i/T_i ≤ 1.0). Setting or destroying a Pulsar triggers re-evaluation.
+
+**Manual control:** Observers needing adaptive timing (variable period, drift
+compensation, tick skipping) use one-shot Pulsars in a loop.
+
+**Clock access:** Per-Observer controlled. The kernel manages
+CNTKCTL_EL1.EL0VCTEN per context switch. Observers with clock-access authority
+read CNTVCT_EL0 directly (~1 cycle). Others use a typed kernel operation.
+
+Does NOT settle: Pulsar rights mask, creation API shape (one-call vs. two-step),
+full message content layout, duration vs. absolute deadline API, clock access
+authority mechanism, default clock access policy, badge-filtered receive (noted
+as independently interesting, deferred).
+
+- **Rests on:** D4 (capability-based authority — Pulsar caps in cap table,
+  cancel = destroy via D11), D7 (split model — timer operations are typed kernel
+  syscalls), D13 (queued fields — timer delivery through existing field
+  mechanism; kernel-as-sender pattern), D17 (badges — timer messages carry
+  minter-assigned badges for identification; multiple Pulsars to same field
+  distinguished by badge), D22 (interrupt delegation — structural parallel;
+  kernel detects hardware event, enqueues message, returns; overflow parallels
+  mask-on-delivery), D28 (fixed-size message format — timer message fits
+  existing format), D32 (type conversion — Pulsar creation consumes Space;
+  self-limiting resource accounting), D42 (scheduling profile — Pulsar period is
+  T for EDF admission; precision value modulates delivery guarantee), A2 (ARM64
+  generic timer — per-core, one-shot, kernel multiplexes; CNTVCT_EL0 for
+  per-Observer clock access), A3 (generic — timer interface serves all
+  workloads; per-Observer clock access control serves both precision-sensitive
+  and security-sensitive workloads), A4 (purely reactive — timer fire is a
+  hardware exception; re-arm is exception-triggered processing using persistent
+  state), A5 (leaf node — kernel absorbs timer multiplexing, drift compensation,
+  overflow handling, and scheduling integration; one-shot Pulsars provide escape
+  hatch when Observer-managed timing is needed).
+- **Archive convergence:** No convergence or divergence on Pulsar as an object
+  type — the archive did not reach this question. The archive has no userspace
+  timer concept; periodic behavior is declared via scheduling parameters on the
+  Context (d, dt, p, pt). Divergence explained by same factor as D42: the
+  current design derives T from the Pulsar's period rather than requiring
+  explicit scheduling declarations. See journal.
+- **Status:** settled — revisit if D42 is revised (changes the scheduling
+  profile or timer period's role in EDF admission), if D13 is revised (changes
+  the delivery mechanism), if D32 is revised (changes the type conversion
+  model), if D22 is revised (changes the interrupt delivery pattern that Pulsar
+  parallels), or if a downstream derivation reveals that kernel-managed re-arm
+  cannot serve a structurally required timer pattern.
+- **Journal:** `journal/044-userspace-timer-interface.md`.
+
 ---
 
 ## Open questions
@@ -2626,9 +2708,13 @@ scheduling profile, self-reference capabilities.
 - **Interrupt priority and routing.** D22 defers both. GICv3 8-bit priority:
   kernel-managed vs. exposed. SPI routing: kernel-managed vs. exposed. Both are
   kernel-internal GIC configuration, not tied to any object model.
-- **Userspace timers.** Preemption timer is kernel-internal (D2). Userspace
-  timer callbacks: kernel programs timer on behalf of Observer and deposits
-  message when it fires. Connects to D2 scheduling model and D13 delivery.
+- ~~**Userspace timers.**~~ Settled by D44: Pulsar, a capability-held timer
+  object with kernel-managed delivery. Fifth kernel object type. Created from
+  Space (D32) with delivery field, badge, deadline, period. Kernel manages
+  re-arm, drift compensation, overflow. Period is EDF admission input (D42).
+  Clock access per-Observer via CNTKCTL_EL1 on context switch. Remaining: Pulsar
+  rights mask, creation API shape, message content layout, duration vs. absolute
+  deadline, clock access authority mechanism.
 - ~~**Page size exposure.**~~ Settled by D25: page size is exposed. Hiding
   rejected — creates unpredictable hardware-dependent failures and security
   violations under sub-page packing. Remaining: whether the interface is fully
@@ -2712,8 +2798,10 @@ scheduling profile, self-reference capabilities.
   operations. D39 adds observer_read_registers(), observer_suspend(),
   observer_change_handler(), and observer_set_scheduling() as typed kernel
   operations (completing the Observer rights set — nine rights, nine syscalls).
-  The archive's 10-syscall design is a data point. Depends on IPC model and D9
-  (memory objects).
+  D44 adds Pulsar operations (create, arm/set, cancel/destroy — exact set
+  depends on Pulsar rights mask) and a clock-read typed kernel operation for
+  Observers without direct counter access. The archive's 10-syscall design is a
+  data point. Depends on IPC model and D9 (memory objects).
 - ~~**Address space lifecycle.**~~ Dissolved by D26: no address space kernel
   object. The page table is kernel-internal; per-Observer L0 tables are
   destroyed with the Observer; per-Space subtrees are reference-counted and
@@ -3049,6 +3137,21 @@ scheduling profile, self-reference capabilities.
   Time + timer + precision. Archive convergence: strong on resource/preference
   split and "every parameter must have a cost." Archive's six parameters
   collapse to three because the kernel already knows period and compute budget.
+- `043-observer-minimum-schema.md` — reasoning for D43: eight forced field
+  clusters mechanically derived from settled decisions. Observer splits into
+  metadata struct (root Space, ~80–100 bytes) and structural backing (consumed
+  Space). Key decisions: no kernel-side scheduling inheritance (one R/T/P set,
+  userspace manages adjustment), transient core assignment (no struct field),
+  wait-state as Rust enum (inline single-field, allocated multi-field), reply
+  field follows D21 cap-table pattern.
+- `044-userspace-timer-interface.md` — reasoning for D44: Pulsar as fifth kernel
+  object type. Virtual-field model explored and rejected (non-blocking
+  composability). Precision-maximizing design explored and refined (kernel
+  manages drift; one-shot for manual control). Timer object chosen over
+  stateless operation (cancel authority, resource accounting). Kernel-managed
+  re-arm, drift compensation, overflow via stop-re-arm-on-full. Per-Observer
+  clock access via CNTKCTL_EL1. No archive convergence (archive had no userspace
+  timer concept).
 
 ---
 

@@ -1,8 +1,8 @@
 # Kernel structural map.
 #
-# Populated from design/spec.md derivations D1-D6, D8-D43, observations O2-O3,
-# and Vocabulary (Space, Time, Observer). Every box and edge has a corresponding
-# spec.md entry; items labeled "TBD" await downstream derivation.
+# Populated from design/spec.md derivations D1-D6, D8-D44, observations O2-O3,
+# and Vocabulary (Space, Time, Observer, Pulsar). Every box and edge has a
+# corresponding spec.md entry; items labeled "TBD" await downstream derivation.
 #
 # Intentionally absent (pending derivation): specific syscall surface,
 # field details (multi-wait — D13/D15 downstream; overflow
@@ -172,9 +172,10 @@ kernel: {
     # Topology via capability distribution (not kernel-enforced).
     # Rights: send, receive, mint (D17), send-once (D16) — independently
     # grantable through D8 rights mask.
-    # All information delivery (IPC, faults, interrupts, badge-closure
-    # notifications on tracked fields) through the same mechanism.
-    # Kernel is a sender for fault/interrupt/closure messages (D12, D17).
+    # All information delivery (IPC, faults, interrupts, timer fires,
+    # badge-closure notifications on tracked fields) through the same mechanism.
+    # Kernel is a sender for fault/interrupt/timer/closure messages
+    # (D12, D17, D22, D44).
     # D22: interrupts are field traffic — no separate IRQ type.
     # Kernel routes hardware IRQs to fields, delivers with badge + send-once ack
     # cap (D16). Split/combine for IRQ range delegation.
@@ -187,6 +188,22 @@ kernel: {
     # D28: message format settled — 4 data words + 1 user cap slot +
     # label/badge/reply-cap as dedicated fields. Fixed-size control packet.
     # Multi-wait TBD.
+  }
+
+  pulsar: {
+    label: Pulsar
+    style.multiple: true
+    # D44: capability-held timer object (fifth kernel object type).
+    # Created from Space (D32). Armed on creation with delivery field, badge,
+    # deadline, period. Period = 0 → one-shot; period > 0 → repeating.
+    # Delivery: kernel-as-sender to designated field with badge (D13/D17).
+    # Message includes actual fire time + overrun count in data words.
+    # Kernel manages re-arm with drift compensation (next = scheduled + period).
+    # Overflow: stop re-arming when field full; re-arm + overrun count on
+    # next receive. Parallels D22 mask-on-delivery.
+    # Period is explicit scheduler input: T in D42 EDF admission (C/T test).
+    # Manual control: one-shot Pulsars in a loop for adaptive timing.
+    # Clock access: per-Observer CNTKCTL_EL1.EL0VCTEN on context switch.
   }
 }
 
@@ -238,18 +255,22 @@ kernel.core-manager -> kernel.observer.capabilities: resolve (hot path)
 # (hot path). Observers sharing identical Space cap sets could share TTBR.
 kernel.core-manager -> hardware.mmu: TTBR load (hot path)
 
-# Capabilities designate kernel objects (Space, Time, field, Observer — D29).
+# Capabilities designate kernel objects (Space, Time, Field, Observer, Pulsar).
 # The capability table connects Observers to the resources they are authorized
 # to use. Space caps grant memory access (D26).
 kernel.observer.capabilities -> kernel.space: access via (cap, offset) (D4, D9, D26)
 kernel.observer.capabilities -> kernel.field: send/receive (D4, D15)
 kernel.observer.capabilities -> kernel.observer: lifecycle ops (D4, D14)
+kernel.observer.capabilities -> kernel.pulsar: timer ops (D4, D44)
 # D9: Space manager allocates physical backing for Spaces.
 kernel.space-manager -> kernel.space: physical backing
 kernel.observer.capabilities -> kernel.time: scheduling allocation (D4, D29)
 # D22: Interrupts delivered through fields (no separate IRQ type).
 # Kernel routes hardware IRQs to fields internally.
 # Ack via D16 send-once cap in interrupt message.
+# D44: Pulsar timer fires delivered through fields (same pattern).
+# Pulsar holds internal reference to delivery field (contributes to refcount).
+kernel.pulsar -> kernel.field: timer delivery (D44, kernel-as-sender)
 
 # External interface: two mechanism families (D7).
 # 1. Typed kernel operation syscalls (Observer -> Kernel, always synchronous).

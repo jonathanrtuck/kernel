@@ -15,5 +15,6 @@ pub mod firmware;
 pub mod observer;
 #[cfg(target_os = "none")]
 pub mod print;
+pub mod pulsar;
 pub mod space;
 pub mod time;
