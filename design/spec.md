@@ -647,11 +647,11 @@ journal/013 so it is not rediscovered.
 Queue memory drawn from the creator's Spaces (D8 pattern). Fixed capacity at
 creation. Memory per queued message ~48 bytes (register-sized).
 
-Does NOT settle: ~~message format~~ (settled by D28), queue capacity policy, IPC
-fast-path conditions, D12 fault delivery specifics. (Field shape settled by D15.
-Overflow policy settled by D18. Coalescing dissolved by D18. Reply routing
-settled by D16. Badge semantics settled by D17. Multi-field wait resolved by
-D19. Message format settled by D28.)
+Does NOT settle: ~~message format~~ (settled by D28), queue capacity policy,
+~~IPC fast-path conditions~~ (settled by D50), D12 fault delivery specifics.
+(Field shape settled by D15. Overflow policy settled by D18. Coalescing
+dissolved by D18. Reply routing settled by D16. Badge semantics settled by D17.
+Multi-field wait resolved by D19. Message format settled by D28.)
 
 - **Rests on:** A3 (generic — both sync and async patterns required; independent
   path), A4 (purely reactive — no kernel message broker; IPC dispatch within
@@ -1384,7 +1384,7 @@ cap-table-full, invalid syscall), badge-closure notification content, interrupt
 message content, ~~inspect() syscall shape~~ (reconciled by D48:
 observer_read_registers, D39's name), sender-side syscall encoding (which
 registers carry what — A2 implementation detail), send-right gating of cap
-transfer (Grant right), IPC fast-path conditions.
+transfer (Grant right), ~~IPC fast-path conditions~~ (settled by D50).
 
 - **Rests on:** D13 (queued fields — message is what the queue holds; ~48 byte
   per-slot estimate anchors the size), D16 (reply cap mechanism — the kernel
@@ -2773,7 +2773,8 @@ IPC, negative-x0 for typed ops), ~~cap-present indicator encoding~~ (settled by
 D49: sentinel u64::MAX), ~~specific SVC number assignments~~ (settled by D49:
 #1–#5), ~~typed operation code assignments within x4~~ (settled by D49: grouped
 sequential 0–19), ~~large return value convention~~ (settled by D49: userspace
-buffer pointer), IPC fast-path conditions (when direct switch occurs).
+buffer pointer), ~~IPC fast-path conditions~~ (settled by D50: scheduler
+callback, 0-cap gate, Call + ReplyRecv scope).
 
 - **Rests on:** D28 (fixed-size message format — 4 data words + 1 cap + label
   exactly fills 8 ARM64 registers, making the discriminator's placement
@@ -2998,11 +2999,11 @@ user cap for reply (u64::MAX if none), x7 = send-once reply cap handle (from
 previous Receive's x7). Two targets (reply cap in x7, receive field in x5) use
 two separate registers.
 
-Does NOT settle: IPC fast-path conditions (when direct switch occurs — separate
-from encoding), specific error code values (error domain), buffer alignment and
-size constraints for large returns, ReplyRecv send-side flags (whether x7 can
-carry flags in addition to the reply cap handle, or whether flags are
-unnecessary for reply sends).
+Does NOT settle: ~~IPC fast-path conditions~~ (settled by D50: scheduler
+callback, 0-cap gate, Call + ReplyRecv scope), specific error code values (error
+domain), buffer alignment and size constraints for large returns, ReplyRecv
+send-side flags (whether x7 can carry flags in addition to the reply cap handle,
+or whether flags are unnecessary for reply sends).
 
 - **Rests on:** D47 (ABI framework — register convention and two-level numbering
   are the foundation all encoding details build on), D48 (25-operation
@@ -3025,6 +3026,89 @@ unnecessary for reply sends).
   constraints on user-memory access prove problematic for the buffer-pointer
   convention.
 - **Journal:** `journal/049-syscall-encoding.md`.
+
+### D50 — IPC fast-path conditions: scheduler callback, 0-cap gate, Call + ReplyRecv scope
+
+Six conditions, all of which must hold for the kernel to take the direct-switch
+fast path on IPC:
+
+1. **Operation is Call (SVC #3) or ReplyRecv (SVC #4).** The sender voluntarily
+   blocks. Send, Receive, and Yield do not qualify. Send is a different
+   interaction shape (fire-and-forget; sender continues per D13). If
+   Send-to-waiting-receiver needs optimization, it is a separate "fast enqueue"
+   mechanism, not direct switch.
+2. **Same core.** Structural — O3 guarantees the SVC handler runs on the issuing
+   core; the receiver must be on this core. Cross-core IPC goes through
+   enqueue + IPI (O2).
+3. **Target field has a waiting receiver.** An Observer is blocked on Receive on
+   the target field (post-D45 routing resolution). D13's fundamental trigger.
+4. **No user cap in message.** x6 = u64::MAX (D49 sentinel). Zero-cap detection
+   is a single field check (D28 line 1359: "cheaply distinguishable"). Cap
+   transfer goes through the general IPC path — rights validation, destination
+   table allocation, ABA tag management are categorically more expensive than
+   data-word pass-through (D47 x0–x3).
+5. **Scheduler approves the switch.** The per-core scheduler's
+   `should_switch_to(receiver)` callback returns true. The scheduler is the
+   authority on "who runs next" regardless of code path. This is the D42 analog
+   of seL4's "no higher-priority runnable" check, generalized to work with any
+   D2 algorithm.
+6. **Field routing resolved.** D45 routing evaluation completes. Unsplit fields:
+   null table skip (~0 cost). Split fields: ~10–20 cycles within budget.
+
+If any condition fails → slow path. The slow path can still direct-switch
+through the general IPC code; it handles all cases uniformly at higher cost
+(~600–800 vs. ~400 cycles).
+
+D28's fixed-size message format eliminates the "message too large" condition
+that seL4 must check — every message fits in registers by construction. D43's
+"no kernel-side scheduling inheritance" eliminates profile manipulation from the
+fast path. Run queues stay consistent per the Benno scheduling lesson (no lazy
+scheduling).
+
+The scheduler callback isolates an uncertain decision behind an interface
+(philosophy: "isolate uncertain decisions behind interfaces"). D2 allows
+different algorithms per core; the callback is algorithm-agnostic. Cost ~20–50
+cycles (5–12% of ~400 budget). This is not extra work — A4 means the kernel must
+choose which Observer to resume after every SVC; the callback unifies the
+fast-path check with the slow-path scheduling decision.
+
+The 0-cap gate makes D37's Time donation on Call() always slow-path. D37 chose
+cap-graph visibility over seL4 MCS's zero-fastpath-overhead kernel-internal
+approach; this is where that tradeoff materializes. The slow path still bypasses
+the queue when the receiver is waiting — it uses the general code path, not the
+optimized fast-path assembly.
+
+Does NOT settle: scheduler callback interface (function signature, constant-time
+requirement — depends on scheduler internals), Send-to-waiting-receiver "fast
+enqueue" optimization, interrupt masking during fast path.
+
+- **Rests on:** D13 (queued fields with direct-switch fast path — establishes
+  the mechanism and ~400-cycle target), D28 (fixed-size message — eliminates
+  message-size check; "cheaply distinguishable" 0-cap gate), D47 (IPC-optimized
+  registers — x0–x3 pass-through is the core fast-path optimization), D49
+  (cap-present sentinel u64::MAX — the 0-cap gate mechanism), D42 (three-value
+  scheduling profile — no single priority integer; motivates scheduler callback
+  over hard-coded check), D43 (no scheduling inheritance — fast path does no
+  profile manipulation), D2 (per-core schedulers with different algorithms —
+  callback must be algorithm-agnostic), D1 (per-core hot path — same-core
+  requirement; no cross-core shared state), D45 (field split — routing
+  evaluation before direct-switch check), D48 (syscall enumeration — Call and
+  ReplyRecv are the fast-path operations), D16 (reply via send-once —
+  ReplyRecv's reply side), D37 (Time donation — explicitly slow-path; cap-graph
+  tradeoff accepted), O3 (exceptions on causing core — same-core is structural),
+  A4 (purely reactive — scheduler decision is part of every exception return),
+  A5 (kernel is leaf node — scheduler authority preserved),
+  `design/research/reply-cap-mechanism.md` §seL4 fast-path conditions (seL4
+  disqualifying conditions), `design/landscape.md` §3.4 (fast-path data,
+  cache-working-set principle), `design/research/syscall-landscape.md` §9.4
+  (Benno scheduling — lazy scheduling abandoned).
+- **Status:** settled — revisit if D13 is revised (different IPC model), if D42
+  is revised (different scheduling model changes callback semantics), if D2 is
+  revised (unified scheduler removes need for algorithm-agnostic callback), if
+  D37 is revised (different Time donation mechanism changes cap-transfer
+  tradeoff), or if the scheduler callback proves too expensive in practice
+  (consistently >50 cycles, >12% of fast-path budget).
+- **Journal:** `journal/050-ipc-fast-path-conditions.md`.
 
 ---
 
@@ -3241,14 +3325,21 @@ unnecessary for reply sends).
   unnecessary). Archive's cap_mask bitmask replaced by dedicated cap fields
   (D8's structural distinction between data copying and cap transfer).
   Remaining: fault message content per type, badge-closure content, interrupt
-  content, inspect() shape, fast-path conditions.
+  content, inspect() shape, ~~fast-path conditions~~ (settled by D50).
 - **Send-once right encoding.** D16 introduces send-once as a general-purpose
   right in D8's rights mask. How it is represented (a right bit, a modifier on
   the send right, or a separate field) is an entry-layout detail deferred with
   D8's open entry-layout questions. D28 confirms the reply cap (a send-once cap)
   is kernel-injected in a dedicated message field, not a user cap slot.
-- **IPC fast-path conditions.** When does direct process switch occur? Receiver
-  waiting? Priority check? seL4 fastpath requires no higher-priority runnable.
+- ~~**IPC fast-path conditions.**~~ Settled by D50: six conditions — operation
+  is Call or ReplyRecv, same core, receiver waiting on target field, no user cap
+  in message (0-cap gate), per-core scheduler approves switch (callback
+  interface), field routing resolved. Scheduler callback generalizes seL4's
+  priority check to work with any D2 algorithm. 0-cap gate makes D37 Time
+  donation slow-path (cap-graph tradeoff accepted). Slow path can still
+  direct-switch through general code. Remaining: scheduler callback interface,
+  Send-to-waiting-receiver "fast enqueue" optimization, interrupt masking during
+  fast path.
 - ~~**Specific syscall surface.**~~ Settled by D48: 5 IPC operations (Send,
   Receive, Call, ReplyRecv, Yield) + 20 typed kernel operations = 25 total.
   NBSend rejected (redundant — Send never blocks under D13/D18). Reply rejected
@@ -3642,6 +3733,15 @@ unnecessary for reply sends).
   sentinel u64::MAX. SVC assignments: #1–#5. Typed op codes: grouped sequential
   0–19. Large return values: userspace buffer pointer. Corrects D47's premature
   foreclosure of condition-flag error signaling.
+- `050-ipc-fast-path-conditions.md` — reasoning for D50: IPC fast-path
+  conditions. Three independent axes (scheduling check, cap transfer
+  eligibility, operation scope) derived from settled decisions. Scheduler
+  callback chosen over no-check (D42 authority), max-R tracker (D42-specific),
+  and run-queue-empty (overly conservative). 0-cap gate from D28's "cheaply
+  distinguishable" design. Call + ReplyRecv scope from D13's sender-blocks
+  semantics. D37 Time donation explicitly slow-path (cap-graph tradeoff).
+  Philosophy: "isolate uncertain decisions behind interfaces" applied to
+  scheduling check.
 
 ---
 
