@@ -28,6 +28,7 @@ pub const INTID_SPURIOUS: u32 = 1023;
 
 const GICD_CTLR: usize = 0x0000;
 const GICD_IGROUPR: usize = 0x0080; // + 4*n, 1 bit/interrupt
+#[allow(dead_code)]
 const GICD_ISENABLER: usize = 0x0100; // + 4*n, 1 bit/interrupt
 const GICD_IPRIORITYR: usize = 0x0400; // + n, 1 byte/interrupt
 
@@ -57,19 +58,32 @@ const GICR_IPRIORITYR: usize = GICR_SGI_BASE + 0x0400; // + n, 1 byte/interrupt
 // Initialization
 // ---------------------------------------------------------------------------
 
-/// Initialize the GIC for core 0: distributor, redistributor, CPU interface.
+/// Initialize the full GIC for the BSP: redistributor, CPU interface, and
+/// distributor.
 ///
-/// Enables Group 1 non-secure interrupts and the virtual timer PPI (INTID 27).
-/// Does NOT unmask IRQs in PSTATE — the caller decides when to start taking
-/// interrupts (typically after the timer is configured).
+/// The distributor is initialized exactly once (here). Secondary cores call
+/// [`init_per_core`] instead.
 pub fn init() {
-    let core_id = (sysreg::mpidr_el1() & 0xFF) as usize;
-    let dist_base = platform::GIC_DIST_BASE;
-    let redist_base = platform::GIC_REDIST_BASE + core_id * GICR_STRIDE;
+    let core_id = super::cpu::core_id_from_mpidr(sysreg::mpidr_el1());
+
+    init_per_core(core_id);
+    init_distributor(platform::GIC_DIST_BASE);
+}
+
+/// Initialize per-core GIC state: redistributor + CPU interface.
+///
+/// Called by every core (BSP via [`init`], secondaries directly). Does not
+/// require the distributor — only initializes per-core redistributor and
+/// CPU interface state.
+pub fn init_per_core(core_id: usize) {
+    let redist_base = redist_base_for_core(core_id);
 
     init_redistributor(redist_base);
     init_cpu_interface();
-    init_distributor(dist_base);
+}
+
+fn redist_base_for_core(core_id: usize) -> usize {
+    platform::GIC_REDIST_BASE + core_id * GICR_STRIDE
 }
 
 /// Read ICC_IAR1_EL1 to acknowledge the highest-priority pending interrupt.
@@ -190,4 +204,29 @@ fn init_cpu_interface() {
     // Enable Group 1 non-secure interrupts.
     sysreg::set_icc_igrpen1_el1(1);
     sysreg::isb();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redist_core_0_equals_base() {
+        assert_eq!(redist_base_for_core(0), platform::GIC_REDIST_BASE);
+    }
+
+    #[test]
+    fn redist_core_3() {
+        assert_eq!(
+            redist_base_for_core(3),
+            platform::GIC_REDIST_BASE + 3 * GICR_STRIDE,
+        );
+    }
+
+    #[test]
+    fn redist_stride_is_128k() {
+        let diff = redist_base_for_core(1) - redist_base_for_core(0);
+
+        assert_eq!(diff, 0x20000);
+    }
 }

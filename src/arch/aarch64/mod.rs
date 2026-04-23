@@ -1,7 +1,11 @@
 //! AArch64 architecture implementation.
 
+#[cfg(target_os = "none")]
 core::arch::global_asm!(include_str!("boot.S"));
+#[cfg(target_os = "none")]
+core::arch::global_asm!(include_str!("secondary_entry.S"));
 
+pub mod cpu;
 pub mod entropy;
 pub mod exception;
 pub mod gic;
@@ -9,6 +13,7 @@ pub use gic as interrupts;
 mod mmio;
 pub mod mmu;
 pub mod platform;
+pub mod psci;
 pub mod register_state;
 pub mod serial;
 mod sysreg;

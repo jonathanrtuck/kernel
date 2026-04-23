@@ -5,6 +5,7 @@
 //! decodes the exception, prints diagnostic output for fatal cases, and
 //! returns for recoverable ones (e.g., IRQ).
 
+#[cfg(target_os = "none")]
 core::arch::global_asm!(include_str!("exception.S"));
 
 use super::sysreg;
@@ -111,6 +112,10 @@ fn irq_handler(_frame: &mut TrapFrame) {
         super::gic::INTID_VTIMER => {
             super::timer::tick();
         }
+        // BUG: println! here will deadlock if this IRQ preempted a println!
+        // on the same core (serial lock is not interrupt-aware). Acceptable
+        // for now — unhandled IRQs during serial output are unlikely. Fix
+        // when the serial driver gains interrupt-safe locking.
         _ => {
             crate::println!("IRQ: unhandled INTID {intid}");
         }

@@ -18,11 +18,14 @@ extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
     arch::exception::init();
     arch::platform::init(dtb_ptr);
     arch::mmu::init();
+    arch::serial::enable_lock();
     arch::entropy::init();
     arch::interrupts::init();
     arch::timer::init();
 
     println!("alive");
+
+    arch::cpu::activate_secondaries();
 
     loop {
         arch::halt();
@@ -32,6 +35,7 @@ extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     arch::disable_interrupts();
+    arch::serial::break_lock();
 
     println!();
     println!("panic: {info}");

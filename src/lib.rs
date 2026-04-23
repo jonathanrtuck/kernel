@@ -6,14 +6,14 @@
 
 #![no_std]
 
-#[cfg(target_os = "none")]
+#[cfg(any(target_os = "none", test))]
 pub mod arch;
 pub mod capability;
 pub mod config;
 pub mod field;
 pub mod firmware;
 pub mod observer;
-#[cfg(target_os = "none")]
+#[cfg(any(target_os = "none", test))]
 pub mod print;
 pub mod pulsar;
 pub mod space;

@@ -6,12 +6,67 @@
 //! mapped.
 //!
 //! All output goes through [`Writer`]'s [`core::fmt::Write`] implementation.
+//!
+//! The spinlock is only active after [`enable_lock`] is called (post-MMU,
+//! pre-secondary-core activation). Before that, only core 0 runs, so no
+//! lock is needed. Atomic operations require cacheable memory (MMU on).
 
 use super::mmio;
 use super::platform;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 const TX_TIMEOUT: u32 = 1_000_000;
 const TXFF: u32 = 1 << 5;
+
+static SERIAL_LOCK: AtomicBool = AtomicBool::new(false);
+static LOCK_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Enable the serial spinlock. Call after the MMU is enabled and before
+/// secondary cores start printing.
+pub fn enable_lock() {
+    LOCK_ENABLED.store(true, Ordering::Release);
+}
+
+/// Force-release the serial lock. Called from the panic handler to prevent
+/// deadlock when the panicking core already holds the lock.
+pub fn break_lock() {
+    SERIAL_LOCK.store(false, Ordering::Release);
+}
+
+/// RAII guard that releases the serial lock on drop, ensuring the lock is
+/// freed even if the caller panics (e.g., during a panic message).
+struct SerialGuard {
+    held: bool,
+}
+
+impl SerialGuard {
+    fn acquire() -> Self {
+        if !LOCK_ENABLED.load(Ordering::Relaxed) {
+            return Self { held: false };
+        }
+
+        loop {
+            while SERIAL_LOCK.load(Ordering::Relaxed) {
+                core::hint::spin_loop();
+            }
+
+            if SERIAL_LOCK
+                .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
+                return Self { held: true };
+            }
+        }
+    }
+}
+
+impl Drop for SerialGuard {
+    fn drop(&mut self) {
+        if self.held {
+            SERIAL_LOCK.store(false, Ordering::Release);
+        }
+    }
+}
 
 /// PL011 UART output. Use with [`core::fmt::Write`]:
 ///
@@ -32,6 +87,15 @@ impl core::fmt::Write for Writer {
         }
 
         Ok(())
+    }
+
+    // Hold the lock across the entire formatted message. The default
+    // write_fmt calls write_str per segment, which would interleave
+    // output from concurrent cores.
+    fn write_fmt(&mut self, args: core::fmt::Arguments<'_>) -> core::fmt::Result {
+        let _guard = SerialGuard::acquire();
+
+        core::fmt::write(self, args)
     }
 }
 

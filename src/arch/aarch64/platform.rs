@@ -30,8 +30,10 @@ pub const UART_BASE: usize = 0x0900_0000;
 // Runtime-discovered values (from DTB, with compiled defaults)
 // ---------------------------------------------------------------------------
 
-// Ordering::Relaxed is correct while only core 0 boots. D46 settles boot-time
-// activation of all cores — these will need Release/Acquire.
+// Ordering::Relaxed is correct: the BSP writes these values before calling
+// activate_secondaries(), and the PSCI CPU_ON mechanism provides an implicit
+// memory ordering barrier — the hypervisor ensures each secondary core's view
+// is coherent with the BSP's stores at the point of CPU_ON.
 static CORE_COUNT: AtomicUsize = AtomicUsize::new(1);
 static RAM_BASE_VAL: AtomicUsize = AtomicUsize::new(0x4000_0000);
 static RAM_SIZE_VAL: AtomicUsize = AtomicUsize::new(256 * 1024 * 1024);
@@ -48,6 +50,7 @@ pub fn ram_size() -> usize {
     RAM_SIZE_VAL.load(Ordering::Relaxed)
 }
 
+#[cfg(target_os = "none")]
 /// Scan the device tree and override defaults with discovered values.
 ///
 /// Called once during early boot, before the MMU or any consumer reads

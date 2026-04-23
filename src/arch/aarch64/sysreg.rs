@@ -16,6 +16,8 @@
 //! instruction has no side effects and reads no memory. All other accesses
 //! omit `nomem` so LLVM cannot reorder them relative to memory operations.
 
+#![allow(dead_code)]
+
 // ---------------------------------------------------------------------------
 // Internal macros — not exported, used to generate accessors below.
 // ---------------------------------------------------------------------------

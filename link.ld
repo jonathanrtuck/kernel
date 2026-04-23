@@ -50,7 +50,8 @@ SECTIONS
     }
     __bss_end = .;
 
-    /* Kernel stack (64 KiB). */
+    /* BSP early-boot stack (64 KiB). Used by boot.S before Rust.
+     * Per-core stacks for all cores live in CORE_STACKS (cpu.rs, in .bss). */
     . = ALIGN(16);
     .bss.stack (NOLOAD) : {
         __stack_bottom = .;
