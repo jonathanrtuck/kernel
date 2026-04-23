@@ -1,6 +1,6 @@
 # Kernel structural map.
 #
-# Populated from design/spec.md derivations D1-D6, D8-D48, observations O2-O3,
+# Populated from design/spec.md derivations D1-D6, D8-D49, observations O2-O3,
 # and Vocabulary (Space, Time, Observer, Pulsar). Every box and edge has a
 # corresponding spec.md entry; items labeled "TBD" await downstream derivation.
 #
@@ -286,7 +286,9 @@ kernel.pulsar -> kernel.field: timer delivery (D44, kernel-as-sender)
 # Both are capability-mediated (D4). The split reflects the trust-model
 # asymmetry: kernel is exception handler (A4), not a peer.
 # D48: 5 IPC ops (Send, Receive, Call, ReplyRecv, Yield) + 20 typed ops = 25.
-userspace -> kernel.core-manager: kernel op syscalls (D7, D48, capability-mediated)
+# D49: encoding — carry-flag error (IPC), negative-x0 (typed), sentinel caps,
+# SVC #1–#5, grouped sequential op codes, userspace buffer for large returns.
+userspace -> kernel.core-manager: kernel op syscalls (D7, D48, D49, capability-mediated)
 # D13+D15: Queued fields, unidirectional, many-to-many.
 # Bounded queue, non-blocking send, direct process switch when receiver waiting.
 # One mechanism for IPC, faults, interrupts.

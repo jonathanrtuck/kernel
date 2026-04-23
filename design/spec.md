@@ -5,7 +5,7 @@ rationale. See `design/graph.d2` for the structural map and `design/journal/`
 for full exploration history.
 
 This document was reset on 2026-04-15 to re-derive contingent decisions from
-first principles. The current derivation chain (D1–D48) has fully superseded the
+first principles. The current derivation chain (D1–D49) has fully superseded the
 previous chain, which was deleted after systematic convergence checking
 confirmed coverage across all topics.
 
@@ -2768,11 +2768,12 @@ immediates (SVC #1 through #N, one per IPC operation). Typed kernel operations
 are SVC #0, with the specific operation code in x4. The kernel dispatches IPC
 operations from ESR_EL1 alone — before reading any GPR.
 
-Does NOT settle: error signaling convention (how failed operations report
-errors), cap-present indicator encoding, specific SVC number assignments for
-each IPC operation, typed operation code assignments within x4, large return
-value convention (e.g., read_registers), IPC fast-path conditions (when direct
-switch occurs).
+Does NOT settle: ~~error signaling convention~~ (settled by D49: carry flag for
+IPC, negative-x0 for typed ops), ~~cap-present indicator encoding~~ (settled by
+D49: sentinel u64::MAX), ~~specific SVC number assignments~~ (settled by D49:
+#1–#5), ~~typed operation code assignments within x4~~ (settled by D49: grouped
+sequential 0–19), ~~large return value convention~~ (settled by D49: userspace
+buffer pointer), IPC fast-path conditions (when direct switch occurs).
 
 - **Rests on:** D28 (fixed-size message format — 4 data words + 1 cap + label
   exactly fills 8 ARM64 registers, making the discriminator's placement
@@ -2885,13 +2886,15 @@ resource management, lifecycle control, capability operations, scheduling
 control. Interrupt delivery flows through Fields (D22) with no dedicated
 operation.
 
-Does NOT settle: specific SVC number assignments for IPC operations (D47
-deferred), typed operation code assignments within x4, error signaling
-convention, cap-present indicator encoding, large return value convention (e.g.,
-read_registers returning a buffer). Pending additions from Space rights mask,
-Field rights mask, and Pulsar rights mask (typed operations only; IPC set is
-complete). time_merge not included (no functional need — D30 additive aggregate
-makes holding multiple Time caps equivalent; not foreclosed).
+Does NOT settle: ~~specific SVC number assignments~~ (settled by D49: #1–#5),
+~~typed operation code assignments within x4~~ (settled by D49: grouped
+sequential 0–19), ~~error signaling convention~~ (settled by D49: carry flag for
+IPC, negative-x0 for typed), ~~cap-present indicator~~ (settled by D49: sentinel
+u64::MAX), ~~large return value convention~~ (settled by D49: userspace buffer
+pointer). Pending additions from Space rights mask, Field rights mask, and
+Pulsar rights mask (typed operations only; IPC set is complete). time_merge not
+included (no functional need — D30 additive aggregate makes holding multiple
+Time caps equivalent; not foreclosed).
 
 - **Rests on:** D7 (split interaction model — two families, each right = typed
   kernel operation), D47 (ABI framework — two-level numbering, register
@@ -2916,6 +2919,112 @@ makes holding multiple Time caps equivalent; not foreclosed).
   proves necessary (add as flag on Receive or separate SVC number — no
   structural change needed).
 - **Journal:** `journal/048-syscall-enumeration.md`.
+
+### D49 — Syscall ABI encoding: error signaling, cap-present, SVC assignments, typed op codes, large return values
+
+Five encoding details completing the syscall ABI (D47 framework + D48
+enumeration).
+
+**Error signaling — split convention:**
+
+IPC operations use the ARM64 carry flag in SPSR_EL1. The kernel modifies
+SPSR_EL1 before eret: carry clear = success (registers carry normal message
+payload), carry set = error (x0 = error code, x1–x7 undefined). This is the only
+approach that preserves all 8 registers for D28's message data — error-in-x0 is
+impossible because data words are arbitrary 64-bit values. NZCV flags are
+caller-saved per AAPCS64; clobbering on syscall return is legitimate. XNU
+production precedent. Cost: ~1 BIC/ORR instruction on SPSR, piggybackable on
+existing restore.
+
+Typed kernel operations use negative-x0 (x0 < 0 = error code, x0 ≥ 0 =
+success/return value). Typed operation return values are bounded non-negative
+integers (cap-table slot indices, timestamps, zero-for-void). Negative values
+are unambiguous. This is the Zircon convention.
+
+The split (condition flag for IPC, x0 for typed) is consistent with D7 — the two
+families already have different register semantics. Forcing uniform
+condition-flag checking on typed operations would be gratuitous when x0 already
+carries the return value.
+
+**Cap-present indicator — sentinel u64::MAX:**
+
+u64::MAX in x6 = no user cap present. u64::MAX in x7 = no reply cap present.
+Cap-table slot indices are small non-negative integers; u64::MAX cannot be a
+valid slot (D8 tables are bounded by typed-memory backing). Uniform for send and
+receive sides. Self-contained in one register — no flags consumed.
+
+**SVC number assignments:**
+
+| SVC # | Operation |
+| ----- | --------- |
+| #1    | Send      |
+| #2    | Receive   |
+| #3    | Call      |
+| #4    | ReplyRecv |
+| #5    | Yield     |
+
+Primitives before compounds, IPC before scheduling. Convention, not structural.
+
+**Typed operation codes (x4) — grouped sequential:**
+
+| Range | Type              | Operations                                                                                    |
+| ----- | ----------------- | --------------------------------------------------------------------------------------------- |
+| 0–6   | Observer          | resume, install_cap, write_registers, read_registers, suspend, change_handler, set_scheduling |
+| 7–10  | Generic cap       | destroy, clone, close, mint                                                                   |
+| 11–12 | Space             | split, merge                                                                                  |
+| 13–14 | Field             | create, split                                                                                 |
+| 15    | Time              | split                                                                                         |
+| 16–17 | Pulsar            | create, clock_read                                                                            |
+| 18    | Observer creation | create_observer                                                                               |
+| 19    | Resource          | resource_request                                                                              |
+
+Dense table dispatch. Type grouping is self-documenting; the kernel already
+knows the target type from the cap in x5. Future rights mask additions append to
+their respective type groups.
+
+**Large return value convention — userspace buffer pointer:**
+
+For operations exceeding the register budget (observer_read_registers,
+observer_write_registers), the caller provides x0 = buffer pointer, x1 = buffer
+length. The kernel validates the VA (D24 cap-mapping invariant) and reads/writes
+using LDTR/STTR instructions (respecting ARMv8.1 PAN). No per-Observer
+allocation. No well-known addresses (D26 preserved). Symmetric for read and
+write operations.
+
+**ReplyRecv register assignment:**
+
+Entry: x0–x3 = reply data, x4 = reply label, x5 = receive field handle, x6 =
+user cap for reply (u64::MAX if none), x7 = send-once reply cap handle (from
+previous Receive's x7). Two targets (reply cap in x7, receive field in x5) use
+two separate registers.
+
+Does NOT settle: IPC fast-path conditions (when direct switch occurs — separate
+from encoding), specific error code values (error domain), buffer alignment and
+size constraints for large returns, ReplyRecv send-side flags (whether x7 can
+carry flags in addition to the reply cap handle, or whether flags are
+unnecessary for reply sends).
+
+- **Rests on:** D47 (ABI framework — register convention and two-level numbering
+  are the foundation all encoding details build on), D48 (25-operation
+  enumeration — the set being encoded), D28 (fixed-size message — all 8
+  registers used on receive, forcing the carry-flag error convention), D7 (split
+  interaction model — justifies different error conventions per family), A2
+  (ARM64 — SPSR_EL1/eret mechanism enables condition-flag signaling; PAN
+  constrains user-memory access), D8 (flat cap table with bounded size —
+  u64::MAX sentinel validity), D26 (capability-addressed memory — no well-known
+  addresses, Observer knows VA bases; motivates buffer-pointer over
+  kernel-allocated region), D24 (cap-mapping invariant — kernel can validate
+  buffer VA), D13 (fast-path direct switch — carry-flag cost is ~1 cycle on
+  ~400-cycle path), `design/research/syscall-abi.md` §5 (error convention survey
+  — XNU carry-flag precedent, Zircon status-type precedent), §7 (large return
+  value approaches).
+- **Status:** settled — revisit if D47 is revised (register convention change
+  alters the register budget), if D48 is revised (operation set change may
+  require re-numbering), if D28 is revised (message size change may free a
+  register for error status, removing the carry-flag motivation), or if PAN
+  constraints on user-memory access prove problematic for the buffer-pointer
+  convention.
+- **Journal:** `journal/049-syscall-encoding.md`.
 
 ---
 
@@ -3147,10 +3256,10 @@ makes holding multiple Time caps equivalent; not foreclosed).
   pattern). Typed operations collected from D14, D35, D39, D41, D44, D45, D11,
   D17, D23, D31, D32. Generic cap operations (destroy, clone, close, mint) apply
   across types. Pending additions from Space/Field/Pulsar rights masks (typed
-  operations only; IPC set is complete). Remaining from D47: specific SVC number
-  assignments for IPC operations, typed operation code assignments within x4,
-  error signaling convention, cap-present indicator, large return value
-  convention.
+  operations only; IPC set is complete). D47 encoding details settled by D49:
+  SVC assignments (#1–#5), typed op codes (grouped sequential 0–19), error
+  signaling (carry flag for IPC, negative-x0 for typed), cap-present (sentinel
+  u64::MAX), large return values (userspace buffer pointer).
 - ~~**Address space lifecycle.**~~ Dissolved by D26: no address space kernel
   object. The page table is kernel-internal; per-Observer L0 tables are
   destroyed with the Observer; per-Space subtrees are reference-counted and
@@ -3527,6 +3636,12 @@ makes holding multiple Time caps equivalent; not foreclosed).
   mint derived as explicit typed operations. inspect() reconciled as
   observer_read_registers(). Completeness verified against research §8
   irreducible set.
+- `049-syscall-encoding.md` — reasoning for D49: syscall ABI encoding details.
+  Error signaling: carry flag for IPC (preserves all 8 message registers; XNU
+  precedent), negative-x0 for typed ops (Zircon precedent). Cap-present:
+  sentinel u64::MAX. SVC assignments: #1–#5. Typed op codes: grouped sequential
+  0–19. Large return values: userspace buffer pointer. Corrects D47's premature
+  foreclosure of condition-flag error signaling.
 
 ---
 
