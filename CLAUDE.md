@@ -29,12 +29,6 @@ manager:
 - **Don't inject old concepts.** When the design restarts or deliberately drops
   a concept, don't re-introduce it from memory. Concepts must be re-derived from
   first principles to re-enter.
-- **Archive isolation.** `design/archive/` must be physically moved out of the
-  working tree during derivation sessions (`/explore` Phases 2–5). Instructions
-  alone are insufficient — an audit of D1–D17 found 6 of 17 entries with
-  archive-shaped reasoning paths despite explicit "don't import" instructions.
-  The `/explore` protocol handles this automatically. If running derivation
-  outside `/explore`, move the archive manually before starting.
 
 ## Working Protocol (MANDATORY)
 
@@ -106,7 +100,6 @@ design/
   journal/      — exploration notes and rejected alternatives (created as derivation proceeds)
   research/     — prior art studies (descriptive, reusable): smp, syscall-landscape
   landscape.md  — survey of 18+ real kernel designs by decision point
-  archive/      — frozen artifacts from previous derivation chains (not current SSOT)
 .claude/
   working-with-claude.md — meta-process synthesis for Claude collaboration on this project
   hooks/, commands/, settings.json — Claude Code integration
@@ -208,7 +201,3 @@ Every `.rs` file follows this order:
 - `design/landscape.md` — **Reference.** Survey of how 18+ real kernels resolved
   each major design decision. Consult when facing a design fork to see known
   approaches and tradeoffs.
-- `design/archive/` — **Frozen.** Artifacts from previous derivation chains
-  (restart-1: spec, graph, journal, claims from the 2026-04-13 chain). Not
-  current SSOT. Consult only to check convergence or avoid re-discovering known
-  dead-ends — never auto-load into session context.

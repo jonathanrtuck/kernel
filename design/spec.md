@@ -4,10 +4,10 @@ The current state of the kernel's design. Settled decisions with brief
 rationale. See `design/graph.d2` for the structural map and `design/journal/`
 for full exploration history.
 
-This document is intentionally sparse. It was reset on 2026-04-15 to re-derive
-contingent decisions from first principles. The previous derivation chain is
-preserved under `design/archive/restart-1/` for convergence-checking — consult
-it only after a fresh derivation has arrived at an answer.
+This document was reset on 2026-04-15 to re-derive contingent decisions from
+first principles. The current derivation chain (D1–D45) has fully superseded the
+previous chain, which was deleted after systematic convergence checking
+confirmed coverage across all topics.
 
 ---
 

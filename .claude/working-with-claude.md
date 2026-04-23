@@ -9,13 +9,11 @@ Moved to `.claude/` on 2026-04-15 — this is not a kernel design research
 document; it's a reference for improving the collaboration itself, and sits
 alongside the hooks, commands, and settings that embody these strategies.
 
-> **Note on sparse artifacts.** Some passages below describe the intended
-> protocol in terms of artifacts like `design/spec.md`, `design/journal/`, and
-> `design/graph.d2`. Those artifacts still exist and still play the roles
-> described, but they are currently sparse following the 2026-04-15 design
-> restart — spec.md holds only the axioms, graph.d2 holds only the outer
-> topology, and the journal is empty pending fresh derivation. The prior chain's
-> content is preserved under `design/archive/restart-1/`.
+> **Note on artifacts.** Some passages below describe the intended protocol in
+> terms of artifacts like `design/spec.md`, `design/journal/`, and
+> `design/graph.d2`. These artifacts exist and play the roles described. The
+> design was reset on 2026-04-15 and re-derived from first principles; the
+> current derivation chain (D1–D45) is the sole authoritative source.
 
 ---
 
