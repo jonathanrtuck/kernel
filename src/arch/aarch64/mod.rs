@@ -20,11 +20,22 @@ mod sysreg;
 pub mod timer;
 
 /// Mask all maskable interrupts.
-///
-/// Prevents async hardware events (timer ticks, device IRQs) from
-/// interrupting the current execution.
 pub fn disable_interrupts() {
     sysreg::disable_irqs();
+}
+
+/// Mask all maskable interrupts and return the previous state.
+pub fn disable_interrupts_save() -> u64 {
+    let daif = sysreg::daif();
+
+    sysreg::disable_irqs();
+
+    daif
+}
+
+/// Restore interrupts to a previously saved state.
+pub fn restore_interrupts(daif: u64) {
+    sysreg::set_daif(daif);
 }
 
 /// Print a register dump to the console for crash diagnostics.

@@ -37,12 +37,16 @@ pub fn break_lock() {
 /// freed even if the caller panics (e.g., during a panic message).
 struct SerialGuard {
     held: bool,
+    daif: u64,
 }
 
 impl SerialGuard {
     fn acquire() -> Self {
+        // Always disable interrupts first to prevent deadlock
+        let daif = super::disable_interrupts_save();
+
         if !LOCK_ENABLED.load(Ordering::Relaxed) {
-            return Self { held: false };
+            return Self { held: false, daif };
         }
 
         loop {
@@ -54,7 +58,7 @@ impl SerialGuard {
                 .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
                 .is_ok()
             {
-                return Self { held: true };
+                return Self { held: true, daif };
             }
         }
     }
@@ -65,6 +69,9 @@ impl Drop for SerialGuard {
         if self.held {
             SERIAL_LOCK.store(false, Ordering::Release);
         }
+
+        // Restore interrupts to their previous state
+        super::restore_interrupts(self.daif);
     }
 }
 
