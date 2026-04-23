@@ -1,12 +1,12 @@
 # Kernel structural map.
 #
-# Populated from design/spec.md derivations D1-D6, D8-D44, observations O2-O3,
+# Populated from design/spec.md derivations D1-D6, D8-D45, observations O2-O3,
 # and Vocabulary (Space, Time, Observer, Pulsar). Every box and edge has a
 # corresponding spec.md entry; items labeled "TBD" await downstream derivation.
 #
 # Intentionally absent (pending derivation): specific syscall surface,
-# field details (multi-wait — D13/D15 downstream; overflow
-# settled by D18; message format settled by D28), revocation add-ons
+# field details (multi-wait — D13/D15 downstream; overflow settled by D18;
+# message format settled by D28; split settled by D45), revocation add-ons
 # (generation, CDT — base settled in D11; badges settled in D17),
 # per-physical-core concerns (power, thermal, shared cache/TLB).
 # See spec.md#Open questions.
@@ -178,7 +178,10 @@ kernel: {
     # (D12, D17, D22, D44).
     # D22: interrupts are field traffic — no separate IRQ type.
     # Kernel routes hardware IRQs to fields, delivers with badge + send-once ack
-    # cap (D16). Split/combine for IRQ range delegation.
+    # cap (D16). D45: split installs badge-range routing rules on a source
+    # Field, directing matching messages to a destination Field. Senders
+    # oblivious. Fallback-on-destroy provides crash recovery. Combine dissolves
+    # into split-to-existing + destroy.
     # Each Observer has a pre-allocated reply field; Call() creates a send-once
     # cap for RPC reply (D16).
     # D18: overflow = error-to-sender. Deferred fault delivery via per-field

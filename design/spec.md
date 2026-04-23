@@ -1040,11 +1040,11 @@ is kernel-internal (D2 scheduling mechanism). IPIs are kernel-internal (O2
 cross-core coordination). Landscape §5.1 confirms: "No microkernel delegates the
 preemption timer."
 
-Two field operations emerge: split (create new field, move IRQ routes to it) and
-combine (merge N fields into one receiving all sources). Both are cold-path.
-Both are potentially general field operations — split for structured load
-distribution, combine as an alternative to multi-wait (D19). Details downstream
-of the field model.
+Two field operations emerge: split and combine. Both are cold-path. D45 settles
+split as badge-range routing with fallback-on-destroy, generalizing beyond IRQ
+to all badge-range traffic. Combine dissolves into split-to-existing + destroy
+(D45). Split-to-existing enables drivers to receive interrupts and IPC on one
+Field without multi-wait.
 
 An IRQ object type (parallel to Space) and a factory model (IRQControl, seL4
 precedent) were both considered and rejected. Every concern identified with the
@@ -1052,13 +1052,13 @@ field-only model — send-once performance, crash recovery, split/combine
 complexity — traces to a parent decision (D16, general lifecycle, D13/D15) and
 is not introduced by D22.
 
-Does NOT settle: field split semantics (automatic return on destroy for crash
-recovery? generalization to badge-range partitioning?), field combine semantics
-(transparent forwarding vs. dead handles for existing send caps), boot
-distribution of IRQ authority, interrupt priority exposure (GICv3 8-bit priority
-— deferred), IRQ routing policy (which core receives a given SPI — deferred),
-userspace timer mechanism, GICv4 forward-compatibility (direct virtual
-injection).
+Does NOT settle: ~~field split semantics~~ (settled by D45: badge-range routing
+with fallback-on-destroy; generalizes beyond IRQ to all badge-range traffic),
+~~field combine semantics~~ (dissolved by D45: combine decomposes into
+split-to-existing + destroy), boot distribution of IRQ authority, interrupt
+priority exposure (GICv3 8-bit priority — deferred), IRQ routing policy (which
+core receives a given SPI — deferred), ~~userspace timer mechanism~~ (settled by
+D44), GICv4 forward-compatibility (direct virtual injection).
 
 - **Rests on:** A4 (no background interrupt processing; independent path), A3
   (no single interrupt policy; independent path), A5 (net: dispatch interface
@@ -1084,12 +1084,11 @@ injection).
   deferred processing), §5.7 (GICv3/v4 specifics),
   `design/research/syscall-landscape.md` (seL4 IRQControl/IRQHandler, Zircon
   interrupt objects, L4Re IRQ objects, EROS IrqCtl/IrqWait).
-- **Status:** settled — revisit if D13 is revised (different IPC model changes
-  the delivery mechanism), if D16 is revised (changes the send-once mechanism
-  that provides ack), or if a downstream derivation reveals that the field-only
-  model creates essential complexity that a separate IRQ type would not (e.g.,
-  split/combine prove unimplementable without per-field IRQ state that breaks
-  D15 uniformity).
+- **Status:** settled — D45 settles split/combine semantics (the D22 revisit
+  trigger "split/combine prove unimplementable" does not fire — D45's
+  badge-range routing preserves D15 uniformity). Revisit if D13 is revised
+  (different IPC model changes the delivery mechanism), if D16 is revised
+  (changes the send-once mechanism that provides ack).
 - **Journal:** `journal/022-interrupt-model.md`.
 
 ### D23 — Observer capabilities are clonable
@@ -2570,6 +2569,106 @@ as independently interesting, deferred).
   cannot serve a structurally required timer pattern.
 - **Journal:** `journal/044-userspace-timer-interface.md`.
 
+### D45 — Field split: badge-range routing with fallback-on-destroy
+
+Field split is a typed kernel operation (D7) that installs a badge-range routing
+rule on a source Field, directing matching messages to a destination Field. The
+destination is either a newly created Field (backed by caller's Space, D32) or
+an existing Field. Split is a receive-side operation — senders are oblivious.
+Their caps still designate the source Field; the kernel routes internally by
+badge before enqueuing.
+
+The destination is a separate Field object with standard lifecycle (D11). When
+the destination is destroyed, the routing rule on the source is removed and
+traffic falls back to the source's queue — automatic crash recovery without
+parent→child tracking.
+
+Routing is composable across Field boundaries: a message routed to a destination
+passes through that Field's own routing rules before reaching its queue. The
+kernel may flatten routing chains into a direct badge→leaf-Field lookup as a
+kernel-internal optimization (parallels D24: page tables as materialized views
+of cap state).
+
+Per-send cost: O(log N) binary search over non-overlapping badge ranges on split
+Fields, where N is the number of splits on that specific Field. Unsplit Fields
+pay zero (null routing table → existing fast path unchanged). The D13
+direct-switch optimization must follow routing before attempting the match:
+determine the destination Field, then check that Field's waiters list.
+
+**Combine does not exist as a separate primitive.** Both use cases decompose:
+reversing a split = destroy the destination Field (routing rule removed, traffic
+falls back); merging unrelated Fields = split-to-existing (route all traffic
+from Field A to Field B) + destroy the now-empty A.
+
+**Entrance management** (send-side) uses existing capability operations (D17
+mint, D23 clone, D11 close). No new mechanism — split is exclusively about
+receive-side routing.
+
+Split-to-existing enables a key use case: a driver wanting interrupts and IPC on
+one Field. The supervisor splits IRQs from the root interrupt Field to the
+driver's existing IPC Field. The driver receives both client requests and
+interrupts on one Field, distinguished by badge. No multi-wait needed.
+
+Authority: receive cap with split right on the source Field; send cap on the
+destination (split-to-existing, same pattern as D44 Pulsar delivery Field); or
+Space cap consumed for the new Field's backing (split-to-new, D32).
+
+Rejected alternatives: transparent forwarding (D1 hot-path violation), port sets
+/ non-destructive aggregation (D13 one mechanism, D19 already rejected),
+internal sub-queues (no independent lifecycle, D4/D8 sub-object tension), IRQ-
+only restriction (badge-range routing works identically for IRQs and IPC — no
+architectural reason to restrict).
+
+Does NOT settle: badge condition form (range, bitmask, predicate), whether
+split-to-new and split-to-existing are one syscall or two, Field rights mask
+(split right details, complete Field rights set), queued message handling at
+split time, D17 badge-closure tracking partitioning on split, routing table
+structure (kernel-internal), flattened routing table update protocol.
+
+- **Rests on:** D22 (interrupt delegation through fields — introduces split as
+  the delegation mechanism; IRQ routing is the canonical use case), D15
+  (unidirectional, many-to-many fields — topology via capability distribution;
+  senders are oblivious to receive-side changes; the "allow shape, don't enforce
+  it" principle applied to reconfiguration), D13 (all information delivery
+  through queued fields — routing routes through the existing mechanism; one
+  mechanism preserved; direct-switch fast path must follow routing), D17 (badges
+  — routing condition matches on minter-assigned badges; badge fan-in is the
+  send-side composition mechanism, D19), D4 (designation = authority — senders'
+  caps designate the source Field; the kernel routes internally without
+  invalidating caps), D8 (flat cap table with rights mask — split right in the
+  Field's rights set), D32 (type conversion — split-to-new consumes Space;
+  conservation holds), D11 (base revocation — destination Field destroy triggers
+  routing rule cleanup; fallback-on-destroy follows from D11's dead-handle
+  protocol applied to the kernel's internal reference), D34 (destroy cascade —
+  Field destroy doesn't cascade; routing rule cleanup is O(1) per source that
+  routes to the destroyed Field), D1 (hot-path — per-send routing cost is O(log
+  N) on split Fields, zero on unsplit; transparent forwarding foreclosed), D7
+  (typed kernel syscall — split is a kernel operation on Field objects), D44
+  (Pulsar precedent — split-to-existing uses the same pattern as Pulsar delivery
+  Field: caller provides a Field cap as a message destination), D41 (Space
+  merge/split — structural analogue for topology-changing operations; D41
+  informed the framing but Field split diverges: Space merge/split changes
+  boundaries of a single resource; Field split installs routing rules between
+  independent objects), D19 (multi-field wait — combine-as-multi-wait dissolves;
+  split-to-existing serves the IRQ+IPC-on-one-Field use case; badge fan-in
+  covers cooperative cases), `design/landscape.md` §3.3 (IPC object model survey
+  — no surveyed kernel provides split/combine on IPC endpoints; Mach port sets
+  are non-destructive aggregation, seL4 uses badge fan-in, Zircon uses port
+  aggregation), `design/research/field-overflow-and-multi-wait.md` (multi-source
+  wait patterns confirm aggregation landscape).
+- **Archive convergence:** None. The archive does not contain a concept of field
+  split or combine. The archive routes interrupts through a supervision tree
+  (claims.toml: "events routed by the supervision tree"). The current design
+  routes through field topology. No convergence or divergence — the archive
+  didn't reach this question.
+- **Status:** settled — revisit if D15 is revised (changes the Field shape or
+  many-to-many model), if D13 is revised (changes the IPC mechanism that split
+  routes through), if D1 is revised (changes the hot-path constraint that shapes
+  routing cost analysis), if D22 is revised (changes the interrupt model that
+  motivated split), or if a downstream derivation reveals that per-send routing
+  cost is unacceptable for a structurally required workload pattern.
+- **Journal:** `journal/045-field-split.md`.
+
 ---
 
 ## Open questions
@@ -2696,15 +2795,18 @@ as independently interesting, deferred).
   object type — the interrupt namespace maps onto the field namespace. The
   kernel routes hardware interrupts to fields; authority = receive cap. Ack via
   D16 send-once cap in each interrupt message. Split/combine field operations
-  for IRQ range delegation. Preemption timer and IPIs excluded
-  (kernel-internal).
-- **Field split semantics.** D22 introduces split-by-IRQ-range: create a new
-  field, move IRQ routes to it. Open: does the parent field retain a reference
-  for automatic return on destroy (crash recovery)? Does split generalize to
-  badge-range partitioning for IPC sources?
-- **Field combine semantics.** D22 introduces combine: merge N fields into one.
-  Open: what happens to existing send caps on the originals? Transparent
-  forwarding, dead handles (D11), or explicit migration?
+  for IRQ range delegation (split settled by D45; combine dissolved by D45).
+  Preemption timer and IPIs excluded (kernel-internal).
+- ~~**Field split semantics.**~~ Settled by D45: badge-range routing with
+  fallback-on-destroy. Split installs routing rules on the source Field;
+  destination is a separate Field object. Generalizes beyond IRQ to all
+  badge-range traffic. Fallback-on-destroy provides automatic crash recovery
+  without parent tracking. Remaining: badge condition form, split-to-new vs.
+  split-to-existing syscall shape, Field rights mask, queued message handling at
+  split time, badge-closure tracking partitioning.
+- ~~**Field combine semantics.**~~ Dissolved by D45: combine decomposes into
+  split-to-existing (route traffic from Field A to Field B) + destroy (the
+  now-empty A). No separate combine primitive.
 - **Interrupt priority and routing.** D22 defers both. GICv3 8-bit priority:
   kernel-managed vs. exposed. SPI routing: kernel-managed vs. exposed. Both are
   kernel-internal GIC configuration, not tied to any object model.
