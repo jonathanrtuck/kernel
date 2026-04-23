@@ -1622,8 +1622,9 @@ pattern for interrupts.)
 
 Does NOT settle: resource request fault message format (D28 downstream), Space
 "create" right encoding, pager unavailability protocol (chains committed but
-unavailability handling still open), secondary core bring-up mechanism, Observer
-creation API config parameters, Time parameters, Time clonability.
+unavailability handling still open), ~~secondary core bring-up mechanism~~
+(settled by D46: core lifecycle is kernel-internal; all cores activate at boot),
+Observer creation API config parameters, Time parameters, Time clonability.
 
 - **Rests on:** D4 (designation = authority — the pager chain provides
   capability-mediated resource acquisition; factory caps add indirection D4
@@ -2669,6 +2670,73 @@ structure (kernel-internal), flattened routing table update protocol.
   cost is unacceptable for a structurally required workload pattern.
 - **Journal:** `journal/045-field-split.md`.
 
+### D46 — Core lifecycle is kernel-internal
+
+Core activation, idle management, and deactivation are fully kernel-internal.
+Observers do not know what cores exist, how many are active, or when one
+activates or deactivates. This extends D31/D36's "core assignment is
+kernel-internal" to "core existence is kernel-internal." The Space parallel:
+cores are to Time what physical pages are to Space — implementation details of
+the kernel's resource management, invisible to Observers.
+
+**Activation:** The kernel activates all discovered cores during boot, before
+creating the root Observer. Each core initializes its per-core kernel structures
+(D1), configures its MMU (D5), enables its GIC redistributor (D22), and enters
+the scheduling loop. PSCI `CPU_ON` is the hardware mechanism (A2). No userspace
+syscall triggers activation.
+
+**Idle:** Cores with no runnable Observers enter an idle state. The specific
+power state (WFI, PSCI CPU_SUSPEND, or platform-specific sleep) is an
+architecture-specific implementation detail behind `src/arch/`. The kernel wakes
+idle cores via IPI (O2) when work arrives.
+
+**Deactivation:** The kernel may fully deactivate an idle core (PSCI CPU_OFF)
+when the D36 conservation invariant permits. Because Time is fungible (D36
+normalized compute units), deactivation requires no per-core-origin tracking or
+Time cap revocation — only a bookkeeping check:
+`unallocated_time_pool ≥ core_capacity`. If true, the kernel shrinks the pool by
+that amount and powers off the core. Re-activation follows the boot-time
+initialization path.
+
+No "activate core" syscall. No Core kernel object type. No capability for cores.
+Core management is an implementation concern, parallel to physical page
+management (D9) and VA assignment (D26).
+
+Does NOT settle: specific idle power state policy per platform, interrupt
+routing policy across cores (which core receives a given SPI), per-core
+scheduler algorithm selection policy, boot ordering for secondary cores
+(parallel vs. sequential PSCI CPU_ON), deactivation decision thresholds.
+
+- **Rests on:** D31 (core assignment kernel-internal — extends to core
+  existence; boot architecture — secondary core bring-up is the remaining
+  question this settles), D36 (normalized compute units — Time fungibility makes
+  deactivation a bookkeeping check, not a revocation problem; core capacity
+  factors enable conservation invariant on heterogeneous hardware), D1 (per-core
+  kernel structures — activation initializes these; idle/wake preserves them),
+  D2 (per-core schedulers — algorithm assignment is kernel-internal; newly
+  activated cores get scheduler instances chosen by the kernel based on D42
+  profiles of runnable Observers), A4 (purely reactive — no kernel thread to
+  autonomously manage cores; activation at boot sidesteps the trigger problem;
+  idle cores wake via IPI on the exception-handling path), A2 (ARM64 — PSCI
+  CPU_ON/CPU_OFF/ CPU_SUSPEND; GIC redistributor per core), A3 (generic —
+  boot-time activation with idle power management avoids workload assumptions;
+  lazy activation rejected for ~1ms latency and runtime complexity), D5 (MMU —
+  per-core TTBR/MAIR/TCR/ SCTLR initialization), D22 (GIC redistributor per core
+  — interrupt dispatch is kernel-internal; new core configures its own
+  redistributor), D43 (transient core assignment — Observers migrate naturally
+  on deactivation; no struct field for core identity), O2 (IPI — idle core wake
+  mechanism), `design/landscape.md` §7.3 (PSCI, spin tables, ACPI parking —
+  firmware mechanisms for ARM64 multicore bringup), §5.7 (GICv3 redistributor
+  per core).
+- **Status:** settled — revisit if D31 is revised (changes the core-independence
+  model), if D36 is revised (changes Time fungibility or conservation model —
+  deactivation check depends on fungible compute units), if A4 is revised
+  (background kernel activity would enable runtime-triggered activation), or if
+  a downstream derivation reveals that boot-time activation creates essential
+  complexity (e.g., embedded workloads where core power draw during boot is
+  unacceptable even briefly).
+- **Journal:** `journal/046-core-activation.md`.
+
 ---
 
 ## Open questions
@@ -2908,11 +2976,11 @@ structure (kernel-internal), flattened routing table update protocol.
   object. The page table is kernel-internal; per-Observer L0 tables are
   destroyed with the Observer; per-Space subtrees are reference-counted and
   freed when the last holder's cap is closed.
-- **Boot / bring-up model.** D31 settles the initial capability graph (kernel
-  creates root Observer with minimal resources, acts as root pager). Remaining:
-  BSP-then-APs vs symmetric bring-up for secondary cores. Secondary core
-  activation likely a typed kernel syscall; the activated core's Time pool
-  becomes available for allocation through the pager chain (D31).
+- ~~**Boot / bring-up model.**~~ Settled by D46: core lifecycle is fully
+  kernel-internal. All discovered cores activate at boot (PSCI CPU_ON). Idle
+  cores sleep (WFI/CPU_SUSPEND). Deactivation via CPU_OFF when conservation
+  permits (unallocated pool ≥ core capacity). No userspace syscall, no Core
+  object type. Cores are to Time what physical pages are to Space.
 - ~~**Explicit unmap() semantics.**~~ Dissolved by D26: no explicit map() or
   unmap(). The page table is managed by the kernel based on Space cap holdings.
   Holding a cap grants access; losing a cap removes access.
@@ -3254,6 +3322,18 @@ structure (kernel-internal), flattened routing table update protocol.
   re-arm, drift compensation, overflow via stop-re-arm-on-full. Per-Observer
   clock access via CNTKCTL_EL1. No archive convergence (archive had no userspace
   timer concept).
+- `045-field-split.md` — reasoning for D45: Field split as badge-range routing
+  with fallback-on-destroy. Split installs routing rules, not object
+  restructuring. Combine dissolves into split-to-existing + destroy. Novel
+  position (no surveyed kernel provides split/combine on IPC endpoints). No
+  archive convergence.
+- `046-core-activation.md` — reasoning for D46: core lifecycle is fully
+  kernel-internal. All discovered cores activate at boot (PSCI CPU_ON). Idle
+  cores sleep (WFI/CPU_SUSPEND); deactivation (CPU_OFF) when conservation
+  permits. No userspace syscall, no Core object type. D36 fungibility makes
+  deactivation a bookkeeping check (unallocated pool ≥ core capacity), not a
+  revocation problem. Space parallel: cores are to Time what physical pages are
+  to Space.
 
 ---
 

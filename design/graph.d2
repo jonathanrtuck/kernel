@@ -1,6 +1,6 @@
 # Kernel structural map.
 #
-# Populated from design/spec.md derivations D1-D6, D8-D45, observations O2-O3,
+# Populated from design/spec.md derivations D1-D6, D8-D46, observations O2-O3,
 # and Vocabulary (Space, Time, Observer, Pulsar). Every box and edge has a
 # corresponding spec.md entry; items labeled "TBD" await downstream derivation.
 #
@@ -8,7 +8,8 @@
 # field details (multi-wait — D13/D15 downstream; overflow settled by D18;
 # message format settled by D28; split settled by D45), revocation add-ons
 # (generation, CDT — base settled in D11; badges settled in D17),
-# per-physical-core concerns (power, thermal, shared cache/TLB).
+# per-physical-core concerns (thermal, shared cache/TLB — power/idle settled
+# by D46 as kernel-internal behind src/arch/).
 # See spec.md#Open questions.
 #
 # Render with: d2 --layout elk graph.d2
@@ -229,8 +230,12 @@ hardware: {
   }
   core: {
     style.multiple: true
-    # Logical core. Per-physical-core concerns (power, thermal, shared L1/TLB on
-    # SMT) belong to components not yet derived.
+    # Logical core. D46: core lifecycle (activation, idle, deactivation) is
+    # kernel-internal. All cores activate at boot via PSCI CPU_ON. Idle cores
+    # sleep (WFI/CPU_SUSPEND); kernel wakes via IPI. Deactivation (CPU_OFF)
+    # when conservation permits. Power state selection is arch-specific.
+    # Remaining per-physical-core concerns (thermal, shared L1/TLB on SMT)
+    # belong to components not yet derived.
   }
 }
 

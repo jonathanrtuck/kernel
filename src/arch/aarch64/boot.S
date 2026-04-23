@@ -1,7 +1,8 @@
 // boot.S — Minimal boot trampoline for QEMU virt (aarch64).
 //
 // Responsibilities (and nothing more):
-//   1. Park secondary cores
+//   1. Park secondary cores (temporary — D46 settles boot-time activation
+//      of all cores via PSCI CPU_ON; secondary entry stub not yet implemented)
 //   2. Set up a stack
 //   3. Zero BSS
 //   4. Drop from EL2 to EL1 (QEMU enters at EL2 by default)

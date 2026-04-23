@@ -48,7 +48,7 @@ comments link to `design/spec.md`.
 | `field.rs`      | IPC mechanism + message format   | D13, D15, D16, D28, D37, D45          |
 | `observer.rs`   | Execution unit                   | D6, D14, D20, D21, D39, D40, D42, D43 |
 | `pulsar.rs`     | Timer mechanism                  | D44                                   |
-| `arch/`         | Hardware abstraction (core half) | A2, D1, D5                            |
+| `arch/`         | Hardware abstraction (core half) | A2, D1, D5, D46                       |
 
 Management modules (core manager, scheduler, space manager) will emerge during
 implementation — their shapes depend on implementation strategy more than
