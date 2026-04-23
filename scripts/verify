@@ -1,0 +1,68 @@
+#!/bin/bash
+# Pre-commit verification gate.
+#
+# Checks:
+#   cargo clippy  -- warnings as errors (correctness, idiomatic Rust, clarity)
+#   cargo build   -- bare-metal build succeeds
+#   cargo test    -- all host tests pass
+#   unsafe count  -- inventory (informational, not gated)
+#   boundary      -- arch/ and firmware/ don't leak into core modules
+#
+# Not automated (design judgment, enforced by CLAUDE.md guidelines):
+#   performance, FP style, Verus readiness
+#
+# Install as git pre-commit hook:
+#   ln -sf ../../scripts/verify .git/hooks/pre-commit
+
+set -eo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+pass() { printf "${GREEN}pass${RESET}  %s\n" "$1"; }
+fail() { printf "${RED}FAIL${RESET}  %s\n" "$1"; exit 1; }
+info() { printf "${DIM}info${RESET}  %s\n" "$1"; }
+
+# b, c, g: Clippy with warnings-as-errors.
+# -A dead_code: spec-placeholder structs (observer.rs, time.rs) have fields
+# that aren't used in code yet. Tracked, not a real issue.
+cargo clippy -- -D warnings -A dead_code 2>&1 | tail -1
+pass "clippy clean"
+
+# b: Bare-metal build must succeed.
+cargo build 2>/dev/null
+pass "bare-metal build"
+
+# e: All host tests must pass.
+TEST_OUTPUT=$(cargo test --target aarch64-apple-darwin 2>&1)
+TEST_LINE=$(echo "$TEST_OUTPUT" | grep "^test result:" | head -1)
+pass "tests: $TEST_LINE"
+
+# f: Unsafe block inventory. Not a gate, just visibility.
+UNSAFE_COUNT=$(grep -r 'unsafe {' src/ --include='*.rs' | wc -l | tr -d ' ')
+info "unsafe blocks: $UNSAFE_COUNT"
+
+# Architecture boundary: core modules must not import from arch/ or firmware/.
+# Allowed to reference arch: main.rs (entry point), lib.rs (mod decl), print.rs (console).
+# Allowed to reference firmware: arch/ only (platform.rs uses firmware::dtb).
+ARCH_LEAKS=$(grep -rn 'crate::arch' src/ --include='*.rs' \
+    | grep -v 'src/arch/' \
+    | grep -v 'src/main\.rs' \
+    | grep -v 'src/lib\.rs' \
+    | grep -v 'src/print\.rs' \
+    || true)
+
+FIRMWARE_LEAKS=$(grep -rn 'crate::firmware' src/ --include='*.rs' \
+    | grep -v 'src/firmware/' \
+    | grep -v 'src/arch/' \
+    || true)
+
+if [ -n "$ARCH_LEAKS" ] || [ -n "$FIRMWARE_LEAKS" ]; then
+    echo ""
+    [ -n "$ARCH_LEAKS" ] && echo "$ARCH_LEAKS"
+    [ -n "$FIRMWARE_LEAKS" ] && echo "$FIRMWARE_LEAKS"
+    fail "boundary violation: arch/ or firmware/ leaked into core modules"
+fi
+pass "module boundaries (arch/ and firmware/ contained)"

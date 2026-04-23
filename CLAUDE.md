@@ -77,7 +77,21 @@ are requirements.
 - Reference landscape: seL4, L4 family, EROS/Coyotos, Genode, QNX, Plan 9,
   Barrelfish, Redox, Minix 3 — not just Zircon.
 
-### 5. Update reference docs at milestone boundaries
+### 5. Run `scripts/verify` before every commit
+
+The pre-commit hook runs this automatically, but run it explicitly after
+finishing a change to catch issues early:
+
+```sh
+scripts/verify
+```
+
+This gates on: clippy clean, bare-metal build, all tests pass, module boundary
+containment, and reports the unsafe block count. Not automated: performance
+(no benchmarks yet), FP style, and Verus readiness — these are design judgment
+enforced by the guidelines above, not scripts.
+
+### 6. Update reference docs at milestone boundaries
 
 When completing a milestone, verify design documents reflect the current
 architecture. These files don't change during daily work but drift across
@@ -100,6 +114,8 @@ design/
   journal/      — exploration notes and rejected alternatives (created as derivation proceeds)
   research/     — prior art studies (descriptive, reusable): smp, syscall-landscape
   landscape.md  — survey of 18+ real kernel designs by decision point
+scripts/
+  verify            — pre-commit gate (clippy + build + test + unsafe count)
 .claude/
   working-with-claude.md — meta-process synthesis for Claude collaboration on this project
   hooks/, commands/, settings.json — Claude Code integration
