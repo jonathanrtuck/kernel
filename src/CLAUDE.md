@@ -45,10 +45,10 @@ comments link to `design/spec.md`.
 | `capability.rs` | Authority mechanism              | D4, D8, D11, D17, D38, D39, D40, D44  |
 | `space.rs`      | Memory object                    | D9, D25, D26, D27, D41                |
 | `time.rs`       | Compute allocation               | D29, D30, D31, D36–D38                |
-| `field.rs`      | IPC mechanism + message format   | D13, D15, D16, D28, D37, D45          |
+| `field.rs`      | IPC mechanism + message format   | D13, D15, D16, D28, D37, D45, D47     |
 | `observer.rs`   | Execution unit                   | D6, D14, D20, D21, D39, D40, D42, D43 |
 | `pulsar.rs`     | Timer mechanism                  | D44                                   |
-| `arch/`         | Hardware abstraction (core half) | A2, D1, D5, D46                       |
+| `arch/`         | Hardware abstraction (core half) | A2, D1, D5, D46, D47                  |
 
 Management modules (core manager, scheduler, space manager) will emerge during
 implementation — their shapes depend on implementation strategy more than

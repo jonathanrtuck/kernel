@@ -2737,6 +2737,62 @@ scheduler algorithm selection policy, boot ordering for secondary cores
   unacceptable even briefly).
 - **Journal:** `journal/046-core-activation.md`.
 
+### D47 — Syscall ABI: SVC immediate, IPC-optimized registers, two-level numbering
+
+The syscall ABI has three components:
+
+**Trap mechanism:** SVC #imm16. The operation is encoded in the SVC
+instruction's 16-bit immediate field, readable from ESR_EL1[15:0] at zero
+additional cost (the kernel already reads ESR_EL1 to confirm EC=0x15). This
+frees all 8 argument registers (x0–x7) for payload — critical because D28's
+message format exactly fills 8 registers on both send and receive.
+
+**Register convention:** IPC-optimized, uniform for both mechanism families.
+Registers are mapped to D28's message format:
+
+- x0–x3: primary payload (4 IPC data words / typed-operation args)
+- x4: label (IPC) / operation code (typed ops, SVC #0 only)
+- x5: field handle (IPC send) / badge (IPC receive) / target handle (typed ops)
+- x6: cap handle (IPC) / secondary arg (typed ops)
+- x7: flags (IPC send) / reply handle (IPC receive) / additional arg (typed ops)
+
+This layout enables a fast-path optimization: on direct switch (D13), x0–x3 pass
+through in physical registers without save or restore. The kernel's fast-path
+code must not use x0–x3 as scratch — an invariant maintained in the exception
+entry assembly.
+
+**Numbering:** Two-level, reflecting D7's split. IPC operations are nonzero SVC
+immediates (SVC #1 through #N, one per IPC operation). Typed kernel operations
+are SVC #0, with the specific operation code in x4. The kernel dispatches IPC
+operations from ESR_EL1 alone — before reading any GPR.
+
+Does NOT settle: error signaling convention (how failed operations report
+errors), cap-present indicator encoding, specific SVC number assignments for
+each IPC operation, typed operation code assignments within x4, large return
+value convention (e.g., read_registers), IPC fast-path conditions (when direct
+switch occurs).
+
+- **Rests on:** D28 (fixed-size message format — 4 data words + 1 cap + label
+  exactly fills 8 ARM64 registers, making the discriminator's placement
+  load-bearing), D7 (split interaction model — two families with different
+  performance profiles; the two-level numbering encodes this split), D13
+  (direct-switch fast path — the IPC-optimized register layout enables zero-copy
+  data word pass-through, saving ~20–30% of the fast-path cycle budget), D4/D8
+  (capability handles are small integers — one register per handle), D17 (badge
+  is kernel-injected — send side has one fewer value than receive, leaving room
+  for the field handle), A2 (ARM64 — SVC #imm16 is a hardware feature; ESR_EL1
+  decoding is free), A4 (SVC is the sole kernel entry mechanism), D1 (per-core
+  hot path — fast-path savings are per-core with no lock contention),
+  `design/research/syscall-landscape.md` §8 (minimal kernel: 5–7 operations;
+  seL4's 8 syscalls as pragmatic minimum), §10 (IPC as pivot point — IPC syscall
+  is the most-executed entry point by orders of magnitude).
+- **Status:** settled — revisit if D28 is revised (message size change alters
+  the register budget), if D7 is revised (unified model removes the two-level
+  motivation), if D13 is revised (different IPC model changes fast-path
+  assumptions), or if the fast-path register pass-through proves impractical
+  (kernel fast-path code requires x0–x3 as scratch).
+- **Journal:** `journal/047-syscall-abi.md`.
+
 ---
 
 ## Open questions
@@ -2961,9 +3017,11 @@ scheduler algorithm selection policy, boot ordering for secondary cores
 - **IPC fast-path conditions.** When does direct process switch occur? Receiver
   waiting? Priority check? seL4 fastpath requires no higher-priority runnable.
 - **Specific syscall surface.** D7 settles two mechanism families but not the
-  exact set. D14 adds resume() and confirms destroy() applies to Observers. D28
-  establishes inspect(observer_handle) as a typed kernel operation for reading
-  Observer state (fault message decomposition). D35 adds create_observer(),
+  exact set. D47 settles the ABI framework (SVC immediate encoding, register
+  convention, two-level numbering) but not the specific operation assignments.
+  D14 adds resume() and confirms destroy() applies to Observers. D28 establishes
+  inspect(observer_handle) as a typed kernel operation for reading Observer
+  state (fault message decomposition). D35 adds create_observer(),
   observer_install_cap(), and observer_write_registers() as typed kernel
   operations. D39 adds observer_read_registers(), observer_suspend(),
   observer_change_handler(), and observer_set_scheduling() as typed kernel
@@ -2971,7 +3029,9 @@ scheduler algorithm selection policy, boot ordering for secondary cores
   D44 adds Pulsar operations (create, arm/set, cancel/destroy — exact set
   depends on Pulsar rights mask) and a clock-read typed kernel operation for
   Observers without direct counter access. The archive's 10-syscall design is a
-  data point. Depends on IPC model and D9 (memory objects).
+  data point. Remaining: specific SVC number assignments for IPC operations,
+  typed operation code assignments within x4, error signaling convention,
+  cap-present indicator, large return value convention.
 - ~~**Address space lifecycle.**~~ Dissolved by D26: no address space kernel
   object. The page table is kernel-internal; per-Observer L0 tables are
   destroyed with the Observer; per-Space subtrees are reference-counted and
@@ -3334,6 +3394,13 @@ scheduler algorithm selection policy, boot ordering for secondary cores
   deactivation a bookkeeping check (unallocated pool ≥ core capacity), not a
   revocation problem. Space parallel: cores are to Time what physical pages are
   to Space.
+- `047-syscall-abi.md` — reasoning for D47: syscall ABI framework. SVC #imm16
+  for operation encoding (frees all 8 argument registers). IPC-optimized uniform
+  register convention (x0–x3 = data words, x4–x7 = metadata). Two-level
+  numbering (nonzero SVC immediate = IPC, SVC #0 = typed ops with operation in
+  x4). D28's message format exactly fills 8 ARM64 registers, making the
+  discriminator placement load-bearing. Fast-path optimization: x0–x3 pass
+  through in physical registers on direct switch (~20–30% of IPC fast path).
 
 ---
 
