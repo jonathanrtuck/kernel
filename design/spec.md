@@ -5,7 +5,7 @@ rationale. See `design/graph.d2` for the structural map and `design/journal/`
 for full exploration history.
 
 This document was reset on 2026-04-15 to re-derive contingent decisions from
-first principles. The current derivation chain (D1–D45) has fully superseded the
+first principles. The current derivation chain (D1–D48) has fully superseded the
 previous chain, which was deleted after systematic convergence checking
 confirmed coverage across all topics.
 
@@ -1366,7 +1366,8 @@ the user's 1 cap slot free for payload caps during Call(), supporting the common
 Fault messages use the same format: the kernel generates label (fault type) + 4
 data words (fault descriptor: Space identity, offset, access type) + 1 cap
 (Observer handle for resume, D14). Full Observer state (registers, PC, PSTATE)
-is accessible via inspect(observer_handle) — a D7 typed kernel operation. The
+is accessible via observer_read_registers(observer_handle) — a D7 typed kernel
+operation (D39 formalizes; D28's tentative "inspect()" name superseded). The
 fault message carries the notification; state inspection is a separate
 operation. This decomposition follows from D7's split model: IPC is one
 mechanism family, resource operations are another.
@@ -1380,7 +1381,8 @@ messages.
 
 Does NOT settle: fault message content details per fault type (VM fault,
 cap-table-full, invalid syscall), badge-closure notification content, interrupt
-message content, inspect() syscall shape, sender-side syscall encoding (which
+message content, ~~inspect() syscall shape~~ (reconciled by D48:
+observer_read_registers, D39's name), sender-side syscall encoding (which
 registers carry what — A2 implementation detail), send-right gating of cap
 transfer (Grant right), IPC fast-path conditions.
 
@@ -2793,6 +2795,128 @@ switch occurs).
   (kernel fast-path code requires x0–x3 as scratch).
 - **Journal:** `journal/047-syscall-abi.md`.
 
+### D48 — Syscall enumeration: 5 IPC + 20 typed = 25 operations
+
+The kernel's complete syscall surface, collected from all settled derivations.
+
+**IPC operations (Family 1 — nonzero SVC immediates, 5 operations):**
+
+| Operation | Behavior                                                                                                       | Source              |
+| --------- | -------------------------------------------------------------------------------------------------------------- | ------------------- |
+| Send      | Non-blocking deposit into Field. Error on full (D18). Also serves as Reply (D16 send-once consumed by kernel). | D13                 |
+| Receive   | Blocking wait on Field. Returns message in registers.                                                          | D13                 |
+| Call      | Send + block on reply field. Kernel creates send-once reply cap.                                               | D16                 |
+| ReplyRecv | Send reply via send-once + receive next on same field. Server fast path.                                       | D16                 |
+| Yield     | Voluntary CPU relinquishment. Scheduling hint, not communication.                                              | D48 (A3, landscape) |
+
+NBSend rejected: Send never blocks (D13 queued + D18 error-on-full). Reply
+rejected: Send to a send-once cap IS Reply (D16 right-based, not
+mechanism-based). NBRecv deferred: not foreclosed, D19 pattern; if
+polling/event-loop patterns prove painful, add as a flag on Receive or a
+separate SVC number.
+
+**Typed kernel operations (Family 2 — SVC #0, operation code in x4, 20
+operations):**
+
+Observer operations (D39 — nine rights):
+
+| Operation                | Signature                | Source   |
+| ------------------------ | ------------------------ | -------- |
+| observer_resume          | (cap)                    | D14, D35 |
+| observer_install_cap     | (cap, source_cap) → slot | D35      |
+| observer_write_registers | (cap, state)             | D35      |
+| observer_read_registers  | (cap) → state            | D28, D39 |
+| observer_suspend         | (cap)                    | D39      |
+| observer_change_handler  | (cap, field_cap, badge)  | D39      |
+| observer_set_scheduling  | (cap, hints)             | D39      |
+
+Generic cap operations (cross-type):
+
+| Operation | Signature                              | Source   |
+| --------- | -------------------------------------- | -------- |
+| destroy   | (cap) → space_cap                      | D11, D33 |
+| clone     | (cap, reduced_rights) → new_cap        | D23, D39 |
+| close     | (slot)                                 | D11      |
+| mint      | (cap, badge, reduced_rights) → new_cap | D17      |
+
+Space operations:
+
+| Operation   | Signature                | Source |
+| ----------- | ------------------------ | ------ |
+| space_split | (cap, size) → new_cap    | D41    |
+| space_merge | (target_cap, source_cap) | D41    |
+
+Field operations:
+
+| Operation    | Signature                      | Source |
+| ------------ | ------------------------------ | ------ |
+| create_field | (space_cap) → field_cap        | D32    |
+| field_split  | (cap, badge_range, dest_field) | D45    |
+
+Time operations:
+
+| Operation  | Signature               | Source |
+| ---------- | ----------------------- | ------ |
+| time_split | (cap, amount) → new_cap | D38    |
+
+Pulsar operations:
+
+| Operation     | Signature                                             | Source   |
+| ------------- | ----------------------------------------------------- | -------- |
+| create_pulsar | (space_cap, field_cap, badge, deadline, period) → cap | D44, D32 |
+| clock_read    | () → timestamp                                        | D44      |
+
+Observer creation:
+
+| Operation       | Signature                                   | Source   |
+| --------------- | ------------------------------------------- | -------- |
+| create_observer | (space_cap, handler_field_cap, badge) → cap | D35, D32 |
+
+Resource acquisition:
+
+| Operation        | Signature | Source |
+| ---------------- | --------- | ------ |
+| resource_request | (type)    | D31    |
+
+The 25-operation total places this kernel between Coyotos (~25 effective) and
+seL4 (~60 effective). All irreducible categories from
+`design/research/syscall-landscape.md` §8 are covered: IPC, object creation,
+resource management, lifecycle control, capability operations, scheduling
+control. Interrupt delivery flows through Fields (D22) with no dedicated
+operation.
+
+Does NOT settle: specific SVC number assignments for IPC operations (D47
+deferred), typed operation code assignments within x4, error signaling
+convention, cap-present indicator encoding, large return value convention (e.g.,
+read_registers returning a buffer). Pending additions from Space rights mask,
+Field rights mask, and Pulsar rights mask (typed operations only; IPC set is
+complete). time_merge not included (no functional need — D30 additive aggregate
+makes holding multiple Time caps equivalent; not foreclosed).
+
+- **Rests on:** D7 (split interaction model — two families, each right = typed
+  kernel operation), D47 (ABI framework — two-level numbering, register
+  convention), D13 (queued fields — Send is non-blocking, eliminating NBSend;
+  direct-switch fast path), D16 (send-once caps — Reply is Send, eliminating
+  standalone Reply; Call/ReplyRecv compound operations), D18 (error-on-full —
+  completes Send's non-blocking guarantee), D11 (close-only + destroy — close
+  and destroy as explicit typed operations), D17 (mint as third Field right —
+  typed kernel operation), D23 (clone as per-type right), D38 (Time non-clonable
+  — delegation via split), D39 (nine Observer rights = nine operations), D35
+  (Observer creation API — create + install_cap + write_registers + resume), D41
+  (Space merge and split), D44 (Pulsar create + clock_read; cancel = destroy),
+  D45 (Field split), D32 (type conversion — create operations consume Space),
+  D31 (resource request as typed kernel syscall triggering fault routing), D28
+  (inspect reconciled as observer_read_registers), A3 (generic — Yield included
+  for compute-bound workload support; 100% landscape convergence),
+  `design/research/syscall-landscape.md` §8 (irreducible set verification).
+- **Status:** settled — revisit if a downstream rights mask derivation (Space,
+  Field, Pulsar) reveals operations that change the typed set, if D13 is revised
+  (changes Send's blocking behavior and may restore NBSend), if D16 is revised
+  (changes send-once semantics and may restore standalone Reply), or if NBRecv
+  proves necessary (add as flag on Receive or separate SVC number — no
+  structural change needed).
+- **Journal:** `journal/048-syscall-enumeration.md`.
+
 ---
 
 ## Open questions
@@ -3016,22 +3140,17 @@ switch occurs).
   is kernel-injected in a dedicated message field, not a user cap slot.
 - **IPC fast-path conditions.** When does direct process switch occur? Receiver
   waiting? Priority check? seL4 fastpath requires no higher-priority runnable.
-- **Specific syscall surface.** D7 settles two mechanism families but not the
-  exact set. D47 settles the ABI framework (SVC immediate encoding, register
-  convention, two-level numbering) but not the specific operation assignments.
-  D14 adds resume() and confirms destroy() applies to Observers. D28 establishes
-  inspect(observer_handle) as a typed kernel operation for reading Observer
-  state (fault message decomposition). D35 adds create_observer(),
-  observer_install_cap(), and observer_write_registers() as typed kernel
-  operations. D39 adds observer_read_registers(), observer_suspend(),
-  observer_change_handler(), and observer_set_scheduling() as typed kernel
-  operations (completing the Observer rights set — nine rights, nine syscalls).
-  D44 adds Pulsar operations (create, arm/set, cancel/destroy — exact set
-  depends on Pulsar rights mask) and a clock-read typed kernel operation for
-  Observers without direct counter access. The archive's 10-syscall design is a
-  data point. Remaining: specific SVC number assignments for IPC operations,
-  typed operation code assignments within x4, error signaling convention,
-  cap-present indicator, large return value convention.
+- ~~**Specific syscall surface.**~~ Settled by D48: 5 IPC operations (Send,
+  Receive, Call, ReplyRecv, Yield) + 20 typed kernel operations = 25 total.
+  NBSend rejected (redundant — Send never blocks under D13/D18). Reply rejected
+  (redundant — Send to D16 send-once cap). NBRecv deferred (not foreclosed; D19
+  pattern). Typed operations collected from D14, D35, D39, D41, D44, D45, D11,
+  D17, D23, D31, D32. Generic cap operations (destroy, clone, close, mint) apply
+  across types. Pending additions from Space/Field/Pulsar rights masks (typed
+  operations only; IPC set is complete). Remaining from D47: specific SVC number
+  assignments for IPC operations, typed operation code assignments within x4,
+  error signaling convention, cap-present indicator, large return value
+  convention.
 - ~~**Address space lifecycle.**~~ Dissolved by D26: no address space kernel
   object. The page table is kernel-internal; per-Observer L0 tables are
   destroyed with the Observer; per-Space subtrees are reference-counted and
@@ -3401,6 +3520,13 @@ switch occurs).
   x4). D28's message format exactly fills 8 ARM64 registers, making the
   discriminator placement load-bearing. Fast-path optimization: x0–x3 pass
   through in physical registers on direct switch (~20–30% of IPC fast path).
+- `048-syscall-enumeration.md` — reasoning for D48: complete syscall
+  enumeration. 5 IPC operations (Send, Receive, Call, ReplyRecv, Yield) + 20
+  typed kernel operations = 25 total. NBSend rejected (Send never blocks). Reply
+  rejected (Send to send-once cap). NBRecv deferred (not foreclosed). close,
+  mint derived as explicit typed operations. inspect() reconciled as
+  observer_read_registers(). Completeness verified against research §8
+  irreducible set.
 
 ---
 
