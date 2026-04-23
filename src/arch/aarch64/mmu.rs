@@ -50,6 +50,7 @@ const MAIR_NORMAL_WB: u64 = 0xFF; // Inner/Outer Write-Back, Write-Allocate
 // Page geometry — 16 KiB granule (Apple Silicon native). These stay private
 // to the MMU module; the page size does not leak into the kernel interface.
 const PAGE_SIZE: usize = 16 * 1024;
+// TODO: remove
 #[allow(dead_code)]
 const PAGE_SHIFT: usize = 14;
 
@@ -94,6 +95,7 @@ fn l2_index(va: usize) -> usize {
     (va >> L2_BLOCK_SHIFT) & (ENTRIES_PER_TABLE - 1)
 }
 
+// TODO: remove
 #[allow(dead_code)]
 #[inline]
 fn l3_index(va: usize) -> usize {

@@ -15,6 +15,9 @@
 //!      Core assignment is transient (no struct field).
 //!      Reply field is a cap-table reserved slot (D21 pattern).
 
+// TODO: remove
+#![allow(dead_code)]
+
 use crate::capability;
 use crate::field::Field;
 

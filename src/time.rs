@@ -7,6 +7,9 @@
 //! D37: donation via explicit cap transfer in user cap slot on Call().
 //! D38: non-clonable (linear). Authority delegation via split, not clone.
 
+// TODO: remove
+#![allow(dead_code)]
+
 /// A claim to a portion of the system's compute capacity, denominated in
 /// normalized compute units.
 ///
