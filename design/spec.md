@@ -5,7 +5,7 @@ rationale. See `design/graph.d2` for the structural map and `design/journal/`
 for full exploration history.
 
 This document was reset on 2026-04-15 to re-derive contingent decisions from
-first principles. The current derivation chain (D1–D49) has fully superseded the
+first principles. The current derivation chain (D1–D53) has fully superseded the
 previous chain, which was deleted after systematic convergence checking
 confirmed coverage across all topics.
 
@@ -788,10 +788,11 @@ capability designation).
 
 Does NOT settle: Call()/ReplyRecv() syscall details (part of specific syscall
 surface), reply field allocation policy (pre-allocated at creation vs. lazy),
-send-once right encoding in D8's rights mask, shared reply field with badge
-disambiguation (depends on badge semantics). ~~Message format interaction~~
-settled by D28: reply cap is a kernel-injected dedicated field (not a user cap
-slot), paralleling badge.
+~~send-once right encoding in D8's rights mask~~ (settled by D51: boolean flag
+on Entry, not a rights bit), shared reply field with badge disambiguation
+(depends on badge semantics). ~~Message format interaction~~ settled by D28:
+reply cap is a kernel-injected dedicated field (not a user cap slot),
+paralleling badge.
 
 - **Rests on:** D15 (unidirectional fields require reply-cap transfer — the cost
   this mechanism pays), D14 (fault resume settled separately — decouples IPC
@@ -2086,7 +2087,7 @@ kernel syscall (D7) and a bit in D8's per-cap rights mask:
 | Right             | Syscall                                        | Source   |
 | ----------------- | ---------------------------------------------- | -------- |
 | resume            | observer_resume(cap)                           | D14, D35 |
-| destroy           | destroy(cap)                                   | D14, D34 |
+| destroy           | destroy(cap)                                   | D14, D33 |
 | install-cap       | observer_install_cap(cap, source_cap) → slot   | D35      |
 | write-registers   | observer_write_registers(cap, state)           | D35      |
 | clone             | clone(cap, reduced_rights) → new_cap           | D38      |
@@ -2131,7 +2132,7 @@ responsiveness inheritance ordering).
 - **Rests on:** D14 (resume and destroy as minimum; Observer as capability-held
   type), D35 (install-cap, write-registers, resume as creation rights;
   composable operations pattern), D38 (per-type rights; clone in Observer's
-  set), D34 (destroy in rights mask), D28 (assumes inspect(observer_handle)
+  set), D33 (destroy in rights mask), D28 (assumes inspect(observer_handle)
   exists — read-registers is the fulfillment), D7 (each right = typed kernel
   syscall), D8 (per-cap rights mask; nine bits), D23 (clonable — rights
   separation via attenuated clones is the access control mechanism), D20 + D21
@@ -2287,9 +2288,11 @@ D32's unsettled "merge/join operation (reverse of split)" is resolved: merge is
 the reverse of split.
 
 Does NOT settle: syscall signatures (all-or-nothing merge vs. partial; split
-extraction end), separate merge/split rights or single topology right, VA
-headroom policy (kernel-internal), Space vocabulary refinement ("not cumulative"
-wording), COW/clone (D9 deferred, orthogonal), complete Space rights mask.
+extraction end), ~~separate merge/split rights or single topology right~~
+(settled by D52: separate SPLIT and MERGE rights), VA headroom policy
+(kernel-internal), Space vocabulary refinement ("not cumulative" wording),
+COW/clone (D9 deferred, orthogonal), ~~complete Space rights mask~~ (settled by
+D52: split, merge, destroy, clone).
 
 - **Rests on:** D9 (variable-size kernel-managed Spaces — merge and split
   operate on D9 Spaces), D26 (capability-addressed memory — kernel-assigned VA
@@ -2625,8 +2628,9 @@ architectural reason to restrict).
 Does NOT settle: badge condition form (range, bitmask, predicate), whether
 split-to-new and split-to-existing are one syscall or two, Field rights mask
 (split right details, complete Field rights set), queued message handling at
-split time, D17 badge-closure tracking partitioning on split, routing table
-structure (kernel-internal), flattened routing table update protocol.
+split time, D17 badge-closure tracking partitioning on split, ~~routing table
+structure~~ (settled by D54: nullable pointer to external sorted array,
+allocated from root Space), flattened routing table update protocol.
 
 - **Rests on:** D22 (interrupt delegation through fields — introduces split as
   the delegation mechanism; IRQ routing is the canonical use case), D15
@@ -2642,7 +2646,7 @@ structure (kernel-internal), flattened routing table update protocol.
   Field's rights set), D32 (type conversion — split-to-new consumes Space;
   conservation holds), D11 (base revocation — destination Field destroy triggers
   routing rule cleanup; fallback-on-destroy follows from D11's dead-handle
-  protocol applied to the kernel's internal reference), D34 (destroy cascade —
+  protocol applied to the kernel's internal reference), D33 (destroy cascade —
   Field destroy doesn't cascade; routing rule cleanup is O(1) per source that
   routes to the destroyed Field), D1 (hot-path — per-send routing cost is O(log
   N) on split Fields, zero on unsplit; transparent forwarding foreclosed), D7
@@ -2892,10 +2896,10 @@ Does NOT settle: ~~specific SVC number assignments~~ (settled by D49: #1–#5),
 sequential 0–19), ~~error signaling convention~~ (settled by D49: carry flag for
 IPC, negative-x0 for typed), ~~cap-present indicator~~ (settled by D49: sentinel
 u64::MAX), ~~large return value convention~~ (settled by D49: userspace buffer
-pointer). Pending additions from Space rights mask, Field rights mask, and
-Pulsar rights mask (typed operations only; IPC set is complete). time_merge not
-included (no functional need — D30 additive aggregate makes holding multiple
-Time caps equivalent; not foreclosed).
+pointer). ~~Pending additions from Space rights mask, Field rights mask, and
+Pulsar rights mask~~ (settled by D52: complete per-type rights masks for all
+four remaining types). time_merge not included (no functional need — D30
+additive aggregate makes holding multiple Time caps equivalent; not foreclosed).
 
 - **Rests on:** D7 (split interaction model — two families, each right = typed
   kernel operation), D47 (ABI framework — two-level numbering, register
@@ -3110,6 +3114,276 @@ enqueue" optimization, interrupt masking during fast path.
   (consistently >50 cycles, >12% of fast-path budget).
 - **Journal:** `journal/050-ipc-fast-path-conditions.md`.
 
+### D51 — Send-once right encoding: boolean flag on capability entry, not a rights bit
+
+Send-once (D16) is a use-limited property of a capability: after one send
+operation, the cap is consumed (removed from the holder's table). D16 settles
+the mechanism but explicitly defers the encoding: "send-once right encoding in
+D8's rights mask."
+
+The encoding is a boolean flag (`send_once: bool`) on the capability entry,
+separate from the rights bitmask. The flag is set at creation time and immutable
+thereafter. The kernel checks the flag on Send; if true, the cap is removed from
+the table after delivery.
+
+Why a flag and not a rights bit: attenuation can only clear bits, never set
+them. If send-once were a bit in the rights mask, a holder with "send +
+send-once" could attenuate away the "send-once" bit, producing a plain "send"
+cap — defeating the use-limited guarantee. A flag outside the rights mask is not
+subject to attenuation. The flag is copied through attenuation (struct update
+syntax copies all fields), preserving the send-once property regardless of
+rights narrowing.
+
+The flag adds 1 byte to the Entry struct (within padding on 64-bit alignment).
+No measurable performance impact — the check is one branch on the send path,
+correctly predicted as not-taken in the common case (most caps are not
+send-once).
+
+Does NOT settle: whether send-once should compose with other operations beyond
+Send (e.g., send-once mint, send-once receive), or whether multi-use-limited
+caps (send-N-times) are needed. These are not foreclosed — the boolean flag
+could be widened to a u32 use count if demand emerges.
+
+- **Rests on:** D16 (send-once mechanism — the property being encoded), D8 (cap
+  table entry layout — the structure being extended), D4 (attenuation hierarchy
+  — attenuation must not defeat send-once; motivates flag over bit).
+- **Status:** settled — revisit if D4's attenuation model changes (e.g., to
+  support "additive" attenuation that could set bits), or if multi-use caps are
+  needed (widen flag to counter).
+
+### D52 — Per-type rights masks: complete assignment for Space, Time, Field, Pulsar
+
+D39 settles the nine Observer rights. D48 enumerates all typed operations. This
+derivation settles the complete rights mask for the remaining four types, drawn
+from D48's operation table and earlier derivations.
+
+**Space rights (4 bits):** split (D41), merge (D41), destroy (D11/D33), clone
+(D23). Both split and merge require dedicated rights (D41: "require dedicated
+rights in the Space rights mask"). Destroy and clone follow the cross-type
+pattern. No additional rights — Space has no read/write operations (memory
+access is through the MMU, governed by the page table, not by per-operation
+rights checks).
+
+**Time rights (2 bits):** split (D38), destroy (D11/D33). No clone — D38 settles
+Time as non-clonable (linear). No merge — D48 excludes time_merge (D30's
+additive aggregate makes holding multiple Time caps equivalent to merging).
+Delegation uses split, not clone.
+
+**Field rights (6 bits):** send (D15), receive (D15), mint (D17), split (D45),
+destroy (D11/D33), clone (D23). Send and receive are the fundamental IPC
+operations. Mint controls badge assignment. Split (D45) enables routing table
+construction. No separate "create" right — field creation operates on a Space
+cap (D32 type conversion), not on an existing Field.
+
+**Pulsar rights (2 bits):** destroy (D11/D33), clone (D23). No modify or rearm
+right — Pulsars are configured at creation and managed by the kernel thereafter
+(D44: "kernel programs the timer and delivers messages"). clock_read is capless
+(D48: no cap argument). create_pulsar operates on a Space cap (D32), not on an
+existing Pulsar.
+
+Shared rights occupy the same bit positions across all types: DESTROY (bit 1),
+CLONE (bit 4), SPLIT (bit 12). Type-specific rights occupy non-overlapping
+positions. This is the complete assignment — no reserved bits are needed beyond
+the 14 currently allocated (bits 0–13 of the u16 Rights value).
+
+Does NOT settle: COW/snapshot rights for Space (D9 deferred), field
+rotation/generation-as-revocation rights (D11 open), interrupt delivery rights
+(D22 — interrupts flow through Fields, no separate rights).
+
+- **Rests on:** D39 (Observer rights — establishes the 9-right pattern), D48
+  (operation enumeration — every typed operation implies a right), D41 (Space
+  merge and split — "require dedicated rights"), D38 (Time non-clonable —
+  excludes CLONE from Time), D45 (Field split — implies SPLIT right), D17 (mint
+  as third Field right), D23 (clone as per-type right — present for Space,
+  Field, Pulsar; excluded for Time per D38), D11/D33 (destroy as universal
+  right), D4/D8 (rights mask as the enforcement mechanism), D44 (Pulsar
+  create/cancel — cancel is destroy).
+- **Status:** settled — revisit if D48 is extended with new typed operations
+  that imply new rights, if D9's COW/snapshot is settled (adds Space rights), or
+  if D22's interrupt delivery settles rights beyond the existing Field
+  send/receive.
+
+### D53 — Arena lock ordering: Field before Observer
+
+Under the global-arena concurrency model (one SpinLock per Arena<T>, five arenas
+total), any operation that accesses objects of two different types must acquire
+both arena locks. Deadlock freedom requires a total ordering on lock
+acquisition.
+
+The ordering is: **Arena<Field> before Arena<Observer>**. This follows from the
+IPC data flow — the most common cross-type operation:
+
+1. Sender resolves its own cap table entry (sender's Observer, via CoreLocal —
+   no arena lock needed for the running Observer's hot fields).
+2. Lock Arena<Field>: access the target Field to check for waiters or enqueue.
+3. Lock Arena<Observer>: if a waiter exists, modify its state (Blocked →
+   Runnable), clear its wait_target, update run queue linkage.
+4. Release Arena<Observer>, then release Arena<Field>.
+
+The ordering ensures that no IPC path acquires Observer before Field. Cross-core
+IPC follows the same order: the IPI handler on the receiver's core acquires
+Field then Observer in the same order.
+
+Other cross-type operations:
+
+- **Object creation** (create_field, create_observer, create_pulsar): acquires
+  only the target type's arena. No ordering concern.
+- **Destroy cascade** (D33): iterates one Observer's cap table, closing caps to
+  various types. Acquires one arena at a time per close operation (never holds
+  two simultaneously during iteration). No ordering concern.
+- **Fault handling** (D40): acquires Arena<Observer> to inspect/modify the
+  faulting Observer. May acquire Arena<Field> to enqueue a fault message. This
+  requires Field-before-Observer ordering, which is satisfied by releasing
+  Observer, acquiring Field, then re-acquiring Observer if needed. The fault
+  path is cold (D1) — the release-reacquire cost is acceptable.
+
+The ordering extends to future arenas: Arena<Space> and Arena<Time> are accessed
+independently (Space/Time operations do not cross into Field or Observer arenas
+during normal operation). Arena<Pulsar> crosses into Arena<Field> (timer fire
+enqueues a message), so the extended ordering is: Field < Observer < Pulsar
+(Pulsar acquires Field, never Observer). Space and Time are unordered with
+respect to the others (no cross-arena operations).
+
+Does NOT settle: per-core sharding of arenas (future SMP optimization), lock
+ordering for operations that touch three or more arenas simultaneously (not
+currently possible given the operation set).
+
+- **Rests on:** D1 (hot/cold split — same-core IPC is uncontended; cross-core is
+  cold), D13 (IPC data flow — send checks Field then wakes Observer; determines
+  the natural ordering), D50 (fast-path conditions — same-core requirement means
+  the fast path avoids contention entirely), D33 (destroy cascade — preemptible,
+  one arena at a time), D44 (Pulsar timer fire — enqueues into Field, extending
+  the ordering to Pulsar), A1 (Rust — SpinLock<T> prevents data races; the
+  ordering prevents deadlocks).
+- **Status:** settled — revisit if arena sharding is implemented (per-core
+  arenas change the locking model), if a new operation requires holding three or
+  more arena locks simultaneously, or if the fault-path release-reacquire cost
+  proves too high (would motivate a different locking strategy).
+
+### D54 — Routing table structure: nullable pointer to external sorted array
+
+The per-Field routing table (D45 badge-range → destination-Field mappings) is a
+nullable pointer to an externally-allocated sorted array of routing entries.
+Null when unsplit — zero hot-path cost (null check in the cache line already
+loaded for `waiters`/`queue_len`). On first split, the kernel allocates the
+array from root Space (D31).
+
+Each routing entry holds: badge range condition, destination Field ObjectId, and
+intrusive-list linkage for the destination's back-pointer cleanup list.
+Destination Fields gain a back-pointer list head (intrusive list paralleling
+waiters). When a destination is destroyed, the kernel walks its back-pointer
+list and removes each corresponding routing entry from the source Field's table.
+O(1) per source.
+
+Growth via geometric doubling on the split path (cold, amortized O(1) per
+split). The array is contiguous for binary-search cache-friendliness.
+
+Memory accounting: root Space (D31). Each split adds ~40–48 bytes — bounded per
+operation, small, invisible to userspace. This extends D32's metadata pattern
+from "bounded per object" to "bounded per operation" — a new category
+(kernel-internal variable-size infrastructure) that also covers the D22
+IRQ→Field routing table.
+
+Rejected alternatives: small inline array + overflow pointer (64–192 bytes arena
+bloat on all Fields for ~10-cycle savings on a minority; two code paths; inline
+count is a global commitment); routing entries in queue pages (liveness coupling
+— full queue blocks split; type safety violation on dual-typed pages; routing
+and queue capacity cannot scale independently).
+
+Does NOT settle: exact routing entry layout, initial array capacity, sub-page
+allocation strategy for routing arrays, flattened routing table structure
+(D24-parallel optimization).
+
+- **Rests on:** D45 (badge-range routing — this derivation settles one of D45's
+  open items: routing table structure), D32 (type conversion / memory accounting
+  — routing table memory comes from root Space, extending the metadata pattern),
+  D31 (root Space — pays for routing table allocations), D1 (hot-path — null
+  check in hot cache line; pointer dereference only on split Fields), D50
+  (routing evaluation is a fixed cost on every send — the presence check must be
+  in the hot partition), D33 (destroy cascade — destination destroy must find
+  and remove routing rules on source Fields; back-pointer list enables
+  O(1)-per-source cleanup), D43 (Observer minimum schema — precedent for
+  nullable/optional structures: inline common case, allocated uncommon case),
+  D15 (Field as single object — routing table expands the Field's internal
+  structure while preserving the single-object model), A1 (Rust — Option pointer
+  for null safety; intrusive list for back-pointers follows established kernel
+  pattern).
+- **Status:** settled — revisit if D45 is revised (changes the routing
+  mechanism), if D32 is revised (changes the memory accounting model), if D1 is
+  revised (changes the hot-path constraint), or if profiling reveals the pointer
+  dereference cost is unacceptable for a structurally required workload pattern.
+- **Journal:** `journal/051-routing-table-structure.md`.
+
+### D55 — Field destroy routing-cleanup protocol: preemptible walk, generation check, IPI-requested removal
+
+When a destination Field is destroyed, the kernel walks its back-pointer list
+(D54) to remove routing entries from source Fields. The protocol has three
+components:
+
+**Preemptible walk (D33 extension).** The back-pointer walk is O(K) where K =
+number of sources routing to this destination. D33's structural argument applies
+identically: "inline forecloses bounded destroy time; preemptible forecloses
+nothing." The walk proceeds in bounded steps; between steps, the timer can
+preempt. Continuation state extends D33's per-core framework (back-pointer list
+position plus pending cross-core IPIs).
+
+**Generation check for stale-rule detection.** D11 requires the object to be
+dead before cleanup begins — creating a window where source Fields have routing
+rules pointing to a dead destination. Each routing entry stores the
+destination's ObjectId generation at installation time. On routing evaluation,
+the kernel compares generations; a mismatch means the destination is dead (or
+reused) — the entry is treated as absent and the send falls back to the source
+queue (D45 fallback). This extends D11's ABA tag pattern from userspace
+capability slots to kernel-internal routing references. Cost: one comparison for
+the matching entry per send, in the same cache line as the badge range —
+effectively free (branch predictor learns the always-taken path).
+
+**IPI-requested removal for cross-core sources.** D1 requires no shared mutable
+state on the hot path. The source Field's routing table is hot-path data (D50).
+When the destroying core needs to remove a routing entry from a source on
+another core, it sends an IPI (O2). The IPI handler on the target core performs
+the removal in its own execution context — no lock on the send path, no
+concurrent modification. During IPI delay, the generation check (above) handles
+stale entries transparently.
+
+Same-core sources are cleaned inline within the syscall context (no IPI needed —
+no concurrent access possible within one core's exception handler).
+
+Rejected alternatives: inline walk (forecloses bounded destroy time,
+inconsistent with D33), liveness check via pointer dereference (cache miss vs.
+same-cache-line generation comparison), fail-the-send on stale entry (no
+precedent for transient userspace-visible errors during kernel-internal
+cleanup), lock on source routing table (D1 hot-path violation), deferred-on-send
+removal (polling, not reactive — but noted as a viable Verus verification
+stepping stone before the IPI protocol is formally specified).
+
+Does NOT settle: generation field placement in routing entry layout, IPI
+batching for multi-source cleanup on the same remote core, IPI acknowledgment
+protocol, flattened routing table invalidation (gated on flattened tables being
+adopted), continuation state layout (extends D33).
+
+- **Rests on:** D54 (back-pointer intrusive list — the mechanism this protocol
+  operates), D33 (preemptible destroy cascade — structural argument transfers;
+  continuation framework extended), D11 (dead-before-cleanup guarantee creates
+  the stale window; ABA tag pattern extended to routing entries), D45 (fallback-
+  on-destroy — the semantic that stale-rule detection implements), D50 (routing
+  evaluation on every send — source routing table is hot-path data; generation
+  check must be cache-friendly), D1 (per-core hot path — no shared mutable
+  state; IPI-requested removal avoids cross-core writes to hot-path data), O2
+  (cross- core coordination requires IPIs), A3 (generic/RT — bounded preemption
+  latency requires preemptible cleanup), A4 (purely reactive — IPI is reactive;
+  no background cleanup), `design/philosophy.md` ("find the abstraction that
+  absorbs the edge cases" — generation check unifies dead-handle and
+  dead-routing- destination handling; "react to reality, don't poll for it" —
+  IPI over deferred-on-send).
+- **Status:** settled — revisit if D54 is revised (changes the back-pointer
+  mechanism), if D33 is revised (changes the preemptibility framework), if D11
+  is revised (changes the dead-before-cleanup guarantee or ABA tag pattern), if
+  O2 is revised (changes the cross-core coordination mechanism), or if Verus
+  verification reveals the IPI protocol is infeasible to specify (would motivate
+  deferred-on-send as the permanent solution).
+- **Journal:** `journal/052-field-destroy-routing-cleanup.md`.
+
 ---
 
 ## Open questions
@@ -3242,9 +3516,10 @@ enqueue" optimization, interrupt masking during fast path.
   fallback-on-destroy. Split installs routing rules on the source Field;
   destination is a separate Field object. Generalizes beyond IRQ to all
   badge-range traffic. Fallback-on-destroy provides automatic crash recovery
-  without parent tracking. Remaining: badge condition form, split-to-new vs.
-  split-to-existing syscall shape, Field rights mask, queued message handling at
-  split time, badge-closure tracking partitioning.
+  without parent tracking. Routing table structure settled by D54 (nullable
+  pointer to external sorted array, root Space). Remaining: badge condition
+  form, split-to-new vs. split-to-existing syscall shape, Field rights mask,
+  queued message handling at split time, badge-closure tracking partitioning.
 - ~~**Field combine semantics.**~~ Dissolved by D45: combine decomposes into
   split-to-existing (route traffic from Field A to Field B) + destroy (the
   now-empty A). No separate combine primitive.
@@ -3742,6 +4017,19 @@ enqueue" optimization, interrupt masking during fast path.
   semantics. D37 Time donation explicitly slow-path (cap-graph tradeoff).
   Philosophy: "isolate uncertain decisions behind interfaces" applied to
   scheduling check.
+- `051-routing-table-structure.md` — reasoning for D54: routing table on a Field
+  is a nullable pointer to an external sorted array, allocated from root Space.
+  D32 metadata pattern extended from "bounded per object" to "bounded per
+  operation." Inline array rejected (arena bloat for ~10-cycle savings on a
+  minority of Fields). Queue-page repurposing rejected (liveness coupling, type
+  safety violation). Back-pointer list on destinations forced by D33 cleanup
+  requirements.
+- `052-field-destroy-routing-cleanup.md` — reasoning for D55: Field destroy
+  routing-cleanup protocol. Preemptible back-pointer walk (D33 argument
+  transfers), generation check on routing entries (D11 ABA pattern extended to
+  kernel-internal references), IPI-requested removal for cross-core sources (D1
+  hot-path isolation + O2). Inline walk rejected (bounded destroy time), lock
+  rejected (D1 violation), deferred-on-send noted as Verus stepping stone.
 
 ---
 
