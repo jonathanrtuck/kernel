@@ -3,19 +3,21 @@
 //! D53: global-arena concurrency model — one SpinLock per Arena<T>.
 //! D67: every kernel object carries a generation counter for revocation.
 //! D70: per-type slab allocator with page return.
+//! D75: arenas live in a global KernelState struct. Lock<T> owns Arena<T> via
+//!      UnsafeCell; LockGuard provides DerefMut access.
 
 /// Kernel-internal object identifier.
 ///
-/// Index into a per-type Arena<T> slab. The object's own `generation`
-/// field (D67) is the revocation counter — checked against the stored
-/// generation in each capability entry on use.
+/// Index into a per-type Arena<T> slab. The object's own `generation` field
+/// (D67) is the revocation counter — checked against the stored generation in
+/// each capability entry on use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ObjectId(pub u32);
 
 /// Allocation failure from a per-type arena (D70, D31).
 ///
-/// Occurs when the slab freelist is empty and no pages can be drawn
-/// from the root Space pool.
+/// Occurs when the slab freelist is empty and no pages can be drawn from the
+/// root Space pool.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AllocError {
     /// Root Space pool exhausted — no pages available for slab growth.
@@ -28,12 +30,12 @@ pub enum AllocError {
 /// `Arena<Field>` < `Arena<Observer>` < `Arena<Pulsar>`.
 /// `Arena<Space>` and `Arena<Time>` are unordered (no cross-arena ops).
 ///
-/// Internal structure (D70): hardware pages divided into N fixed-size
-/// slots, intrusive freelist through freed slots. When all slots on a
-/// page are free, the page returns to the root Space pool.
+/// Internal structure (D70): hardware pages divided into N fixed-size slots,
+/// intrusive freelist through freed slots. When all slots on a page are free,
+/// the page returns to the root Space pool.
 ///
-/// All unsafe slab internals live inside frame/ (journal 023). This
-/// module defines the interface; frame/ provides the implementation.
+/// All unsafe slab internals live inside frame/ (journal 023). This module
+/// defines the interface; frame/ provides the implementation.
 pub struct Arena<T> {
     pub(crate) store: crate::frame::slab::SlabStore<T>,
 }

@@ -1,15 +1,16 @@
 # Kernel structural map.
 #
-# Populated from design/spec.md derivations D1-D6, D8-D49, D74, observations O2-O3,
-# and Vocabulary (Space, Time, Observer, Pulsar). Every box and edge has a
-# corresponding spec.md entry; items labeled "TBD" await downstream derivation.
+# Populated from design/spec.md derivations D1-D6, D8-D49, D74-D75, observations
+# O2-O3, and Vocabulary (Space, Time, Observer, Pulsar). Every box and edge has
+# a corresponding spec.md entry; items labeled "TBD" await downstream
+# derivation.
 #
 # Intentionally absent (pending derivation):
 # field details (multi-wait — D13/D15 downstream; overflow settled by D18;
 # message format settled by D28; split settled by D45), revocation add-ons
 # (generation, CDT — base settled in D11; badges settled in D17),
-# per-physical-core concerns (thermal, shared cache/TLB — power/idle settled
-# by D46 as kernel-internal behind src/arch/).
+# per-physical-core concerns (thermal, shared cache/TLB — power/idle settled by
+# D46 as kernel-internal behind src/arch/).
 # See spec.md#Open questions.
 #
 # Render with: d2 --layout elk graph.d2

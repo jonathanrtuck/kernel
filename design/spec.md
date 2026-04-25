@@ -4308,6 +4308,74 @@ routine vs. branch within exception.S (implementation detail).
   fundamentally different split.
 - **Journal:** `journal/074-register-save-restore-flow.md`.
 
+### D75 — Global arena organization: bundled KernelState global with data-owning Lock
+
+The five per-type arenas (D53) and the SpaceManager (D3, D31) live in a single
+global `KernelState` struct. Cold-path code accesses arenas through this global.
+The hot path (D1, D50, D74) never touches it — it works exclusively with
+per-core `NonNull<Observer>` pointers, RegisterState, and scheduler state.
+
+`Lock<T>` is refactored from `PhantomData<T>` to `UnsafeCell<T>`: the lock owns
+its data, and `LockGuard` provides `DerefMut<Target=T>`. This closes the gap
+where "caller must hold this arena's lock (D53)" was enforced by convention
+rather than the type system. A1 says ownership maps to resource lifecycle and
+unsafe boundaries map to trust boundaries — the lock-before-access invariant is
+a trust boundary that Rust can enforce.
+
+The bundle collects all kernel-wide shared cold-path state in one namespace.
+Arena access and SpaceManager access have identical patterns (shared, cold-path,
+under locks) and should be organized consistently. The bundle is also a single
+point of change if arena sharding (D53's flagged SMP optimization) is
+implemented — "isolate uncertain decisions behind interfaces."
+
+Parameter threading (passing `&Arenas` through every cold-path function) was
+rejected: it pushes a leaf concern (storage location of shared state) into
+inter-module interfaces. Every function signature grows to advertise an
+implementation detail. The reference is a constant (all cores point to the same
+struct) — threading it adds ceremony without information. This conflicts with
+"push complexity to the leaves."
+
+Five separate statics (no bundle) was rejected: scatters the organization across
+import sites, losing the single-point-of-change property for future sharding.
+The bundle is better aligned with "isolate uncertain decisions behind
+interfaces."
+
+Per-core arena copies (Barrelfish model) are not foreclosed but would require
+reopening D53. D33 cascade crosses types and cores (every cap close becomes
+cross-core), ObjectId encoding assumes a single per-type arena, and D53's lock
+ordering assumes one arena per type. Per-core sharding (front-end magazines,
+shared back-end) remains compatible within this organization.
+
+Initialization: the `KernelState` global is initialized by the BSP during boot,
+before secondary core activation (D46, PSCI CPU_ON). Arena slabs start empty;
+first allocations (boot objects — root Observer, initial Fields) draw pages from
+the root Space pool.
+
+Does NOT settle: `KernelState` struct layout beyond arenas and SpaceManager
+(other kernel-wide shared state — IRQ routing table, idle bitmap — added as
+derived), Lock<T> internals beyond the UnsafeCell ownership change (interrupt
+masking on acquire, WFE spinning — frame/ implementation detail), arena
+initialization ordering details (boot sequence).
+
+- **Rests on:** D53 (per-type arenas with lock ordering — this decision
+  organizes what D53 defined), D70 (slab internals — arena internal structure is
+  settled; this is the outer organization), D1 (hot/cold split — arenas are
+  cold-path shared state; organization must not leak into hot path), D50
+  (fast-path conditions — fast path never touches arenas; confirms organization
+  is invisible to performance-critical code), D3 (one logical Space manager —
+  same shared-state character as arenas; bundled together for consistency), D31
+  (root Space pool — slab pages drawn from SpaceManager; co-location simplifies
+  the allocation path), D46 (core lifecycle — BSP initializes global before
+  secondary cores; no lazy init under A4), A1 (Rust ownership — Lock wrapping
+  UnsafeCell enforces lock-before-access at the type level; PhantomData left a
+  safety gap), philosophy: "push complexity to the leaves" (rejects parameter
+  threading), "isolate uncertain decisions behind interfaces" (bundle provides
+  single change point for future sharding).
+- **Status:** settled. Revisit if per-core sharding is implemented (changes Lock
+  semantics — per-core magazines behind the same Lock interface), or if a new
+  kernel-wide shared resource doesn't fit the KernelState bundle pattern.
+- **Journal:** `journal/075-global-arena-organization.md`.
+
 ---
 
 ## Open questions
@@ -4593,12 +4661,10 @@ routine vs. branch within exception.S (implementation detail).
   subsequent holders increment reference count. Per-Observer intermediate page
   table pages (L1/L2) charged via D8 fault mechanism (handler provides Space in
   fault reply). Kernel per-object metadata from root Space.
-- **CoreState arena references for dispatch.** `dispatch_ipc` and
-  `dispatch_typed` need to dereference resolved ObjectIds to reach the target
-  kernel object (Field, Observer, Space, Time, Pulsar). CoreState currently
-  holds only core_id, current, and scheduler. The dispatch path needs arena
-  references — either stored in CoreState or passed through a separate per-core
-  context struct. Surfaced by Phase D Wave 3 implementation.
+- ~~**CoreState arena references for dispatch.**~~ Settled by D75: arenas live
+  in a global `KernelState` struct (not in CoreState). Cold-path dispatch code
+  accesses them through the global. Lock<T> refactored to own data (UnsafeCell)
+  — type-system enforcement of lock-before-access.
 - **Observer cap table capacity.** `Observer::cap_table` is a raw pointer to the
   flat entry array (D8), but the table capacity is not stored on the Observer.
   The dispatch hot path needs capacity for bounds-checking handle resolution.
@@ -5066,6 +5132,13 @@ routine vs. branch within exception.S (implementation detail).
   read-registers). TPIDR_EL1 as per-core state pointer (standard ARM64
   convention). x0–x3 saved unconditionally (RegisterState always correct),
   restored conditionally (fast-path pass-through per D47).
+- `075-global-arena-organization.md` — reasoning for D75: five arenas + Space
+  manager in a global KernelState struct. Lock<T> refactored to own data via
+  UnsafeCell (A1 type-system enforcement). Parameter threading rejected (pushes
+  leaf concern into interfaces). Five separate statics rejected (scatters change
+  points). Per-core copies not foreclosed but would require reopening D53.
+  Consistent with "push complexity to the leaves" and "isolate uncertain
+  decisions behind interfaces."
 
 ---
 

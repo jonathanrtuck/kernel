@@ -4,11 +4,15 @@
 //! Lock ordering: Arena<Field> < Arena<Observer> < Arena<Pulsar>.
 //! Arena<Space> and Arena<Time> are unordered (no cross-arena ops).
 //!
-//! The Lock<T> type wraps a value with mutual exclusion. The ordering
-//! is checked at runtime via per-core tracking of the highest held
-//! lock order. Attempting to acquire a lock out of order panics in
-//! debug builds — catching deadlocks at the point of violation rather
-//! than as mysterious hangs.
+//! D75: Lock<T> owns its data via UnsafeCell<T>. LockGuard provides
+//! DerefMut<Target=T> — the type system enforces lock-before-access.
+//! A1: ownership maps to resource lifecycle; the lock-before-access
+//! invariant is a trust boundary that Rust can and should enforce.
+//!
+//! The ordering is checked at runtime via per-core tracking of the
+//! highest held lock order. Attempting to acquire a lock out of order
+//! panics in debug builds — catching deadlocks at the point of
+//! violation rather than as mysterious hangs.
 //!
 //! A1: Rust's ownership through LockGuard<T> prevents data races.
 //! D53: the ordering prevents deadlocks. Together they give safe
@@ -60,9 +64,13 @@ impl LockOrder {
 
 /// A spinlock protecting a value of type T, with D53 ordering.
 ///
-/// Callers acquire the lock to get a `LockGuard<T>` providing
-/// exclusive access. The lock tracks its position in the D53
-/// ordering; debug builds verify ordering is respected.
+/// Lock<T> owns its data (D75). Callers acquire the lock to get a
+/// `LockGuard<T>` providing exclusive `DerefMut` access. The type
+/// system enforces lock-before-access — accessing T without holding
+/// the lock is impossible through safe code.
+///
+/// The lock tracks its position in the D53 ordering; debug builds
+/// verify ordering is respected.
 ///
 /// Philosophy: "isolate uncertain decisions behind interfaces." The
 /// ordering enforcement mechanism (runtime assertions now, potentially
@@ -71,11 +79,12 @@ impl LockOrder {
 /// without affecting them.
 ///
 /// Implementation lives in frame/ because the spinlock internals
-/// (AtomicBool, WFE-based spinning, interrupt masking) require unsafe.
+/// (AtomicBool, WFE-based spinning, interrupt masking, UnsafeCell)
+/// require unsafe.
 pub struct Lock<T> {
     locked: AtomicBool,
     order: LockOrder,
-    _data: core::marker::PhantomData<T>,
+    data: core::cell::UnsafeCell<T>,
 }
 
 // SAFETY: Lock<T> is Send + Sync if T is Send — the lock provides
@@ -84,16 +93,22 @@ unsafe impl<T: Send> Send for Lock<T> {}
 unsafe impl<T: Send> Sync for Lock<T> {}
 
 impl<T> Lock<T> {
-    /// Create a new lock with the given D53 ordering.
-    pub const fn new(order: LockOrder) -> Lock<T> {
+    /// Create a new lock wrapping `value` with the given D53 ordering.
+    ///
+    /// D75: Lock owns its data. The value is only accessible through
+    /// the LockGuard returned by `acquire`.
+    pub const fn new(order: LockOrder, value: T) -> Lock<T> {
         Lock {
             locked: AtomicBool::new(false),
             order,
-            _data: core::marker::PhantomData,
+            data: core::cell::UnsafeCell::new(value),
         }
     }
 
     /// Acquire the lock, returning a guard that releases on drop.
+    ///
+    /// The guard provides `DerefMut<Target=T>` — exclusive access to
+    /// the protected data for the duration the guard is held (D75).
     ///
     /// **D53 ordering enforced:** in debug builds, panics if an ordered
     /// lock is acquired out of sequence. In release builds, the check
@@ -134,12 +149,9 @@ impl<T> Lock<T> {
 /// to the Lock — Rust's borrow checker ensures the lock outlives
 /// the guard.
 ///
-/// The guard intentionally does NOT implement Deref/DerefMut to T
-/// here — the actual data access pattern depends on whether Lock
-/// wraps an Arena<T> directly (the data lives in slab pages, not
-/// inline in the lock). The guard proves "you hold the lock"; the
-/// arena's methods prove "you have a valid object reference." These
-/// are separate concerns.
+/// D75: the guard provides DerefMut<Target=T>. The type system
+/// enforces that the lock is held before data is accessed — no
+/// convention gap.
 pub struct LockGuard<'a, T> {
     lock: &'a Lock<T>,
 }
@@ -147,6 +159,25 @@ pub struct LockGuard<'a, T> {
 impl<T> Drop for LockGuard<'_, T> {
     fn drop(&mut self) {
         self.lock.locked.store(false, Ordering::Release);
+    }
+}
+
+impl<T> core::ops::Deref for LockGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        // SAFETY: the lock is held (we are inside a LockGuard) so we
+        // have exclusive access. No other thread can hold the lock
+        // simultaneously (SpinLock mutual exclusion).
+        unsafe { &*self.lock.data.get() }
+    }
+}
+
+impl<T> core::ops::DerefMut for LockGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: same as Deref — exclusive access guaranteed by the
+        // held lock. &mut self ensures no aliasing of the guard itself.
+        unsafe { &mut *self.lock.data.get() }
     }
 }
 
@@ -178,23 +209,53 @@ mod tests {
 
     #[test]
     fn acquire_and_release() {
-        let lock: Lock<u32> = Lock::new(LockOrder::Field);
+        let lock: Lock<u32> = Lock::new(LockOrder::Field, 0);
 
         {
             let _guard = lock.acquire();
-            // Lock is held — a second acquire on the same thread would
-            // deadlock (no test for that — it's the ordering check's job).
         }
 
-        // Guard dropped — lock released. Re-acquire should succeed.
         let _guard2 = lock.acquire();
     }
 
     #[test]
     fn guard_reports_order() {
-        let lock: Lock<u32> = Lock::new(LockOrder::Observer);
+        let lock: Lock<u32> = Lock::new(LockOrder::Observer, 0);
         let guard = lock.acquire();
 
         assert_eq!(guard.order(), LockOrder::Observer);
+    }
+
+    #[test]
+    fn guard_provides_deref_access() {
+        let lock: Lock<u32> = Lock::new(LockOrder::Field, 42);
+        let guard = lock.acquire();
+
+        assert_eq!(*guard, 42);
+    }
+
+    #[test]
+    fn guard_provides_deref_mut_access() {
+        let lock: Lock<u32> = Lock::new(LockOrder::Field, 0);
+        let mut guard = lock.acquire();
+
+        *guard = 99;
+
+        assert_eq!(*guard, 99);
+    }
+
+    #[test]
+    fn mutation_visible_across_acquire_cycles() {
+        let lock: Lock<u32> = Lock::new(LockOrder::Field, 10);
+
+        {
+            let mut guard = lock.acquire();
+
+            *guard = 20;
+        }
+
+        let guard = lock.acquire();
+
+        assert_eq!(*guard, 20);
     }
 }
