@@ -31,6 +31,12 @@ pub fn entry_ref<'a>(entries: NonNull<Entry>, capacity: u32, index: u32) -> Opti
         return None;
     }
 
+    // Spectre v1: the branch above may be speculatively bypassed with a
+    // mispredicted index, allowing out-of-bounds reads. SB ensures the
+    // branch resolves before the dependent pointer dereference executes.
+    #[cfg(any(target_os = "none", test))]
+    crate::frame::arch::speculation::speculation_barrier();
+
     // SAFETY: index < capacity; pointer validity is a structural invariant
     // of the Table that owns this entries array. The Table was constructed
     // with a valid allocation of at least `capacity` Entry elements.
@@ -53,6 +59,11 @@ pub fn entry_mut<'a>(entries: NonNull<Entry>, capacity: u32, index: u32) -> Opti
     if index >= capacity {
         return None;
     }
+
+    // Spectre v1: same barrier as entry_ref — prevent speculative
+    // dereference past the bounds check with a mispredicted index.
+    #[cfg(any(target_os = "none", test))]
+    crate::frame::arch::speculation::speculation_barrier();
 
     // SAFETY: index < capacity; pointer validity is a structural invariant
     // of the Table that owns this entries array. The Table was constructed

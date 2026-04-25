@@ -6,22 +6,23 @@ side effect.
 
 ## Modules
 
-| File                | What it owns                                       |
-| ------------------- | -------------------------------------------------- |
-| `boot.S`            | EL2→EL1 drop, BSS clear, stack setup, jump to Rust |
-| `secondary_entry.S` | Secondary core entry (PSCI CPU_ON target)          |
-| `cpu.rs`            | Core discovery, MPIDR, multicore bring-up          |
-| `entropy.rs`        | Hardware RNG (RNDR/RNDRRS)                         |
-| `exception.rs`      | Vector table, exception entry/exit                 |
-| `gic.rs`            | GICv3 distributor + redistributor + CPU interface  |
-| `mmio.rs`           | Volatile MMIO read/write primitives                |
-| `mmu.rs`            | Page table construction, TTBR, TLB invalidation    |
-| `platform.rs`       | Device base addresses, RAM layout                  |
-| `psci.rs`           | PSCI calls (CPU_ON, CPU_OFF, SYSTEM_RESET)         |
-| `register_state.rs` | Observer register save/restore layout (816 bytes)  |
-| `serial.rs`         | UART driver (PL011)                                |
-| `sysreg.rs`         | System register accessors (MRS/MSR wrappers)       |
-| `timer.rs`          | Generic timer (CNTFRQ, CNTVCT, CNTV_CVAL/CTL)      |
+| File                | What it owns                                          |
+| ------------------- | ----------------------------------------------------- |
+| `boot.S`            | EL2→EL1 drop, BSS clear, stack setup, jump to Rust    |
+| `secondary_entry.S` | Secondary core entry (PSCI CPU_ON target)             |
+| `cpu.rs`            | Core discovery, MPIDR, multicore bring-up             |
+| `entropy.rs`        | Hardware RNG (RNDR/RNDRRS)                            |
+| `exception.rs`      | Vector table, exception entry/exit                    |
+| `gic.rs`            | GICv3 distributor + redistributor + CPU interface     |
+| `mmio.rs`           | Volatile MMIO read/write primitives                   |
+| `mmu.rs`            | Page table construction, TTBR, TLB invalidation       |
+| `platform.rs`       | Device base addresses, RAM layout                     |
+| `psci.rs`           | PSCI calls (CPU_ON, CPU_OFF, SYSTEM_RESET)            |
+| `register_state.rs` | Observer register save/restore layout (816 bytes)     |
+| `serial.rs`         | UART driver (PL011)                                   |
+| `speculation.rs`    | Spectre/Meltdown detection, SB barrier, porting guide |
+| `sysreg.rs`         | System register accessors (MRS/MSR wrappers)          |
+| `timer.rs`          | Generic timer (CNTFRQ, CNTVCT, CNTV_CVAL/CTL)         |
 
 ## Inline assembly rules
 

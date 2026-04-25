@@ -242,6 +242,18 @@ fn configure_and_enable() {
     // The PARange field encodes the supported PA width (32, 36, 40, 42, 44,
     // 48, or 52 bits). We use this directly as TCR_EL1.IPS — the encodings
     // are identical by design.
+    //
+    // SPECULATION MITIGATION PLUG POINT — E0PD (Meltdown)
+    //
+    // When the kernel moves to a TTBR0 (user) / TTBR1 (kernel) split,
+    // set TCR_EL1.E0PD1 (bit 56) to prevent EL0 speculative accesses to
+    // TTBR1-mapped kernel pages. This is the hardware Meltdown mitigation
+    // (FEAT_E0PD, ARMv8.5+). With E0PD, full KPTI is unnecessary.
+    //
+    // On pre-ARMv8.5 hardware without E0PD, a porter must implement KPTI:
+    // separate user/kernel page table configurations with a TTBR swap on
+    // every exception entry/exit (trampoline in exception.S, table
+    // management here). See speculation.rs for the full porting guide.
     let pa_range = sysreg::id_aa64mmfr0_el1() & 0xF;
     #[allow(clippy::identity_op)]
     #[rustfmt::skip]

@@ -88,6 +88,18 @@ pub fn init() {
 /// `source` identifies which of the 16 vector entries was taken (0–15).
 /// The assembly performs full context save/restore around this call, so
 /// returning normally resumes the interrupted code via `eret`.
+///
+/// SPECULATION MITIGATION PLUG POINT — BHB clearing (Spectre-BHB)
+///
+/// On hardware without CSV3 or CLRBHB, a BHB clearing sequence (~32
+/// unconditional branches) must execute in the `exception.S` vector
+/// preamble BEFORE this function is called. The Branch History Buffer
+/// can otherwise steer kernel indirect branches using attacker-trained
+/// EL0 history.
+///
+/// On this hardware (Apple Silicon, FEAT_CSV3): not needed. CSV3
+/// guarantees speculative reads from another context cannot be disclosed.
+/// See `speculation.rs` for the full porting guide.
 #[unsafe(no_mangle)]
 extern "C" fn exception_handler(frame: &mut TrapFrame, source: u64) {
     match source {

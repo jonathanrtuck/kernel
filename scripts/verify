@@ -54,3 +54,14 @@ if [ "$UNSAFE_OUTSIDE" -gt 0 ]; then
     fail "framekernel violation: unsafe block outside frame/"
 fi
 pass "framekernel boundary (all unsafe in frame/)"
+
+# g: Speculation barriers — files with user-provided-index dereferences
+# must contain speculation_barrier() (Spectre v1). Add files here as new
+# frame/ modules gain user-derived index → raw pointer paths.
+SPEC_FILES="src/frame/capabilities.rs"
+for f in $SPEC_FILES; do
+    if ! grep -q 'speculation_barrier' "$f"; then
+        fail "speculation barrier missing in $f (Spectre v1)"
+    fi
+done
+pass "speculation barriers present"

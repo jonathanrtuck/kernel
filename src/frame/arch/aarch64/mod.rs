@@ -16,6 +16,7 @@ pub mod platform;
 pub mod psci;
 pub mod register_state;
 pub mod serial;
+pub mod speculation;
 mod sysreg;
 pub mod timer;
 

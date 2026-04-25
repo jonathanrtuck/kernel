@@ -176,7 +176,10 @@ sysreg_read_const!(mpidr_el1, "mpidr_el1");
 sysreg_read_const!(current_el, "CurrentEL");
 sysreg_read_const!(cntfrq_el0, "cntfrq_el0");
 sysreg_read_const!(id_aa64mmfr0_el1, "id_aa64mmfr0_el1");
+sysreg_read_const!(id_aa64mmfr2_el1, "id_aa64mmfr2_el1");
+sysreg_read_const!(id_aa64pfr0_el1, "id_aa64pfr0_el1");
 sysreg_read_const!(id_aa64isar0_el1, "id_aa64isar0_el1");
+sysreg_read_const!(id_aa64isar1_el1, "id_aa64isar1_el1");
 
 // ---------------------------------------------------------------------------
 // Exception handling
