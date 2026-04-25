@@ -168,6 +168,34 @@ pub enum DispatchResult {
 // ── CoreState methods ──────────────────────────────────────────────
 
 impl<S: Scheduler> CoreState<S> {
+    /// Map a CapError to the corresponding SyscallError (D49, D80).
+    ///
+    /// Used by dispatch_ipc to translate capability resolution failures
+    /// into error codes that userspace receives via carry flag + x0.
+    #[cfg(any(target_os = "none", test))]
+    fn cap_error_to_syscall_error(
+        cap_err: crate::capability::CapError,
+    ) -> crate::syscall::SyscallError {
+        match cap_err {
+            crate::capability::CapError::InvalidHandle
+            | crate::capability::CapError::SlotTagMismatch => {
+                crate::syscall::SyscallError::InvalidCap
+            }
+            crate::capability::CapError::StaleGeneration => crate::syscall::SyscallError::StaleCap,
+            crate::capability::CapError::InsufficientRights => {
+                crate::syscall::SyscallError::NoRight
+            }
+            crate::capability::CapError::TypeMismatch => crate::syscall::SyscallError::WrongType,
+            crate::capability::CapError::TableFull => crate::syscall::SyscallError::TableFull,
+            crate::capability::CapError::SendOnceConsumed => {
+                crate::syscall::SyscallError::AlreadyConsumed
+            }
+            crate::capability::CapError::CloneForbidden => {
+                crate::syscall::SyscallError::CloneForbidden
+            }
+        }
+    }
+
     /// Write a message to an Observer's saved registers and clear its IPC carry flag.
     ///
     /// D76: slow-path delivery — writes all x0–x7 registers.
@@ -206,6 +234,7 @@ impl<S: Scheduler> CoreState<S> {
     /// D79: scheduling decision matrix — for each (operation x outcome) pair,
     /// the method performs the correct state transitions, scheduler calls,
     /// register writes, and returns the correct DispatchResult.
+    #[cfg(any(target_os = "none", test))]
     pub fn dispatch_ipc(
         &mut self,
         operation: crate::syscall::IpcOperation,
@@ -228,28 +257,357 @@ impl<S: Scheduler> CoreState<S> {
         // ── Cap resolution and IPC dispatch ──────────────────────────
         //
         // D77: 8-step cap resolution sequence. D76: pull IPC registers.
-        // TODO: Full cap resolution requires:
-        //   1. read_ipc_registers(sender_ptr) for handle + message data
-        //   2. Construct Table view from Observer's cap_table + cap_table_capacity
-        //   3. table.resolve(handle) — check rights (SEND/RECEIVE), generation, type
-        //   4. Look up target Field in KernelState.fields arena
-        //   5. Construct Message from registers + badge from cap entry
-        //   6. Call the communication function
-        //   7. Handle outcome per the D79 matrix (below)
-        //   8. On error: write_ipc_error(sender_ptr, error), Resume(sender)
-        //
-        // The matrix logic below handles step 7. Steps 1-6 are stubbed
-        // with a TODO because they require the full cap resolution protocol
-        // and arena interaction. The scheduling decisions, state transitions,
-        // and register writes are complete and tested.
+        // 1. read_ipc_registers(sender_ptr) for handle + message data
+        // 2. Read cap table from Observer (framekernel helper)
+        // 3. resolve_cap_entry(handle) — check bounds, slot tag, occupancy
+        // 4. Look up target Field in KernelState.fields arena
+        // 5. Check generation (D67), rights (D52), type (Field)
+        // 6. Construct Message from registers + badge from cap entry
+        // 7. Call the communication function
+        // 8. Handle outcome per the D79 matrix
+        // On error: write_ipc_error(sender_ptr, error), Resume(sender)
 
-        // Placeholder: until cap resolution is wired, fall through to
-        // schedule_next. The matrix dispatch methods below are tested
-        // independently via dispatch_send_outcome, dispatch_receive_outcome,
-        // dispatch_call_outcome, dispatch_reply_recv_outcome.
-        let _ = kernel_state;
+        // Step 1: read IPC registers from sender's saved state.
+        let ipc_regs = crate::frame::cores::read_ipc_registers(sender_ptr);
 
-        self.schedule_next()
+        // Step 2: read cap table pointer and capacity from the Observer.
+        let (cap_entries, cap_capacity) = crate::frame::cores::observer_cap_table(sender_ptr);
+
+        // Step 3: resolve the primary handle (x5) to a cap entry.
+        let raw_handle = ipc_regs.handle_or_badge;
+        let entry =
+            match crate::capability::resolve_cap_entry(raw_handle, cap_entries, cap_capacity) {
+                Ok(e) => e,
+                Err(cap_err) => {
+                    crate::frame::cores::write_ipc_error(
+                        sender_ptr,
+                        Self::cap_error_to_syscall_error(cap_err),
+                    );
+                    return DispatchResult::Resume(sender_ptr);
+                }
+            };
+
+        // Extract object info from the resolved entry.
+        let (object_type, object_id) = match entry.object {
+            Some(pair) => pair,
+            None => {
+                crate::frame::cores::write_ipc_error(
+                    sender_ptr,
+                    crate::syscall::SyscallError::InvalidCap,
+                );
+                return DispatchResult::Resume(sender_ptr);
+            }
+        };
+
+        // Check that the cap targets a Field.
+        if object_type != crate::capability::ObjectType::Field {
+            crate::frame::cores::write_ipc_error(
+                sender_ptr,
+                crate::syscall::SyscallError::WrongType,
+            );
+            return DispatchResult::Resume(sender_ptr);
+        }
+
+        // Check rights based on the operation.
+        let required_rights = match operation {
+            crate::syscall::IpcOperation::Send | crate::syscall::IpcOperation::Call => {
+                crate::capability::Rights::SEND
+            }
+            crate::syscall::IpcOperation::Receive => crate::capability::Rights::RECEIVE,
+            crate::syscall::IpcOperation::ReplyRecv => {
+                // ReplyRecv: x5 handle is the reply field (needs SEND).
+                // Recv field handle is in x7 — checked separately below.
+                crate::capability::Rights::SEND
+            }
+            crate::syscall::IpcOperation::Yield => unreachable!("Yield handled above"),
+        };
+
+        if !entry.check_rights(required_rights) {
+            crate::frame::cores::write_ipc_error(sender_ptr, crate::syscall::SyscallError::NoRight);
+            return DispatchResult::Resume(sender_ptr);
+        }
+
+        // Step 4-5: acquire fields lock, look up the Field, check generation.
+        let mut fields_guard = kernel_state.fields.acquire();
+
+        let target_field = match fields_guard.get_mut(object_id) {
+            Some(f) => f,
+            None => {
+                drop(fields_guard);
+                crate::frame::cores::write_ipc_error(
+                    sender_ptr,
+                    crate::syscall::SyscallError::InvalidCap,
+                );
+                return DispatchResult::Resume(sender_ptr);
+            }
+        };
+
+        // D67: generation check.
+        let live_gen = target_field.generation.load(Ordering::Acquire);
+
+        if entry.stored_generation != live_gen {
+            drop(fields_guard);
+            crate::frame::cores::write_ipc_error(
+                sender_ptr,
+                crate::syscall::SyscallError::StaleCap,
+            );
+            return DispatchResult::Resume(sender_ptr);
+        }
+
+        let badge = entry.badge;
+
+        // ── Dispatch per operation ──────────────────────────────────
+        match operation {
+            crate::syscall::IpcOperation::Send => {
+                // Step 6: construct Message from IPC registers.
+                let message = crate::field::Message {
+                    data: ipc_regs.data,
+                    label: ipc_regs.label,
+                    badge,
+                    // Cap transfer not yet wired — treat u64::MAX as None.
+                    user_cap: None,
+                    reply_cap: None,
+                };
+
+                // Step 7: call send.
+                let outcome = match crate::communication::send(target_field, message) {
+                    Ok(outcome) => outcome,
+                    Err(crate::field::FieldError::QueueFull) => {
+                        drop(fields_guard);
+                        crate::frame::cores::write_ipc_error(
+                            sender_ptr,
+                            crate::syscall::SyscallError::QueueFull,
+                        );
+                        return DispatchResult::Resume(sender_ptr);
+                    }
+                    Err(_) => {
+                        drop(fields_guard);
+                        crate::frame::cores::write_ipc_error(
+                            sender_ptr,
+                            crate::syscall::SyscallError::QueueFull,
+                        );
+                        return DispatchResult::Resume(sender_ptr);
+                    }
+                };
+
+                drop(fields_guard);
+
+                // Step 8: dispatch outcome per D79 matrix.
+                self.dispatch_send_outcome(sender_ptr, outcome)
+            }
+
+            crate::syscall::IpcOperation::Receive => {
+                // Get a NonNull<Field> for the WaitEntry.
+                let field_ptr = NonNull::from(&*target_field);
+
+                // Set up WaitEntry in the Observer's wait_state.
+                let wait_entry = crate::frame::cores::observer_prepare_wait(sender_ptr, field_ptr);
+
+                // Call receive.
+                let outcome = crate::communication::receive(target_field, wait_entry);
+
+                // If received (not blocking), clear the wait_state.
+                let is_received =
+                    matches!(outcome, crate::communication::ReceiveOutcome::Received(_));
+
+                if is_received {
+                    crate::frame::cores::observer_clear_wait(sender_ptr);
+                }
+
+                drop(fields_guard);
+
+                // Dispatch outcome per D79 matrix.
+                self.dispatch_receive_outcome(sender_ptr, outcome)
+            }
+
+            crate::syscall::IpcOperation::Call => {
+                // Construct Message from IPC registers.
+                let message = crate::field::Message {
+                    data: ipc_regs.data,
+                    label: ipc_regs.label,
+                    badge,
+                    user_cap: None,
+                    reply_cap: None,
+                };
+
+                // reply_badge from x7 (D65).
+                let reply_badge = crate::capability::Badge(ipc_regs.reply_info);
+
+                let outcome = match crate::communication::call(target_field, message, reply_badge) {
+                    Ok(outcome) => outcome,
+                    Err(crate::field::FieldError::QueueFull) => {
+                        drop(fields_guard);
+                        crate::frame::cores::write_ipc_error(
+                            sender_ptr,
+                            crate::syscall::SyscallError::QueueFull,
+                        );
+                        return DispatchResult::Resume(sender_ptr);
+                    }
+                    Err(_) => {
+                        drop(fields_guard);
+                        crate::frame::cores::write_ipc_error(
+                            sender_ptr,
+                            crate::syscall::SyscallError::QueueFull,
+                        );
+                        return DispatchResult::Resume(sender_ptr);
+                    }
+                };
+
+                drop(fields_guard);
+
+                // Pass label and badge for fast-path metadata write.
+                self.dispatch_call_outcome_with_metadata(
+                    sender_ptr,
+                    outcome,
+                    ipc_regs.label,
+                    badge.0,
+                )
+            }
+
+            crate::syscall::IpcOperation::ReplyRecv => {
+                // ReplyRecv needs TWO fields:
+                // - reply_field: from x5 handle (already resolved above as target_field)
+                // - recv_field: from x7 (reply_info) handle
+                //
+                // The reply_field is what we resolved above. Now resolve the
+                // recv_field from x7.
+                let recv_raw_handle = ipc_regs.reply_info;
+                let recv_entry = match crate::capability::resolve_cap_entry(
+                    recv_raw_handle,
+                    cap_entries,
+                    cap_capacity,
+                ) {
+                    Ok(e) => e,
+                    Err(cap_err) => {
+                        drop(fields_guard);
+                        crate::frame::cores::write_ipc_error(
+                            sender_ptr,
+                            Self::cap_error_to_syscall_error(cap_err),
+                        );
+                        return DispatchResult::Resume(sender_ptr);
+                    }
+                };
+
+                // Check recv entry is a Field with RECEIVE right.
+                let (recv_type, recv_id) = match recv_entry.object {
+                    Some(pair) => pair,
+                    None => {
+                        drop(fields_guard);
+                        crate::frame::cores::write_ipc_error(
+                            sender_ptr,
+                            crate::syscall::SyscallError::InvalidCap,
+                        );
+                        return DispatchResult::Resume(sender_ptr);
+                    }
+                };
+
+                if recv_type != crate::capability::ObjectType::Field {
+                    drop(fields_guard);
+                    crate::frame::cores::write_ipc_error(
+                        sender_ptr,
+                        crate::syscall::SyscallError::WrongType,
+                    );
+                    return DispatchResult::Resume(sender_ptr);
+                }
+
+                if !recv_entry.check_rights(crate::capability::Rights::RECEIVE) {
+                    drop(fields_guard);
+                    crate::frame::cores::write_ipc_error(
+                        sender_ptr,
+                        crate::syscall::SyscallError::NoRight,
+                    );
+                    return DispatchResult::Resume(sender_ptr);
+                }
+
+                // reply_field is target_field (already resolved, from x5).
+                // We need a separate mutable reference to recv_field.
+                // If they're the same ObjectId, that's a protocol error (you
+                // can't reply and receive on the same field).
+                if object_id == recv_id {
+                    drop(fields_guard);
+                    crate::frame::cores::write_ipc_error(
+                        sender_ptr,
+                        crate::syscall::SyscallError::InvalidCap,
+                    );
+                    return DispatchResult::Resume(sender_ptr);
+                }
+
+                // Check recv_field generation.
+                let recv_field = match fields_guard.get_mut(recv_id) {
+                    Some(f) => f,
+                    None => {
+                        drop(fields_guard);
+                        crate::frame::cores::write_ipc_error(
+                            sender_ptr,
+                            crate::syscall::SyscallError::InvalidCap,
+                        );
+                        return DispatchResult::Resume(sender_ptr);
+                    }
+                };
+
+                let recv_live_gen = recv_field.generation.load(Ordering::Acquire);
+
+                if recv_entry.stored_generation != recv_live_gen {
+                    drop(fields_guard);
+                    crate::frame::cores::write_ipc_error(
+                        sender_ptr,
+                        crate::syscall::SyscallError::StaleCap,
+                    );
+                    return DispatchResult::Resume(sender_ptr);
+                }
+
+                // Get NonNull<Field> for the recv_field WaitEntry.
+                let recv_field_ptr = NonNull::from(&*recv_field);
+
+                // Set up WaitEntry for potential blocking on recv_field.
+                let wait_entry =
+                    crate::frame::cores::observer_prepare_wait(sender_ptr, recv_field_ptr);
+
+                // Construct reply message.
+                let reply_message = crate::field::Message {
+                    data: ipc_regs.data,
+                    label: ipc_regs.label,
+                    badge,
+                    user_cap: None,
+                    reply_cap: None,
+                };
+
+                // We need two &mut Field references simultaneously.
+                // Arena::get_mut borrows the entire arena mutably, so we
+                // cannot hold two &mut references from it. Instead, we obtain
+                // NonNull pointers to each field (from &mut references, which
+                // is safe) and pass them to a frame/ helper that performs the
+                // actual dereference. The two ObjectIds are different (checked
+                // above), so no aliasing occurs.
+                let reply_field_ref = fields_guard.get_mut(object_id).unwrap();
+                let reply_field_ptr = NonNull::from(&mut *reply_field_ref);
+                let recv_field_ref = fields_guard.get_mut(recv_id).unwrap();
+                let recv_field_ptr = NonNull::from(&mut *recv_field_ref);
+
+                let outcome = crate::frame::cores::call_reply_recv(
+                    reply_field_ptr,
+                    recv_field_ptr,
+                    reply_message,
+                    wait_entry,
+                );
+
+                // If received (not blocking), clear the wait_state.
+                let is_received = matches!(
+                    outcome.receive_outcome,
+                    crate::communication::ReceiveOutcome::Received(_)
+                );
+
+                if is_received {
+                    crate::frame::cores::observer_clear_wait(sender_ptr);
+                }
+
+                drop(fields_guard);
+
+                self.dispatch_reply_recv_outcome(sender_ptr, outcome)
+            }
+
+            crate::syscall::IpcOperation::Yield => unreachable!("Yield handled above"),
+        }
     }
 
     #[cfg(any(target_os = "none", test))]
@@ -383,6 +741,78 @@ impl<S: Scheduler> CoreState<S> {
                 Self::deliver_message(receiver_ptr, &message);
 
                 // TODO: unblock receiver via arena access.
+                self.scheduler.enqueue(receiver_ptr);
+                self.schedule_next()
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "none", test))]
+    /// D79 Row 5-7 with metadata: Handle Call outcome with label and badge
+    /// from the resolved cap entry.
+    ///
+    /// Same as dispatch_call_outcome but passes the actual label and badge
+    /// values for the fast-path metadata write (D50, D76), instead of zeros.
+    pub fn dispatch_call_outcome_with_metadata(
+        &mut self,
+        sender_ptr: NonNull<Observer>,
+        outcome: crate::communication::CallOutcome,
+        label: u64,
+        badge: u64,
+    ) -> DispatchResult {
+        // D16: caller always blocks on Call, regardless of outcome.
+
+        match outcome {
+            crate::communication::CallOutcome::Enqueued => {
+                // Row 5: message in queue, no receiver woken. Caller blocks.
+                let _ = crate::frame::cores::observer_set_blocked(sender_ptr);
+                self.scheduler.dequeue(sender_ptr);
+                self.schedule_next()
+            }
+            crate::communication::CallOutcome::DirectSwitch(receiver_ptr) => {
+                // Row 6: D50 fast path. Consult scheduler.
+                if self.scheduler.should_switch_to(receiver_ptr) {
+                    // Approved: direct-switch to receiver.
+                    // D74: x0-x3 pass through in physical registers.
+                    // Write only x4-x7 metadata with actual values.
+                    let user_cap_slot = u64::MAX; // D50: no user cap (0-cap gate)
+                    let reply_cap_slot = u64::MAX; // TODO: install reply cap
+
+                    crate::frame::cores::write_metadata_to_registers(
+                        receiver_ptr,
+                        label,
+                        badge,
+                        user_cap_slot,
+                        reply_cap_slot,
+                    );
+
+                    // Dequeue sender (it's blocking). Receiver bypasses queue.
+                    let _ = crate::frame::cores::observer_set_blocked(sender_ptr);
+                    self.scheduler.dequeue(sender_ptr);
+
+                    // Unblock receiver (D39: Blocked -> Runnable).
+                    let _ = crate::frame::cores::observer_unblock(receiver_ptr);
+
+                    DispatchResult::ResumeFastPath(receiver_ptr)
+                } else {
+                    // Denied: fall back to slow path.
+                    let _ = crate::frame::cores::observer_set_blocked(sender_ptr);
+                    self.scheduler.dequeue(sender_ptr);
+
+                    // Unblock receiver and enqueue it.
+                    let _ = crate::frame::cores::observer_unblock(receiver_ptr);
+                    self.scheduler.enqueue(receiver_ptr);
+                    self.schedule_next()
+                }
+            }
+            crate::communication::CallOutcome::WokeReceiverSlowPath(receiver_ptr, message) => {
+                // Row 7: waiter found but user cap forces slow path.
+                let _ = crate::frame::cores::observer_set_blocked(sender_ptr);
+                self.scheduler.dequeue(sender_ptr);
+                Self::deliver_message(receiver_ptr, &message);
+
+                // Unblock receiver and enqueue it.
+                let _ = crate::frame::cores::observer_unblock(receiver_ptr);
                 self.scheduler.enqueue(receiver_ptr);
                 self.schedule_next()
             }
@@ -2150,7 +2580,7 @@ mod tests {
         );
 
         // Both fields must have received messages.
-        let mut fields = ks.fields.acquire();
+        let fields = ks.fields.acquire();
 
         assert_eq!(
             fields.get(fid_a).unwrap().queue_length,
