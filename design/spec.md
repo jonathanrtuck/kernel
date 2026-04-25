@@ -4376,6 +4376,150 @@ initialization ordering details (boot sequence).
   kernel-wide shared resource doesn't fit the KernelState bundle pattern.
 - **Journal:** `journal/075-global-arena-organization.md`.
 
+### D76 — Dispatch entry contract: pull registers, push results, three-variant DispatchResult
+
+The frame/ → safe-code boundary at exception entry follows a pull/push split.
+Safe dispatch reads registers lazily from RegisterState via frame/ helpers
+(pull) and writes syscall results back via frame/ helpers (push) before
+returning DispatchResult. DispatchResult carries only the scheduling decision —
+frame/ gets a uniform restore path.
+
+**Register access model: Pull.** Registers are already saved to RegisterState by
+EL0 exception entry assembly (D74). Safe dispatch reads them via
+`read_ipc_registers` / `read_typed_registers` only when needed. D47: IPC
+dispatches from ESR_EL1 alone before reading GPRs. D48: Yield reads zero GPRs.
+D50: fast-path avoids reading x0–x3 from the sender.
+
+**DispatchResult:** Three variants. `Resume(Observer)` loads all registers.
+`ResumeFastPath(Observer)` skips x0–x3 (D50/D74 pass-through). `Idle` enters
+WFI.
+
+**Write helpers (frame/):** `write_ipc_error` (carry + x0), `clear_ipc_carry`,
+`write_typed_result` (x0), `write_message_to_registers` (x0–x7, slow path),
+`write_metadata_to_registers` (x4–x7, fast path).
+
+**handle_timer parameter:** `current_ticks: u64` — pushed by frame/ as a single
+consistent snapshot. The timer counter is volatile; unlike stable RegisterState,
+it must be pushed.
+
+Does NOT settle: ~~cap resolution protocol~~ (D77), ~~global state
+organization~~ (D82), ~~error/fault delivery paths~~ (D80), fast-path assembly
+as separate routine vs. branch within exception.S.
+
+- **Rests on:** D1 (per-core hot path), D7 (IPC vs typed split), D47 (register
+  layout, ESR-only dispatch), D49 (error signaling encoding), D50 (fast-path
+  conditions), D74 (direct-to-RegisterState on EL0), A2 (ARM64 SPSR carry flag,
+  ESR_EL1 syndrome), A4 (purely reactive — every exception ends with a
+  scheduling decision).
+- **Status:** settled. Revisit if D47 is revised (register layout changes alter
+  helper interfaces), if D50 is revised (fast-path condition changes may remove
+  the ResumeFastPath variant), or if D74 is revised (save model change would
+  restructure the pull interface).
+- **Journal:** `journal/076-dispatch-entry-contract.md`.
+
+### D78 — IPC message ownership: explicit transfer through return types
+
+Message ownership at each IPC stage is tracked through return types, not
+convention. `send()` consumes the Message by value. On `WokeReceiver`, the
+message is returned in the enum variant for dispatch to deliver to the
+receiver's saved registers. On `Enqueued`, ownership transfers into the queue.
+
+`call()` has three outcomes. `DirectSwitch` (D50 fast path) carries only the
+observer pointer — no Message struct needed because x0–x3 pass through in
+physical registers (D74) and the dispatch layer writes only x4–x7 metadata.
+`WokeReceiverSlowPath` (waiter present, user cap in message) returns the
+observer and message for slow-path delivery with cap transfer. `Enqueued` means
+the message entered the queue.
+
+`reply_recv()` returns `ReplyRecvOutcome` containing both the reply-side
+delivery (if a client was waiting on the reply field: observer + message) and
+the receive-side outcome (dequeued message or blocked). Previously the reply
+side discarded the woken client pointer.
+
+Behavioral change from pre-D78: `call()` with a user cap now pops the waiter
+when present (returning `WokeReceiverSlowPath`) instead of leaving the waiter
+stranded and always enqueueing. The receiver should be woken regardless of cap
+presence — the cap only forces slow-path delivery.
+
+Does NOT settle: dispatch_ipc implementation body (future layer), cap
+installation during slow-path delivery (D8 downstream), reply cap creation
+mechanics.
+
+- **Rests on:** D13 (queued fields — message is what the queue holds; direct
+  delivery when waiter present), D16 (reply via send-once — reply_recv
+  reply-side delivery), D28 (fixed-size message format — Message is the
+  ownership unit), D50 (fast-path conditions — DirectSwitch vs slow path; 0-cap
+  gate determines whether Message struct is needed), D74 (register pass-through
+  — x0–x3 skip on fast path eliminates need for Message struct on DirectSwitch),
+  D76 (write helpers — write_message_to_registers for slow path,
+  write_metadata_to_registers for fast path; dispatch writes before returning
+  DispatchResult).
+- **Status:** settled — revisit if D50 is revised (fast-path condition changes
+  alter the DirectSwitch/WokeReceiverSlowPath split), if D74 is revised
+  (register pass-through changes alter what data needs to be carried), or if D28
+  is revised (message format changes alter the ownership unit).
+- **Journal:** `journal/078-ipc-message-ownership.md`.
+
+### D79 — Scheduling decision matrix: state transitions and dispatch results per IPC outcome
+
+For each (IPC operation x outcome) pair, the kernel performs specific Observer
+state transitions, scheduler method calls, register writes, and returns a
+specific DispatchResult. The matrix has 10 rows (9 operation-outcome pairs plus
+Yield):
+
+| #   | Operation x Outcome         | Sender state            | Receiver state                    | Scheduler calls                                                                                 | DispatchResult                                              |
+| --- | --------------------------- | ----------------------- | --------------------------------- | ----------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| 1   | Send x Enqueued             | Stays Runnable          | —                                 | None                                                                                            | Resume(sender)                                              |
+| 2   | Send x WokeReceiver         | Stays Runnable          | Blocked→Runnable                  | enqueue(receiver)                                                                               | Resume(sender)                                              |
+| 3   | Receive x Received          | —                       | Stays Runnable                    | None                                                                                            | Resume(receiver)                                            |
+| 4   | Receive x Blocked           | —                       | Runnable→Blocked                  | dequeue(receiver), pick_next                                                                    | schedule_next()                                             |
+| 5   | Call x Enqueued             | Runnable→Blocked        | —                                 | dequeue(sender), pick_next                                                                      | schedule_next()                                             |
+| 6   | Call x DirectSwitch         | Runnable→Blocked        | Blocked→Runnable                  | should_switch_to; if yes: dequeue(sender); if no: dequeue(sender), enqueue(receiver), pick_next | Approved: ResumeFastPath(receiver); Denied: schedule_next() |
+| 7   | Call x WokeReceiverSlowPath | Runnable→Blocked        | Blocked→Runnable                  | dequeue(sender), enqueue(receiver), pick_next                                                   | schedule_next()                                             |
+| 8   | ReplyRecv x Received        | Server stays Runnable   | Client (if any): Blocked→Runnable | enqueue(client) if woken                                                                        | Resume(server)                                              |
+| 9   | ReplyRecv x Blocked         | Server Runnable→Blocked | Client (if any): Blocked→Runnable | dequeue(server), enqueue(client) if woken, pick_next                                            | schedule_next()                                             |
+| 10  | Yield                       | Stays Runnable          | —                                 | enqueue(sender at tail), pick_next                                                              | schedule_next()                                             |
+
+Key design decisions:
+
+1. **Send never uses ResumeFastPath.** D50 condition 1: only Call and ReplyRecv
+   are fast-path eligible. Send is fire-and-forget — the sender always
+   continues.
+
+2. **D50 should_switch_to consulted only for Call x DirectSwitch (Row 6).**
+   Approval returns `ResumeFastPath(receiver)` with x0–x3 pass-through (D74).
+   Denial falls back to enqueue + pick_next.
+
+3. **Yield re-enqueues before pick_next.** The yielding Observer goes to the
+   tail of the run queue, then the scheduler picks the next. This ensures
+   round-robin fairness and prevents losing the Observer from the queue.
+
+4. **ReplyRecv handles both reply and receive atomically.** The reply phase may
+   wake a client (enqueue it). The receive phase either delivers a message
+   (server continues) or blocks the server. Both phases execute in one dispatch
+   call.
+
+Does NOT settle: cap resolution protocol body (D77 defines the sequence; D79
+defines what happens after), Observer.block()/unblock() calls during dispatch
+(requires arena mutable access), cap installation during message delivery (D8
+downstream).
+
+- **Rests on:** D2 (per-core schedulers — scheduler methods shape the matrix),
+  D13 (queued fields with direct-switch — Send/Receive semantics), D16 (reply
+  via send-once — Call/ReplyRecv blocking semantics), D39 (Observer state
+  machine — Runnable/Blocked transitions), D48 (5 IPC operations — the rows),
+  D50 (fast-path conditions — DirectSwitch eligibility, should_switch_to), D59
+  (Scheduler trait — enqueue/dequeue/pick_next/should_switch_to/on_preempt), D76
+  (dispatch entry contract — DispatchResult variants, register write helpers),
+  D78 (message ownership — outcome types that carry messages and observer
+  pointers).
+- **Status:** settled — revisit if D50 is revised (fast-path conditions alter
+  which rows use ResumeFastPath), if D59 is revised (Scheduler trait changes
+  alter which methods are called), if D39 is revised (state machine changes
+  alter transition validity), or if D78 is revised (outcome type changes alter
+  what data is available for register writes).
+- **Journal:** `journal/079-scheduling-decision-matrix.md`.
+
 ---
 
 ## Open questions

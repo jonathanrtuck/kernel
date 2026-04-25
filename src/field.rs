@@ -73,6 +73,9 @@ pub const LABEL_CAP_TABLE_FULL: u64 = 0xFFFF_FFFF_FFFF_0005;
 /// Label for hardware exceptions (D61). Value provisional.
 pub const LABEL_HARDWARE_EXCEPTION: u64 = 0xFFFF_FFFF_FFFF_0006;
 
+/// Label for device interrupt messages (D22, D81). Value provisional.
+pub const LABEL_DEVICE_IRQ: u64 = 0xFFFF_FFFF_FFFF_0007;
+
 // ── Routing (D45, D54, D71) ─────────────────────────────────────────
 
 /// Single routing rule in a Field's routing table (D45, D54, D71).
@@ -210,6 +213,26 @@ impl Message {
         Message {
             data: [0; 4],
             label: LABEL_CLOSURE,
+            badge,
+            user_cap: None,
+            reply_cap: None,
+        }
+    }
+
+    /// Construct a device interrupt message (D22, D81).
+    ///
+    /// D22: kernel-as-sender deposits interrupt notification to the driver
+    /// Observer's Field. The badge identifies the IRQ (D17). data[0] carries
+    /// the raw INTID for driver-side dispatch. No user cap. The send-once ack
+    /// cap (D16) for unmask is a future addition — the current implementation
+    /// delivers the notification without the ack cap.
+    ///
+    /// D81: the IRQ routing table maps INTID -> (field_id, badge, generation).
+    /// The message is constructed from the route's badge, not the raw INTID.
+    pub fn device_irq(badge: Badge, intid: u32) -> Message {
+        Message {
+            data: [intid as u64, 0, 0, 0],
+            label: LABEL_DEVICE_IRQ,
             badge,
             user_cap: None,
             reply_cap: None,
@@ -418,6 +441,7 @@ mod tests {
             LABEL_RESOURCE_REQUEST,
             LABEL_CAP_TABLE_FULL,
             LABEL_HARDWARE_EXCEPTION,
+            LABEL_DEVICE_IRQ,
         ];
 
         for (i, a) in labels.iter().enumerate() {

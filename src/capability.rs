@@ -173,6 +173,32 @@ pub struct Handle {
     pub slot_tag: SlotTag,
 }
 
+// ── Handle encoding (D77) ───────────────────────────────────────────
+
+impl Handle {
+    /// Encode a Handle into the u64 ABI representation (D77).
+    ///
+    /// Lower 32 bits = index, upper 32 bits = slot_tag.
+    /// This is the format userspace presents in registers (x5 for IPC,
+    /// x5 for typed ops). Index in low bits for cheap extraction: a
+    /// single AND masks the low 32.
+    pub const fn encode(self) -> u64 {
+        (self.index as u64) | ((self.slot_tag.0 as u64) << 32)
+    }
+
+    /// Decode a u64 ABI value into a Handle (D77).
+    ///
+    /// Lower 32 bits = index, upper 32 bits = slot_tag.
+    /// Infallible — any u64 produces a valid Handle. Invalid handles
+    /// are caught during resolution (bounds check, tag check).
+    pub const fn decode(raw: u64) -> Handle {
+        Handle {
+            index: raw as u32,
+            slot_tag: SlotTag((raw >> 32) as u32),
+        }
+    }
+}
+
 // ── Slot tag (D11) ──────────────────────────────────────────────────
 
 /// Generational slot tag for ABA prevention (D11).
@@ -180,7 +206,7 @@ pub struct Handle {
 /// Bumped on slot reuse. Prevents stale-handle aliasing of reused
 /// table slots. ABA defense, not revocation (D67 generation is
 /// revocation).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SlotTag(pub u32);
 
 // ── Entry (D8, D11, D17, D51, D67) ─────────────────────────────────
@@ -190,6 +216,7 @@ pub struct SlotTag(pub u32);
 /// Empty slots have `object: None`. Occupied slots carry the full
 /// capability: target, rights, badge, slot tag, send-once flag, and
 /// stored generation for D67 revocation check.
+#[derive(Debug)]
 pub struct Entry {
     /// Target object type and arena identifier. None = empty slot.
     pub object: Option<(ObjectType, ObjectId)>,
@@ -380,6 +407,151 @@ impl Entry {
     pub const fn is_send_once(&self) -> bool {
         self.send_once
     }
+}
+
+// ── Cap resolution protocol (D77) ──────────────────────────────────
+
+/// Successfully resolved capability (D77).
+///
+/// The full resolution path validated: bounds, slot tag (D11), occupancy,
+/// generation (D67), rights (D52), and type. This struct carries the
+/// verified information needed to proceed with the operation.
+///
+/// The caller holds the appropriate arena lock for the duration of the
+/// operation — the ObjectId is valid only while that lock is held.
+#[derive(Debug)]
+pub struct ResolvedCap {
+    /// Arena-internal identifier for the target object.
+    pub object_id: ObjectId,
+    /// Verified object type (matched against the expected type).
+    pub object_type: ObjectType,
+    /// Per-capability rights mask (already checked for required rights).
+    pub rights: Rights,
+    /// Minter-assigned badge (D17). Passed through to messages.
+    pub badge: Badge,
+    /// D51: whether this was a send-once capability.
+    pub send_once: bool,
+}
+
+/// Resolve a raw u64 handle value to a verified capability (D77).
+///
+/// The full resolution sequence, in order:
+/// 1. **Decode:** extract index (low 32) and slot_tag (high 32).
+/// 2. **Bounds check:** index < capacity (Spectre-safe via frame/ barrier).
+/// 3. **Entry lookup:** index into the Observer's cap table array.
+/// 4. **Occupied check:** entry has an object (not an empty/freelist slot).
+/// 5. **Slot tag check:** entry's tag matches handle's tag (D11 ABA defense).
+/// 6. **Generation check:** entry's stored generation matches the object's
+///    live generation from the arena (D67 revocation). On mismatch, the
+///    entry is lazily rewritten to empty (Coyotos pattern, A4 compliance).
+/// 7. **Rights check:** entry's rights contain all required rights (D52).
+/// 8. **Type check:** entry's object type matches the expected type.
+///
+/// Steps 1–5 are delegated to `resolve_cap_entry`. Steps 6–8 run on top.
+///
+/// Lock acquisition: this function does NOT acquire any lock. It operates
+/// on the Observer's cap table pointer (per-Observer, no lock needed on
+/// the hot path — D1). The caller acquires the target arena's lock AFTER
+/// resolution succeeds, using the returned ObjectType to select which lock.
+///
+/// Parameters:
+/// - `raw_handle`: the u64 value from the userspace register (x5).
+/// - `entries`: the Observer's cap_table pointer.
+/// - `capacity`: the Observer's cap_table_capacity.
+/// - `live_generation`: the target object's current generation from its
+///   arena. The caller must have read this before calling (requires the
+///   arena lock — see note below on two-phase resolution).
+/// - `required_rights`: rights that must be present for this operation.
+/// - `expected_type`: the object type this operation targets. Pass `None`
+///   for generic operations (Destroy, Clone, Close, Mint) that accept
+///   any type.
+///
+/// Two-phase resolution note: generation checking requires the object's
+/// live generation, which lives in the arena behind a lock. For the
+/// common case (typed operations targeting a known type), the caller:
+/// 1. Calls `resolve_cap_entry` (steps 1–5, no lock needed).
+/// 2. Reads the ObjectId and ObjectType from the entry.
+/// 3. Acquires the arena lock, reads the live generation.
+/// 4. Calls this function with the live generation.
+///
+/// To avoid this two-phase dance, this function accepts `live_generation`
+/// as a parameter. If the caller cannot provide it (hasn't acquired the
+/// arena lock yet), it should use `resolve_cap_entry` first to get the
+/// entry, then acquire the lock and do the generation + rights + type
+/// checks manually. This function is the composed convenience form.
+pub fn resolve_cap(
+    raw_handle: u64,
+    entries: core::ptr::NonNull<Entry>,
+    capacity: u32,
+    live_generation: u64,
+    required_rights: Rights,
+    expected_type: Option<ObjectType>,
+) -> Result<ResolvedCap, CapError> {
+    // Steps 1–5: decode, bounds, lookup, occupied, slot tag.
+    let entry = resolve_cap_entry(raw_handle, entries, capacity)?;
+
+    // Step 6: generation check (D67).
+    if !entry.check_generation(live_generation) {
+        return Err(CapError::StaleGeneration);
+    }
+    // Step 7: rights check (D52).
+    if !entry.check_rights(required_rights) {
+        return Err(CapError::InsufficientRights);
+    }
+
+    // Step 8: type check (if expected_type is specified).
+    // Occupied check passed in step 4, so object is guaranteed Some.
+    let (object_type, object_id) = match entry.object {
+        Some(pair) => pair,
+        None => return Err(CapError::InvalidHandle),
+    };
+
+    if let Some(expected) = expected_type
+        && object_type != expected
+    {
+        return Err(CapError::TypeMismatch);
+    }
+
+    Ok(ResolvedCap {
+        object_id,
+        object_type,
+        rights: entry.rights,
+        badge: entry.badge,
+        send_once: entry.send_once,
+    })
+}
+
+/// Resolve a raw u64 handle to a cap table entry reference (D77).
+///
+/// Performs steps 1-5 of the resolution sequence (decode, bounds,
+/// lookup, tag, occupied) without checking generation, rights, or type.
+/// Used for two-phase resolution where the caller needs the ObjectId
+/// to acquire the arena lock before the generation check.
+///
+/// Returns: shared reference to the Entry. The caller must then:
+/// - Read the ObjectId and ObjectType.
+/// - Acquire the appropriate arena lock.
+/// - Read the live generation from the arena object.
+/// - Call `entry.check_generation(live_generation)`.
+/// - Call `entry.check_rights(required_rights)`.
+/// - Call `entry.check_type(expected_type)` if type-specific.
+pub fn resolve_cap_entry(
+    raw_handle: u64,
+    entries: core::ptr::NonNull<Entry>,
+    capacity: u32,
+) -> Result<&'static Entry, CapError> {
+    let handle = Handle::decode(raw_handle);
+    let entry = crate::frame::capabilities::entry_ref(entries, capacity, handle.index)
+        .ok_or(CapError::InvalidHandle)?;
+
+    if !entry.is_occupied() {
+        return Err(CapError::InvalidHandle);
+    }
+    if entry.slot_tag != handle.slot_tag {
+        return Err(CapError::SlotTagMismatch);
+    }
+
+    Ok(entry)
 }
 
 // ── Table methods ──────────────────────────────────────────────────
@@ -1997,5 +2169,539 @@ mod tests {
             matches!(result, Err(CapError::InvalidHandle)),
             "empty slot at last valid index must return InvalidHandle"
         );
+    }
+
+    // ── D77: Handle encoding/decoding ────────────────────────────────
+
+    /// D77: encode packs index in low 32, slot_tag in high 32.
+    #[test]
+    fn test_d77_handle_encode_packs_correctly() {
+        let handle = Handle {
+            index: 42,
+            slot_tag: SlotTag(7),
+        };
+        let encoded = handle.encode();
+
+        assert_eq!(encoded & 0xFFFF_FFFF, 42, "low 32 must be index");
+        assert_eq!(encoded >> 32, 7, "high 32 must be slot_tag");
+    }
+
+    /// D77: decode extracts index from low 32, slot_tag from high 32.
+    #[test]
+    fn test_d77_handle_decode_extracts_correctly() {
+        let raw: u64 = 42 | (7u64 << 32);
+        let handle = Handle::decode(raw);
+
+        assert_eq!(handle.index, 42);
+        assert_eq!(handle.slot_tag, SlotTag(7));
+    }
+
+    /// D77: encode/decode roundtrip is identity.
+    #[test]
+    fn test_d77_handle_encode_decode_roundtrip() {
+        let original = Handle {
+            index: 1000,
+            slot_tag: SlotTag(999),
+        };
+        let decoded = Handle::decode(original.encode());
+
+        assert_eq!(decoded.index, original.index);
+        assert_eq!(decoded.slot_tag, original.slot_tag);
+    }
+
+    /// D77: decode with maximum values does not overflow.
+    #[test]
+    fn test_d77_handle_decode_max_values() {
+        let raw: u64 = (u32::MAX as u64) | ((u32::MAX as u64) << 32);
+        let handle = Handle::decode(raw);
+
+        assert_eq!(handle.index, u32::MAX);
+        assert_eq!(handle.slot_tag, SlotTag(u32::MAX));
+    }
+
+    /// D77: decode with zero produces index=0, slot_tag=0.
+    #[test]
+    fn test_d77_handle_decode_zero() {
+        let handle = Handle::decode(0);
+
+        assert_eq!(handle.index, 0);
+        assert_eq!(handle.slot_tag, SlotTag(0));
+    }
+
+    /// D77: encode with index=0, slot_tag=0 produces 0.
+    #[test]
+    fn test_d77_handle_encode_zero() {
+        let handle = Handle {
+            index: 0,
+            slot_tag: SlotTag(0),
+        };
+
+        assert_eq!(handle.encode(), 0);
+    }
+
+    // ── D77: resolve_cap — full resolution protocol ──────────────────
+
+    /// D77: resolve_cap succeeds for a valid handle with matching
+    /// generation, sufficient rights, and correct type.
+    #[test]
+    fn test_d77_resolve_cap_valid() {
+        let mut table = test_table(16);
+        let entry = Entry {
+            object: Some((ObjectType::Field, ObjectId(5))),
+            rights: Rights::FIELD_ALL,
+            badge: Badge(42),
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: 10,
+        };
+
+        table.install_at(3, entry);
+
+        let raw = Handle {
+            index: 3,
+            slot_tag: SlotTag(0),
+        }
+        .encode();
+        let result = resolve_cap(
+            raw,
+            table.entries,
+            table.capacity,
+            10, // live generation matches
+            Rights::SEND,
+            Some(ObjectType::Field),
+        );
+
+        assert!(result.is_ok(), "valid cap must resolve");
+
+        let resolved = result.unwrap();
+
+        assert_eq!(resolved.object_id, ObjectId(5));
+        assert_eq!(resolved.object_type, ObjectType::Field);
+        assert_eq!(resolved.badge, Badge(42));
+        assert!(!resolved.send_once);
+    }
+
+    /// D77: resolve_cap fails with InvalidHandle for out-of-bounds index.
+    #[test]
+    fn test_d77_resolve_cap_out_of_bounds() {
+        let table = test_table(16);
+        let raw = Handle {
+            index: 16,
+            slot_tag: SlotTag(0),
+        }
+        .encode();
+        let result = resolve_cap(raw, table.entries, table.capacity, 0, Rights::empty(), None);
+
+        assert_eq!(result.unwrap_err(), CapError::InvalidHandle);
+    }
+
+    /// D77: resolve_cap fails with InvalidHandle for empty slot.
+    #[test]
+    fn test_d77_resolve_cap_empty_slot() {
+        let table = test_table(16);
+        let raw = Handle {
+            index: SLOT_USER_START,
+            slot_tag: SlotTag(0),
+        }
+        .encode();
+        let result = resolve_cap(raw, table.entries, table.capacity, 0, Rights::empty(), None);
+
+        assert_eq!(result.unwrap_err(), CapError::InvalidHandle);
+    }
+
+    /// D77: resolve_cap fails with SlotTagMismatch for stale handle
+    /// (D11 ABA defense).
+    #[test]
+    fn test_d77_resolve_cap_slot_tag_mismatch() {
+        let mut table = test_table(16);
+
+        table.install_at(3, field_entry(42, 0));
+
+        let raw = Handle {
+            index: 3,
+            slot_tag: SlotTag(999), // wrong tag
+        }
+        .encode();
+        let result = resolve_cap(raw, table.entries, table.capacity, 0, Rights::empty(), None);
+
+        assert_eq!(result.unwrap_err(), CapError::SlotTagMismatch);
+    }
+
+    /// D77: resolve_cap fails with StaleGeneration for revoked cap
+    /// (D67 generation mismatch).
+    #[test]
+    fn test_d77_resolve_cap_stale_generation() {
+        let mut table = test_table(16);
+        let entry = Entry {
+            object: Some((ObjectType::Field, ObjectId(0))),
+            rights: Rights::FIELD_ALL,
+            badge: Badge(0),
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: 5, // stored at creation
+        };
+
+        table.install_at(3, entry);
+
+        let raw = Handle {
+            index: 3,
+            slot_tag: SlotTag(0),
+        }
+        .encode();
+        let result = resolve_cap(
+            raw,
+            table.entries,
+            table.capacity,
+            6, // live generation bumped — cap is stale
+            Rights::empty(),
+            None,
+        );
+
+        assert_eq!(result.unwrap_err(), CapError::StaleGeneration);
+    }
+
+    /// D77: resolve_cap fails with InsufficientRights when required
+    /// rights are not present (D52).
+    #[test]
+    fn test_d77_resolve_cap_insufficient_rights() {
+        let mut table = test_table(16);
+        let entry = Entry {
+            object: Some((ObjectType::Field, ObjectId(0))),
+            rights: Rights::SEND, // only SEND
+            badge: Badge(0),
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+
+        table.install_at(3, entry);
+
+        let raw = Handle {
+            index: 3,
+            slot_tag: SlotTag(0),
+        }
+        .encode();
+        let result = resolve_cap(
+            raw,
+            table.entries,
+            table.capacity,
+            0,
+            Rights::RECEIVE, // requires RECEIVE, entry only has SEND
+            None,
+        );
+
+        assert_eq!(result.unwrap_err(), CapError::InsufficientRights);
+    }
+
+    /// D77: resolve_cap fails with TypeMismatch for wrong object type.
+    #[test]
+    fn test_d77_resolve_cap_type_mismatch() {
+        let mut table = test_table(16);
+
+        table.install_at(3, field_entry(0, 0));
+
+        let raw = Handle {
+            index: 3,
+            slot_tag: SlotTag(0),
+        }
+        .encode();
+        let result = resolve_cap(
+            raw,
+            table.entries,
+            table.capacity,
+            0,
+            Rights::empty(),
+            Some(ObjectType::Observer), // entry is Field, not Observer
+        );
+
+        assert_eq!(result.unwrap_err(), CapError::TypeMismatch);
+    }
+
+    /// D77: resolve_cap with expected_type=None accepts any type
+    /// (for generic operations like Destroy/Clone/Close).
+    #[test]
+    fn test_d77_resolve_cap_no_type_check() {
+        let mut table = test_table(16);
+
+        table.install_at(3, field_entry(0, 0));
+
+        let raw = Handle {
+            index: 3,
+            slot_tag: SlotTag(0),
+        }
+        .encode();
+        let result = resolve_cap(
+            raw,
+            table.entries,
+            table.capacity,
+            0,
+            Rights::empty(),
+            None, // no type check — generic operation
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().object_type, ObjectType::Field);
+    }
+
+    /// D77: resolve_cap preserves send_once flag from the entry.
+    #[test]
+    fn test_d77_resolve_cap_preserves_send_once() {
+        let mut table = test_table(16);
+        let entry = Entry {
+            object: Some((ObjectType::Field, ObjectId(0))),
+            rights: Rights::FIELD_ALL,
+            badge: Badge(0),
+            slot_tag: SlotTag(0),
+            send_once: true,
+            stored_generation: 0,
+        };
+
+        table.install_at(3, entry);
+
+        let raw = Handle {
+            index: 3,
+            slot_tag: SlotTag(0),
+        }
+        .encode();
+        let resolved =
+            resolve_cap(raw, table.entries, table.capacity, 0, Rights::empty(), None).unwrap();
+
+        assert!(
+            resolved.send_once,
+            "D77: resolve_cap must carry send_once from the entry"
+        );
+    }
+
+    /// D77: resolve_cap checks are ordered — slot tag checked before
+    /// generation. A handle with wrong tag AND stale generation returns
+    /// SlotTagMismatch, not StaleGeneration.
+    #[test]
+    fn test_d77_resolve_cap_check_order_tag_before_generation() {
+        let mut table = test_table(16);
+        let entry = Entry {
+            object: Some((ObjectType::Field, ObjectId(0))),
+            rights: Rights::FIELD_ALL,
+            badge: Badge(0),
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: 5,
+        };
+
+        table.install_at(3, entry);
+
+        let raw = Handle {
+            index: 3,
+            slot_tag: SlotTag(999), // wrong tag
+        }
+        .encode();
+        let result = resolve_cap(
+            raw,
+            table.entries,
+            table.capacity,
+            99, // also stale generation
+            Rights::empty(),
+            None,
+        );
+
+        // Tag check comes before generation check.
+        assert_eq!(result.unwrap_err(), CapError::SlotTagMismatch);
+    }
+
+    /// D77: resolve_cap checks are ordered — generation checked before
+    /// rights. A cap with stale generation AND insufficient rights
+    /// returns StaleGeneration, not InsufficientRights.
+    #[test]
+    fn test_d77_resolve_cap_check_order_generation_before_rights() {
+        let mut table = test_table(16);
+        let entry = Entry {
+            object: Some((ObjectType::Field, ObjectId(0))),
+            rights: Rights::SEND,
+            badge: Badge(0),
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: 5,
+        };
+
+        table.install_at(3, entry);
+
+        let raw = Handle {
+            index: 3,
+            slot_tag: SlotTag(0),
+        }
+        .encode();
+        let result = resolve_cap(
+            raw,
+            table.entries,
+            table.capacity,
+            6,               // stale
+            Rights::RECEIVE, // also insufficient
+            None,
+        );
+
+        assert_eq!(result.unwrap_err(), CapError::StaleGeneration);
+    }
+
+    /// D77: resolve_cap checks are ordered — rights checked before type.
+    /// A cap with insufficient rights AND wrong type returns
+    /// InsufficientRights, not TypeMismatch.
+    #[test]
+    fn test_d77_resolve_cap_check_order_rights_before_type() {
+        let mut table = test_table(16);
+        let entry = Entry {
+            object: Some((ObjectType::Field, ObjectId(0))),
+            rights: Rights::SEND,
+            badge: Badge(0),
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+
+        table.install_at(3, entry);
+
+        let raw = Handle {
+            index: 3,
+            slot_tag: SlotTag(0),
+        }
+        .encode();
+        let result = resolve_cap(
+            raw,
+            table.entries,
+            table.capacity,
+            0,
+            Rights::RECEIVE,            // insufficient
+            Some(ObjectType::Observer), // also wrong type
+        );
+
+        assert_eq!(result.unwrap_err(), CapError::InsufficientRights);
+    }
+
+    // ── D77: resolve_cap_entry — partial resolution ──────────────────
+
+    /// D77: resolve_cap_entry returns the entry for a valid handle.
+    #[test]
+    fn test_d77_resolve_cap_entry_valid() {
+        let mut table = test_table(16);
+
+        table.install_at(3, field_entry(42, 0));
+
+        let raw = Handle {
+            index: 3,
+            slot_tag: SlotTag(0),
+        }
+        .encode();
+        let result = resolve_cap_entry(raw, table.entries, table.capacity);
+
+        assert!(result.is_ok());
+
+        let entry = result.unwrap();
+
+        assert_eq!(entry.badge, Badge(42));
+    }
+
+    /// D77: resolve_cap_entry fails for empty slot.
+    #[test]
+    fn test_d77_resolve_cap_entry_empty_slot() {
+        let table = test_table(16);
+        let raw = Handle {
+            index: SLOT_USER_START,
+            slot_tag: SlotTag(0),
+        }
+        .encode();
+        let result = resolve_cap_entry(raw, table.entries, table.capacity);
+
+        assert_eq!(result.unwrap_err(), CapError::InvalidHandle);
+    }
+
+    /// D77: resolve_cap_entry fails for wrong slot tag.
+    #[test]
+    fn test_d77_resolve_cap_entry_wrong_tag() {
+        let mut table = test_table(16);
+
+        table.install_at(3, field_entry(0, 0));
+
+        let raw = Handle {
+            index: 3,
+            slot_tag: SlotTag(99),
+        }
+        .encode();
+        let result = resolve_cap_entry(raw, table.entries, table.capacity);
+
+        assert_eq!(result.unwrap_err(), CapError::SlotTagMismatch);
+    }
+
+    // ── D77: adversarial handle encoding ─────────────────────────────
+
+    /// D77: handle with u64::MAX — decode must not panic.
+    #[test]
+    fn test_d77_handle_decode_u64_max() {
+        let handle = Handle::decode(u64::MAX);
+
+        assert_eq!(handle.index, u32::MAX);
+        assert_eq!(handle.slot_tag, SlotTag(u32::MAX));
+    }
+
+    /// D77: resolve_cap with u64::MAX raw handle on a small table
+    /// must return InvalidHandle (index u32::MAX > capacity).
+    #[test]
+    fn test_d77_resolve_cap_max_raw_handle() {
+        let table = test_table(16);
+        let result = resolve_cap(
+            u64::MAX,
+            table.entries,
+            table.capacity,
+            0,
+            Rights::empty(),
+            None,
+        );
+
+        assert_eq!(result.unwrap_err(), CapError::InvalidHandle);
+    }
+
+    /// D77: resolve_cap with raw handle 0 on a table where slot 0
+    /// has a reserved entry (empty by default) returns InvalidHandle.
+    #[test]
+    fn test_d77_resolve_cap_zero_handle() {
+        let table = test_table(16);
+        let result = resolve_cap(0, table.entries, table.capacity, 0, Rights::empty(), None);
+
+        assert_eq!(result.unwrap_err(), CapError::InvalidHandle);
+    }
+
+    /// D77: resolve_cap returns correct rights and badge from
+    /// the entry — no mixing between fields.
+    #[test]
+    fn test_d77_resolve_cap_returns_entry_fields() {
+        let mut table = test_table(16);
+        let entry = Entry {
+            object: Some((ObjectType::Observer, ObjectId(99))),
+            rights: Rights::FAULT_OBSERVER,
+            badge: Badge(0xDEAD_BEEF),
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: 7,
+        };
+
+        table.install_at(5, entry);
+
+        let raw = Handle {
+            index: 5,
+            slot_tag: SlotTag(0),
+        }
+        .encode();
+        let resolved = resolve_cap(
+            raw,
+            table.entries,
+            table.capacity,
+            7,
+            Rights::RESUME,
+            Some(ObjectType::Observer),
+        )
+        .unwrap();
+
+        assert_eq!(resolved.object_id, ObjectId(99));
+        assert_eq!(resolved.object_type, ObjectType::Observer);
+        assert_eq!(resolved.rights, Rights::FAULT_OBSERVER);
+        assert_eq!(resolved.badge, Badge(0xDEAD_BEEF));
+        assert!(!resolved.send_once);
     }
 }

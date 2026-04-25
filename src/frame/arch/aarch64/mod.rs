@@ -77,8 +77,10 @@ pub fn halt() {
 
 /// Read the per-core data pointer (TPIDR_EL1).
 ///
-/// Each core stores a pointer to its `CoreState` in this register at boot.
-/// Used by `frame::cores::read_core_state` to find per-core kernel state.
+/// D83: each core stores a pointer to its `PerCoreData` in this register
+/// at boot. Used by `frame::cores::read_per_core_data` and
+/// `frame::cores::read_core_state` to find per-core kernel state.
+/// TPIDR_EL1 → PerCoreData → CoreState<S>.
 pub fn tpidr_el1() -> u64 {
     sysreg::tpidr_el1()
 }

@@ -12,6 +12,10 @@
 //! D28: fixed-size message format (4 data + 1 cap + label + badge + reply).
 //! D50: six fast-path conditions for direct switch.
 //! D69: DAIF.I masking during the fast-path window.
+//! D78: message ownership — explicit transfer through return types.
+//!      WokeReceiver/WokeReceiverSlowPath carry the message for
+//!      dispatch to deliver. DirectSwitch carries only the observer
+//!      (x0–x3 pass through, D74). Enqueued = ownership in queue.
 //!
 //! The fast path (~400 cycles, D13) and slow path (~600–800 cycles)
 //! are structurally distinct code paths. The fast path is a straight-
@@ -25,16 +29,23 @@ use core::ptr::NonNull;
 
 // ── Operation outcomes ─────────────────────────────────────────────
 
-/// Outcome of an IPC send (D13, D18).
+/// Outcome of an IPC send (D13, D18, D78).
 pub enum SendOutcome {
     /// Message enqueued into the Field's queue. Sender continues.
+    /// Ownership transferred: the Message now lives in the queue.
     Enqueued,
-    /// A waiting receiver was found. The message was delivered directly
-    /// without touching the queue (D13 direct-switch optimization).
-    /// The returned Observer pointer is the woken receiver — the
-    /// caller decides whether to direct-switch via the scheduler's
-    /// `should_switch_to` callback (D50 condition 5).
-    WokeReceiver(NonNull<Observer>),
+    /// A waiting receiver was found. The message bypassed the queue
+    /// (D13 direct-switch optimization). The returned Observer pointer
+    /// is the woken receiver — the caller decides whether to
+    /// direct-switch via the scheduler's `should_switch_to` callback
+    /// (D50 condition 5).
+    ///
+    /// D78: the Message is returned to the caller because it was never
+    /// enqueued. The dispatch layer must deliver it to the receiver's
+    /// saved registers via `write_message_to_registers` (slow path)
+    /// or equivalent. Ownership passes from sender → kernel → receiver
+    /// registers.
+    WokeReceiver(NonNull<Observer>, Message),
 }
 
 /// Outcome of an IPC receive (D13).
@@ -46,16 +57,62 @@ pub enum ReceiveOutcome {
     Blocked,
 }
 
-/// Outcome of Call — the compound Send + block-on-reply (D16).
+/// Outcome of Call — the compound Send + block-on-reply (D16, D78).
 ///
 /// The caller always blocks. The outcome indicates whether the message
 /// was delivered directly to a waiting receiver (fast path) or enqueued.
 pub enum CallOutcome {
     /// Message enqueued, caller blocked on its reply field.
+    /// Ownership transferred: the Message now lives in the queue.
     Enqueued,
-    /// Waiting receiver found. The returned Observer should be
-    /// direct-switched to if the scheduler approves (D50).
+    /// Waiting receiver found via D50 fast-path conditions (0-cap gate,
+    /// waiter present). The returned Observer should be direct-switched
+    /// to if the scheduler approves (D50 condition 5).
+    ///
+    /// D78: no Message is carried here because D50 condition 4 guarantees
+    /// no user cap, and D74 guarantees x0–x3 pass through in physical
+    /// registers. The dispatch layer writes only metadata (x4–x7: label,
+    /// badge, user_cap_slot=sentinel, reply_cap_slot) via
+    /// `write_metadata_to_registers`. Data words never enter a Message
+    /// struct on this path.
     DirectSwitch(NonNull<Observer>),
+    /// Waiting receiver found but D50 fast-path conditions NOT met
+    /// (message carries a user cap). The message bypassed the queue
+    /// (waiter was present) but requires full slow-path delivery
+    /// including cap transfer.
+    ///
+    /// D78: the Message is returned because it was never enqueued and
+    /// the dispatch layer must deliver it via `write_message_to_registers`
+    /// (slow path with cap installation).
+    WokeReceiverSlowPath(NonNull<Observer>, Message),
+}
+
+/// Outcome of ReplyRecv — both reply-side and receive-side results (D16, D78).
+///
+/// The reply and receive phases are atomic (D16). The dispatch layer
+/// must handle both: deliver the reply to the woken client (if any),
+/// then act on the receive outcome (deliver message or block server).
+pub struct ReplyRecvOutcome {
+    /// D78: if the reply field had a waiting client, the client pointer
+    /// and reply message are returned here for dispatch to deliver to
+    /// the client's saved registers. None if the reply was enqueued
+    /// or dropped (full queue, no waiter).
+    pub reply_delivery: Option<ReplyDelivery>,
+
+    /// The receive-side outcome (D13): either a dequeued message or
+    /// Blocked (server added to recv_field's waiters list).
+    pub receive_outcome: ReceiveOutcome,
+}
+
+/// A reply message and its destination client (D78).
+///
+/// Returned by `reply_recv` when the reply field had a waiting client.
+/// The dispatch layer delivers the message to the client's registers.
+pub struct ReplyDelivery {
+    /// The woken client Observer.
+    pub client: NonNull<Observer>,
+    /// The reply message to deliver.
+    pub message: Message,
 }
 
 // ── IPC operations ─────────────────────────────────────────────────
@@ -81,10 +138,13 @@ pub fn send(field: &mut Field, message: Message) -> Result<SendOutcome, FieldErr
     if let Some(waiter_ptr) = field.pop_waiter() {
         let observer = crate::frame::fields::waiter_observer(waiter_ptr);
 
-        return Ok(SendOutcome::WokeReceiver(observer));
+        // D78: message ownership passes to the caller via WokeReceiver.
+        // The dispatch layer delivers it to the receiver's saved registers.
+        return Ok(SendOutcome::WokeReceiver(observer, message));
     }
 
     // No waiter: enqueue the message. Returns QueueFull if at capacity (D18).
+    // D78: message ownership transfers into the queue.
     field.enqueue(message)?;
 
     Ok(SendOutcome::Enqueued)
@@ -158,21 +218,34 @@ pub fn call(
 ) -> Result<CallOutcome, FieldError> {
     // D50: 0-cap gate check BEFORE popping the waiter. If the message
     // carries a user cap, skip the fast path entirely (slow path only).
-    if message.user_cap.is_none()
-        && let Some(waiter_ptr) = field.pop_waiter()
-    {
+    if message.user_cap.is_none() {
+        if let Some(waiter_ptr) = field.pop_waiter() {
+            let observer = crate::frame::fields::waiter_observer(waiter_ptr);
+
+            // D78/D50: fast path — no user cap, waiter present. Message
+            // is dropped here because data words pass through in physical
+            // registers (D74). The dispatch layer writes only x4–x7
+            // metadata via write_metadata_to_registers.
+            return Ok(CallOutcome::DirectSwitch(observer));
+        }
+    } else if let Some(waiter_ptr) = field.pop_waiter() {
         let observer = crate::frame::fields::waiter_observer(waiter_ptr);
 
-        return Ok(CallOutcome::DirectSwitch(observer));
+        // D78: waiter present but message has a user cap — cannot use
+        // the D50 fast path. Message bypasses the queue but requires
+        // full slow-path delivery with cap transfer. Return the message
+        // so dispatch can deliver it via write_message_to_registers.
+        return Ok(CallOutcome::WokeReceiverSlowPath(observer, message));
     }
 
-    // Slow path: enqueue the message. Returns QueueFull if full (D18).
+    // No waiter (or fast-path ineligible without waiter): enqueue.
+    // D78: message ownership transfers into the queue.
     field.enqueue(message)?;
 
     Ok(CallOutcome::Enqueued)
 }
 
-/// IPC ReplyRecv: send reply + receive next, atomically (D16).
+/// IPC ReplyRecv: send reply + receive next, atomically (D16, D78).
 ///
 /// Server fast path. Sends the reply via the send-once cap (consumed),
 /// then receives the next message on the same field. Atomic — no
@@ -183,31 +256,50 @@ pub fn call(
 /// (the reply side consumes the send-once cap, which is always
 /// slow-path due to cap transfer, but the receiver wakeup can
 /// still direct-switch).
+///
+/// D78 reply-side ownership: the reply message is either enqueued
+/// (ownership to queue) or delivered directly to a waiting client
+/// (ownership to ReplyDelivery). When a client is waiting on the
+/// reply field, the woken client pointer and message are returned
+/// in `reply_delivery` so the dispatch layer can write the reply
+/// to the client's registers.
 pub fn reply_recv(
     reply_field: &mut Field,
     recv_field: &mut Field,
     reply_message: Message,
     receiver: &mut WaitEntry,
-) -> ReceiveOutcome {
+) -> ReplyRecvOutcome {
     // ── Reply phase ──────────────────────────────────────────────────
     // Send the reply to reply_field using the same logic as send().
     // D16: if reply_field has a waiter, deliver directly. Otherwise enqueue.
     // If reply_field is full and has no waiter, the reply is dropped
     // (the receive phase still proceeds).
-    if let Some(_waiter_ptr) = reply_field.pop_waiter() {
-        // Direct delivery to the waiting client — reply bypasses queue.
-        // The waiter_ptr carries the Observer to wake, but reply_recv's
-        // return value reflects only the receive side, so we discard the
-        // send outcome here.
+    let reply_delivery = if let Some(waiter_ptr) = reply_field.pop_waiter() {
+        let observer = crate::frame::fields::waiter_observer(waiter_ptr);
+
+        // D78: reply message ownership passes to dispatch via the return
+        // value. Dispatch writes it to the client's saved registers.
+        Some(ReplyDelivery {
+            client: observer,
+            message: reply_message,
+        })
     } else {
         // No waiter on reply_field — attempt to enqueue. If full, drop
         // the reply silently (the server must still be able to receive
         // the next request).
+        // D78: message ownership transfers to queue (or is dropped).
         let _ = reply_field.enqueue(reply_message);
-    }
+
+        None
+    };
 
     // ── Receive phase ────────────────────────────────────────────────
-    receive(recv_field, receiver)
+    let receive_outcome = receive(recv_field, receiver);
+
+    ReplyRecvOutcome {
+        reply_delivery,
+        receive_outcome,
+    }
 }
 
 /// IPC Yield: voluntary CPU relinquishment (D48).
@@ -337,7 +429,7 @@ mod tests {
         let result = send(&mut field, msg).expect("send must succeed");
 
         assert!(
-            matches!(result, SendOutcome::WokeReceiver(_)),
+            matches!(result, SendOutcome::WokeReceiver(..)),
             "D13: send with waiter present must return WokeReceiver"
         );
         // Message delivered directly — queue must stay empty.
@@ -369,11 +461,13 @@ mod tests {
         let result = send(&mut field, msg).expect("send must succeed");
 
         match result {
-            SendOutcome::WokeReceiver(observer_ptr) => {
+            SendOutcome::WokeReceiver(observer_ptr, message) => {
                 // The pointer must be non-null (we used NonNull::dangling()).
                 // We cannot assert the exact value since it is dangling, but
                 // the type guarantees non-null — just verify we got this variant.
                 let _ = observer_ptr;
+                // D78: the message must be returned to the caller for delivery.
+                let _ = message;
             }
             SendOutcome::Enqueued => {
                 panic!("D50: send to waiting receiver must return WokeReceiver, got Enqueued");
@@ -645,8 +739,13 @@ mod tests {
         let result = call(&mut field, msg, reply_badge).expect("call must succeed");
 
         assert!(
-            matches!(result, CallOutcome::Enqueued),
-            "D50: call with user cap must NOT return DirectSwitch (slow path only)"
+            matches!(result, CallOutcome::WokeReceiverSlowPath(..)),
+            "D50/D78: call with user cap and waiter must return WokeReceiverSlowPath, not DirectSwitch"
+        );
+        // D78: waiter was popped (message bypassed queue), but delivered via slow path.
+        assert!(
+            field.waiters_head.is_none(),
+            "D78: waiter must be popped even on slow-path delivery"
         );
     }
 
@@ -677,9 +776,14 @@ mod tests {
             reply_field.queue_length, 1,
             "D16: reply_recv must send the reply message to reply_field"
         );
+        // D78: reply with no waiter on reply_field — no reply delivery.
+        assert!(
+            outcome.reply_delivery.is_none(),
+            "D78: no waiter on reply_field means no reply delivery"
+        );
 
         // The receive side must have returned the queued message.
-        match outcome {
+        match outcome.receive_outcome {
             ReceiveOutcome::Received(msg) => {
                 assert_eq!(
                     msg.label, 200,
@@ -716,7 +820,7 @@ mod tests {
             "D16: reply must be sent even when recv blocks"
         );
         assert!(
-            matches!(outcome, ReceiveOutcome::Blocked),
+            matches!(outcome.receive_outcome, ReceiveOutcome::Blocked),
             "D16: reply_recv must block when recv_field is empty"
         );
         assert!(
@@ -814,7 +918,7 @@ mod tests {
             "send with waiter on full queue must succeed via direct delivery"
         );
         assert!(
-            matches!(result.unwrap(), SendOutcome::WokeReceiver(_)),
+            matches!(result.unwrap(), SendOutcome::WokeReceiver(..)),
             "send with waiter on full queue must return WokeReceiver"
         );
         // Queue must remain full (message bypassed it).
@@ -840,7 +944,7 @@ mod tests {
         let result = send(&mut field, make_message(1, 0)).expect("send must succeed");
 
         assert!(
-            matches!(result, SendOutcome::WokeReceiver(_)),
+            matches!(result, SendOutcome::WokeReceiver(..)),
             "send must wake the first waiter"
         );
         // Second waiter must still be in the list.
@@ -1033,7 +1137,7 @@ mod tests {
             "send to capacity-1 field with waiter must succeed"
         );
         assert!(
-            matches!(result.unwrap(), SendOutcome::WokeReceiver(_)),
+            matches!(result.unwrap(), SendOutcome::WokeReceiver(..)),
             "send must return WokeReceiver (direct delivery)"
         );
         // Queue must be empty — message bypassed it.
@@ -1097,7 +1201,7 @@ mod tests {
             "send to capacity-0 field with waiter must succeed (waiter bypasses queue)"
         );
         assert!(
-            matches!(result.unwrap(), SendOutcome::WokeReceiver(_)),
+            matches!(result.unwrap(), SendOutcome::WokeReceiver(..)),
             "capacity-0 send with waiter must return WokeReceiver"
         );
         // Queue untouched.
@@ -1129,7 +1233,7 @@ mod tests {
                 .expect("send must succeed while waiters exist");
 
             assert!(
-                matches!(result, SendOutcome::WokeReceiver(_)),
+                matches!(result, SendOutcome::WokeReceiver(..)),
                 "send {i}: must WokeReceiver while waiter {i} is in list"
             );
             assert_eq!(
@@ -1307,8 +1411,18 @@ mod tests {
             "reply_field waiters list must be empty after direct delivery"
         );
 
-        // The return value is the recv_field outcome — must be Received.
-        match outcome {
+        // D78: reply_delivery must carry the woken client and message.
+        let delivery = outcome
+            .reply_delivery
+            .expect("D78: reply with waiter must produce ReplyDelivery");
+
+        assert_eq!(
+            delivery.message.label, 100,
+            "D78: reply message must be carried in ReplyDelivery"
+        );
+
+        // The receive-side outcome — must be Received.
+        match outcome.receive_outcome {
             ReceiveOutcome::Received(msg) => {
                 assert_eq!(
                     msg.label, 300,
@@ -1361,9 +1475,14 @@ mod tests {
             reply_field.queue_length, 1,
             "reply_field must remain at capacity after failed reply"
         );
+        // D78: no waiter on reply_field, so no reply delivery.
+        assert!(
+            outcome.reply_delivery.is_none(),
+            "D78: full reply_field with no waiter means no reply delivery"
+        );
 
         // The receive side must still have proceeded — Received from recv_field.
-        match outcome {
+        match outcome.receive_outcome {
             ReceiveOutcome::Received(msg) => {
                 assert_eq!(
                     msg.label, 999,
@@ -1401,9 +1520,14 @@ mod tests {
             reply_field.queue_length, 1,
             "reply must be enqueued when reply_field is empty and has no waiter"
         );
+        // D78: no waiter on reply_field, so no reply delivery.
+        assert!(
+            outcome.reply_delivery.is_none(),
+            "D78: no waiter means no reply delivery"
+        );
         // Receive side blocks — recv_field was empty.
         assert!(
-            matches!(outcome, ReceiveOutcome::Blocked),
+            matches!(outcome.receive_outcome, ReceiveOutcome::Blocked),
             "reply_recv must block when recv_field is empty"
         );
         assert!(
@@ -1442,7 +1566,7 @@ mod tests {
         );
 
         // Receive must dequeue the first message (label == 1).
-        match outcome {
+        match outcome.receive_outcome {
             ReceiveOutcome::Received(msg) => {
                 assert_eq!(
                     msg.label, 1,
@@ -1464,13 +1588,14 @@ mod tests {
 
     // ── Adversarial: call with user cap forces slow path ─────────────
 
-    /// call with user cap and waiter present: must Enqueue (not DirectSwitch).
-    /// After enqueue, queue_length must be exactly 1, not 0.
+    /// D78: call with user cap and waiter present: must WokeReceiverSlowPath
+    /// (not DirectSwitch). The waiter is popped and the message bypasses the
+    /// queue, but delivery goes through the slow path (cap transfer needed).
     ///
     /// Bug target: implementation ignores user_cap and DirectSwitches
     /// unconditionally whenever a waiter is present.
     #[test]
-    fn test_adversarial_comm_call_user_cap_with_waiter_enqueues() {
+    fn test_adversarial_comm_call_user_cap_with_waiter_slow_path() {
         let mut field = test_field(4);
         let mut entry = make_wait_entry();
 
@@ -1480,12 +1605,17 @@ mod tests {
             .expect("call with user cap must not return QueueFull");
 
         assert!(
-            matches!(result, CallOutcome::Enqueued),
-            "call with user cap must Enqueue even when waiter is present"
+            matches!(result, CallOutcome::WokeReceiverSlowPath(..)),
+            "D78: call with user cap and waiter must return WokeReceiverSlowPath"
         );
+        // D78: waiter was popped, message bypassed queue.
         assert_eq!(
-            field.queue_length, 1,
-            "call with user cap must enqueue the message (queue_length == 1)"
+            field.queue_length, 0,
+            "D78: message bypasses queue when waiter is present (slow-path delivery)"
+        );
+        assert!(
+            field.waiters_head.is_none(),
+            "D78: waiter must be popped on WokeReceiverSlowPath"
         );
     }
 
@@ -1626,6 +1756,261 @@ mod tests {
                     );
                 }
                 ReceiveOutcome::Blocked => panic!("receive {i} must not block"),
+            }
+        }
+    }
+
+    // ── D78: Message ownership protocol tests ────────────────────────
+
+    /// D78: send with waiter returns the full message in WokeReceiver.
+    /// The message data words, label, and badge must all be accessible
+    /// to the caller for delivery to the receiver's registers.
+    #[test]
+    fn test_d78_send_woke_receiver_carries_message() {
+        let mut field = test_field(4);
+        let mut entry = make_wait_entry();
+
+        field.add_waiter(&mut entry);
+
+        let msg = Message {
+            data: [0x1111, 0x2222, 0x3333, 0x4444],
+            label: 0xABCD,
+            badge: Badge(0xBEEF),
+            user_cap: None,
+            reply_cap: None,
+        };
+        let result = send(&mut field, msg).expect("send must succeed");
+
+        match result {
+            SendOutcome::WokeReceiver(_observer, message) => {
+                assert_eq!(
+                    message.data,
+                    [0x1111, 0x2222, 0x3333, 0x4444],
+                    "D78: data words must be carried in WokeReceiver"
+                );
+                assert_eq!(
+                    message.label, 0xABCD,
+                    "D78: label must be carried in WokeReceiver"
+                );
+                assert_eq!(
+                    message.badge,
+                    Badge(0xBEEF),
+                    "D78: badge must be carried in WokeReceiver"
+                );
+            }
+            SendOutcome::Enqueued => {
+                panic!("D78: send with waiter must return WokeReceiver");
+            }
+        }
+    }
+
+    /// D78: send without waiter enqueues — message is NOT in the outcome.
+    /// The message ownership transferred into the queue. Verify via dequeue.
+    #[test]
+    fn test_d78_send_enqueued_message_in_queue() {
+        let mut field = test_field(4);
+        let msg = Message {
+            data: [0xAAAA, 0xBBBB, 0xCCCC, 0xDDDD],
+            label: 0xFACE,
+            badge: Badge(0xCAFE),
+            user_cap: None,
+            reply_cap: None,
+        };
+        let result = send(&mut field, msg).expect("send must succeed");
+
+        assert!(matches!(result, SendOutcome::Enqueued));
+
+        // Verify the message is in the queue by dequeuing it.
+        let dequeued = field
+            .dequeue()
+            .expect("D78: enqueued message must be dequeue-able");
+
+        assert_eq!(
+            dequeued.data,
+            [0xAAAA, 0xBBBB, 0xCCCC, 0xDDDD],
+            "D78: data must survive enqueue"
+        );
+        assert_eq!(dequeued.label, 0xFACE);
+        assert_eq!(dequeued.badge, Badge(0xCAFE));
+    }
+
+    /// D78: call fast path (DirectSwitch) does NOT carry a message.
+    /// Data words pass through in physical registers (D74).
+    #[test]
+    fn test_d78_call_direct_switch_no_message() {
+        let mut field = test_field(4);
+        let mut entry = make_wait_entry();
+
+        field.add_waiter(&mut entry);
+
+        let msg = make_message(42, 0);
+        let result = call(&mut field, msg, Badge(0)).expect("call must succeed");
+
+        // DirectSwitch carries only the observer pointer, not a message.
+        match result {
+            CallOutcome::DirectSwitch(_observer) => {
+                // Success — no message to inspect. The dispatch layer
+                // writes metadata via write_metadata_to_registers.
+            }
+            CallOutcome::Enqueued => {
+                panic!("D78: call with 0-cap and waiter must return DirectSwitch");
+            }
+            CallOutcome::WokeReceiverSlowPath(..) => {
+                panic!("D78: call with 0-cap must use fast path (DirectSwitch)");
+            }
+        }
+    }
+
+    /// D78: call with user cap and waiter returns WokeReceiverSlowPath
+    /// carrying the full message for slow-path delivery.
+    #[test]
+    fn test_d78_call_woke_receiver_slow_path_carries_message() {
+        let mut field = test_field(4);
+        let mut entry = make_wait_entry();
+
+        field.add_waiter(&mut entry);
+
+        let msg = make_message_with_cap(0xDEAD);
+        let result = call(&mut field, msg, Badge(0)).expect("call must succeed");
+
+        match result {
+            CallOutcome::WokeReceiverSlowPath(_observer, message) => {
+                assert_eq!(
+                    message.label, 0xDEAD,
+                    "D78: message label must be carried in WokeReceiverSlowPath"
+                );
+                assert!(
+                    message.user_cap.is_some(),
+                    "D78: user cap must be present in WokeReceiverSlowPath message"
+                );
+            }
+            CallOutcome::DirectSwitch(_) => {
+                panic!("D78: call with user cap must not use DirectSwitch");
+            }
+            CallOutcome::Enqueued => {
+                panic!("D78: call with waiter must not Enqueue");
+            }
+        }
+    }
+
+    /// D78: call without waiter and with user cap enqueues normally.
+    #[test]
+    fn test_d78_call_no_waiter_with_cap_enqueues() {
+        let mut field = test_field(4);
+        let msg = make_message_with_cap(55);
+        let result = call(&mut field, msg, Badge(0)).expect("call must succeed");
+
+        assert!(
+            matches!(result, CallOutcome::Enqueued),
+            "D78: call with no waiter must Enqueue regardless of user cap"
+        );
+        assert_eq!(field.queue_length, 1);
+    }
+
+    /// D78: reply_recv with waiter on reply_field returns ReplyDelivery
+    /// carrying the reply message and client pointer.
+    #[test]
+    fn test_d78_reply_recv_reply_delivery_carries_message() {
+        let mut reply_field = test_field(4);
+        let mut recv_field = test_field(4);
+        let mut reply_waiter = make_wait_entry();
+
+        reply_field.add_waiter(&mut reply_waiter);
+        recv_field
+            .enqueue(make_message(500, 0))
+            .expect("enqueue next request");
+
+        let reply_msg = Message {
+            data: [0xA, 0xB, 0xC, 0xD],
+            label: 0xDE01,
+            badge: Badge(0x42),
+            user_cap: None,
+            reply_cap: None,
+        };
+        let mut receiver = make_wait_entry();
+        let outcome = reply_recv(&mut reply_field, &mut recv_field, reply_msg, &mut receiver);
+        // D78: reply delivery must carry the message.
+        let delivery = outcome
+            .reply_delivery
+            .expect("D78: waiter on reply_field must produce ReplyDelivery");
+
+        assert_eq!(
+            delivery.message.data,
+            [0xA, 0xB, 0xC, 0xD],
+            "D78: reply data must be carried in ReplyDelivery"
+        );
+        assert_eq!(delivery.message.label, 0xDE01);
+        assert_eq!(delivery.message.badge, Badge(0x42));
+
+        // Receive side must still work.
+        match outcome.receive_outcome {
+            ReceiveOutcome::Received(msg) => {
+                assert_eq!(msg.label, 500);
+            }
+            ReceiveOutcome::Blocked => {
+                panic!("D78: receive side must return the queued message");
+            }
+        }
+    }
+
+    /// D78: reply_recv without waiter on reply_field has no ReplyDelivery.
+    /// The reply message was enqueued (ownership in queue).
+    #[test]
+    fn test_d78_reply_recv_no_waiter_no_delivery() {
+        let mut reply_field = test_field(4);
+        let mut recv_field = test_field(4);
+
+        recv_field.enqueue(make_message(600, 0)).expect("enqueue");
+
+        let reply_msg = make_message(100, 0);
+        let mut receiver = make_wait_entry();
+        let outcome = reply_recv(&mut reply_field, &mut recv_field, reply_msg, &mut receiver);
+
+        assert!(
+            outcome.reply_delivery.is_none(),
+            "D78: no waiter on reply_field means no ReplyDelivery"
+        );
+        assert_eq!(
+            reply_field.queue_length, 1,
+            "D78: reply must be enqueued when no waiter"
+        );
+
+        match outcome.receive_outcome {
+            ReceiveOutcome::Received(msg) => {
+                assert_eq!(msg.label, 600);
+            }
+            ReceiveOutcome::Blocked => {
+                panic!("D78: receive must return the queued message");
+            }
+        }
+    }
+
+    /// D78: receive returns message ownership in Received variant.
+    /// The message leaves the queue and enters the caller's scope.
+    #[test]
+    fn test_d78_receive_transfers_ownership_from_queue() {
+        let mut field = test_field(4);
+
+        // Enqueue two messages — after one receive, queue_length must be 1.
+        field.enqueue(make_message(10, 0)).expect("enqueue first");
+        field.enqueue(make_message(20, 0)).expect("enqueue second");
+
+        assert_eq!(field.queue_length, 2);
+
+        let mut receiver = make_wait_entry();
+        let outcome = receive(&mut field, &mut receiver);
+
+        match outcome {
+            ReceiveOutcome::Received(msg) => {
+                assert_eq!(msg.label, 10, "D78: first message dequeued");
+                // After receive, queue_length must decrease.
+                assert_eq!(
+                    field.queue_length, 1,
+                    "D78: queue_length must decrease after receive"
+                );
+            }
+            ReceiveOutcome::Blocked => {
+                panic!("D78: receive on non-empty queue must not block");
             }
         }
     }

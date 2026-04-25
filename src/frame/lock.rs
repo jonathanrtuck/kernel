@@ -43,14 +43,23 @@ pub enum LockOrder {
     Observer = 3,
     /// Arena<Pulsar> — must be acquired after Field and Observer.
     Pulsar = 4,
+    /// SpaceManager (D3, D31) — unordered with Field/Observer/Pulsar.
+    /// Same unordered category as Space/Time. Does not participate
+    /// in the strict ordering chain.
+    SpaceManager = 5,
+    /// IRQ routing table (D22, D81) — unordered with Field/Observer/Pulsar.
+    /// The IRQ routing table is kernel-internal infrastructure that does
+    /// not participate in the Field-Observer-Pulsar ordering chain.
+    /// Acquired independently by handle_irq on the interrupt path.
+    IrqRouting = 6,
 }
 
 impl LockOrder {
     /// Whether this lock order participates in the strict ordering.
     ///
-    /// Space and Time are unordered (D53: no cross-arena operations
-    /// with the ordered types). They can be acquired in any order
-    /// relative to other locks. Only Field, Observer, and Pulsar
+    /// Space, Time, and SpaceManager are unordered (D53: no cross-arena
+    /// operations with the ordered types). They can be acquired in any
+    /// order relative to other locks. Only Field, Observer, and Pulsar
     /// participate in the strict ordering chain.
     pub const fn is_ordered(&self) -> bool {
         matches!(
@@ -199,9 +208,10 @@ mod tests {
     }
 
     #[test]
-    fn space_and_time_are_unordered() {
+    fn unordered_locks_do_not_participate_in_strict_ordering() {
         assert!(!LockOrder::Space.is_ordered());
         assert!(!LockOrder::Time.is_ordered());
+        assert!(!LockOrder::SpaceManager.is_ordered());
         assert!(LockOrder::Field.is_ordered());
         assert!(LockOrder::Observer.is_ordered());
         assert!(LockOrder::Pulsar.is_ordered());

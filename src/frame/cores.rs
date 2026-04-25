@@ -1,13 +1,21 @@
-//! Core manager unsafe operations — per-core state access and register reads.
+//! Core manager unsafe operations — per-core state access, register reads, and
+//! result writes.
 //!
 //! The safe `core_manager.rs` module delegates hardware-dependent operations
 //! here: reading TPIDR_EL1 for per-core state, reading Observer saved register
-//! contexts for syscall dispatch, and test helpers for constructing Observer
-//! contexts in unit tests.
+//! contexts for syscall dispatch, writing syscall results back to
+//! RegisterState, and test helpers for constructing Observer contexts.
 //!
 //! D1:  per-core state access via TPIDR_EL1.
 //! D47: IPC register layout (x0–x7) in saved register context.
+//! D49: error signaling — carry flag for IPC, negative x0 for typed ops.
 //! D74: EL0 exception entry saves directly to RegisterState (not TrapFrame).
+//! D76: pull model for reads, push model for writes. Safe dispatch reads
+//!      registers lazily and writes results via these helpers before returning
+//!      DispatchResult.
+//! D83: PerCoreData — assembly-visible #[repr(C)] struct stored in TPIDR_EL1.
+//!      TPIDR_EL1 → PerCoreData → CoreState<S>. One pointer chase from
+//!      assembly-visible struct to generic Rust struct.
 
 #[cfg(test)]
 extern crate alloc;
@@ -15,56 +23,140 @@ extern crate alloc;
 #[cfg(target_os = "none")]
 use crate::core_manager::CoreState;
 #[cfg(any(target_os = "none", test))]
+use crate::frame::arch::register_state::RegisterState;
+#[cfg(any(target_os = "none", test))]
 use crate::observer::Observer;
 #[cfg(any(target_os = "none", test))]
-use crate::syscall::{IpcRegisters, TypedRegisters};
+use crate::syscall::{IpcRegisters, SyscallError, TypedRegisters};
 #[cfg(target_os = "none")]
 use crate::time_manager::Scheduler;
 #[cfg(any(target_os = "none", test))]
 use core::ptr::NonNull;
 
-/// Read the current core's state from TPIDR_EL1.
+// ── Per-core data (D83) ───────────────────────────────────────────
+
+/// Assembly-visible per-core data stored in TPIDR_EL1 (D83).
 ///
-/// Each core stores a pointer to its `CoreState<S>` in TPIDR_EL1 at boot.
+/// `#[repr(C)]` with compile-time offset assertions so assembly code can
+/// load fields at known offsets without depending on Rust's layout algorithm.
+///
+/// TPIDR_EL1 → PerCoreData (tiny, known layout) → CoreState<S> (generic
+/// Rust struct, one pointer chase). This decouples assembly's ABI contract
+/// from the generic CoreState layout.
+///
+/// D74: assembly reads `register_state_ptr` at offset 0 to find the save
+/// target for EL0 exception entry. The Rust exception handler reads
+/// `core_state_ptr` at offset 8 to reach the full CoreState.
+///
+/// Gated on `target_os = "none"` or `test` because it references
+/// `RegisterState` from `frame::arch`, which is only available in those
+/// configurations.
+#[cfg(any(target_os = "none", test))]
+#[repr(C)]
+pub struct PerCoreData {
+    /// Offset 0: pointer to the current Observer's RegisterState.
+    /// Assembly reads this for the EL0 register save target (D74).
+    /// Updated on every context switch.
+    pub register_state_ptr: *mut RegisterState,
+
+    /// Offset 8: type-erased pointer to CoreState<S>.
+    /// Rust handler reads this to reach the full per-core state.
+    /// The generic parameter is erased because assembly and this
+    /// `#[repr(C)]` struct cannot name the concrete scheduler type.
+    pub core_state_ptr: *mut u8,
+}
+
+/// Byte offset of `register_state_ptr` within `PerCoreData`.
+/// Assembly code uses this constant to load the save target.
+#[cfg(any(target_os = "none", test))]
+pub const PER_CORE_DATA_REGISTER_STATE_OFFSET: usize = 0;
+
+/// Byte offset of `core_state_ptr` within `PerCoreData`.
+/// Rust exception handler uses this to reach CoreState.
+#[cfg(any(target_os = "none", test))]
+pub const PER_CORE_DATA_CORE_STATE_OFFSET: usize = 8;
+
+// Compile-time layout assertions — these MUST match the assembly offsets.
+#[cfg(any(target_os = "none", test))]
+const _: () = {
+    assert!(core::mem::size_of::<PerCoreData>() == 16);
+    assert!(core::mem::align_of::<PerCoreData>() == 8);
+};
+
+// Field offset assertions using core::mem::offset_of! (stable in Edition 2024).
+// This guarantees the offsets match what assembly uses.
+#[cfg(any(target_os = "none", test))]
+const _: () = {
+    assert!(
+        core::mem::offset_of!(PerCoreData, register_state_ptr)
+            == PER_CORE_DATA_REGISTER_STATE_OFFSET
+    );
+    assert!(core::mem::offset_of!(PerCoreData, core_state_ptr) == PER_CORE_DATA_CORE_STATE_OFFSET);
+};
+
+/// Read the current core's PerCoreData from TPIDR_EL1 (D83).
+///
+/// Each core stores a pointer to its `PerCoreData` in TPIDR_EL1 at boot.
 /// This function reads that register and returns a shared reference.
 ///
-/// D1: core-local, no cross-core sharing. The returned reference is valid
-/// for the duration of the exception handler (A4: non-reentrant).
+/// D83: TPIDR_EL1 → PerCoreData (assembly-visible) → CoreState<S> (Rust).
 ///
 /// # Safety (structural invariant)
 ///
-/// TPIDR_EL1 must contain a valid pointer to a `CoreState<S>` set during
+/// TPIDR_EL1 must contain a valid pointer to a `PerCoreData` set during
 /// boot. Each core writes its own value once via `set_tpidr_el1` during
 /// initialization; the value is stable afterward but the register is
 /// NOT immutable (it is per-core writable state — do NOT use
 /// `sysreg_read_const!`/`nomem`).
 #[cfg(target_os = "none")]
-pub fn read_core_state<S: Scheduler>() -> &'static CoreState<S> {
+pub fn read_per_core_data() -> &'static PerCoreData {
     // SAFETY: TPIDR_EL1 was initialized at boot to point to a valid
-    // CoreState<S> for this core. Per-core writable state — uses
+    // PerCoreData for this core. Per-core writable state — uses
     // sysreg_read! (no nomem) so LLVM cannot reorder memory accesses
     // past this read. A4 non-reentrancy guarantees no aliasing on a
     // single core.
     unsafe {
-        let ptr = crate::frame::arch::tpidr_el1() as *const CoreState<S>;
+        let ptr = crate::frame::arch::tpidr_el1() as *const PerCoreData;
 
         &*ptr
     }
 }
 
-/// Mutable access to the current core's state from TPIDR_EL1.
+/// Read the current core's state from TPIDR_EL1 via PerCoreData (D83).
+///
+/// D83: TPIDR_EL1 → PerCoreData → core_state_ptr → CoreState<S>.
+/// One pointer chase from assembly-visible struct to generic Rust struct.
+///
+/// D1: core-local, no cross-core sharing. The returned reference is valid
+/// for the duration of the exception handler (A4: non-reentrant).
+#[cfg(target_os = "none")]
+pub fn read_core_state<S: Scheduler>() -> &'static CoreState<S> {
+    // SAFETY: TPIDR_EL1 points to a valid PerCoreData, whose
+    // core_state_ptr was initialized at boot to point to a valid
+    // CoreState<S>. Per-core writable state — no nomem. A4
+    // non-reentrancy guarantees no aliasing on a single core.
+    unsafe {
+        let per_core = read_per_core_data();
+        let ptr = per_core.core_state_ptr as *const CoreState<S>;
+
+        &*ptr
+    }
+}
+
+/// Mutable access to the current core's state via PerCoreData (D83).
 ///
 /// Same as `read_core_state` but returns `&'static mut`. Safe because A4
 /// guarantees the kernel is non-reentrant on a single core — only one
 /// exception handler runs at a time, so there can be no aliasing.
 #[cfg(target_os = "none")]
 pub fn read_core_state_mut<S: Scheduler>() -> &'static mut CoreState<S> {
-    // SAFETY: Same invariant as read_core_state (per-core writable
-    // state, no nomem). Mutable access is safe because A4 guarantees
-    // non-reentrancy — the caller is the only exception handler
-    // running on this core.
+    // SAFETY: Same invariant as read_core_state. Mutable access is
+    // safe because A4 guarantees non-reentrancy — the caller is the
+    // only exception handler running on this core.
     unsafe {
-        let ptr = crate::frame::arch::tpidr_el1() as *mut CoreState<S>;
+        let per_core_ptr = crate::frame::arch::tpidr_el1() as *mut PerCoreData;
+        let per_core = &*per_core_ptr;
+        let ptr = per_core.core_state_ptr as *mut CoreState<S>;
 
         &mut *ptr
     }
@@ -116,6 +208,131 @@ pub fn read_typed_registers(observer_ptr: NonNull<Observer>) -> TypedRegisters {
             target_handle: rs.gprs[5],
             args: [rs.gprs[0], rs.gprs[1], rs.gprs[2], rs.gprs[3]],
         }
+    }
+}
+
+// ── Write helpers (D76, D49) ───────────────────────────────────────
+//
+// Safe dispatch writes syscall results to RegisterState via these
+// helpers before returning DispatchResult. The helpers are the frame/
+// side of the D76 contract: dispatch knows WHAT to write, frame/ knows
+// HOW (RegisterState layout, SPSR bit positions).
+
+/// ARM64 SPSR carry flag position (NZCV: bits 31:28, C = bit 29).
+const SPSR_CARRY_BIT: u64 = 1 << 29;
+
+/// Write an IPC error to an Observer's saved register state (D49, D76).
+///
+/// Sets the carry flag in SPSR_EL1 (pstate field) and writes the error
+/// code to x0 (gprs[0]). On eret, userspace sees carry set = error.
+#[cfg(any(target_os = "none", test))]
+pub fn write_ipc_error(observer_ptr: NonNull<Observer>, error: SyscallError) {
+    // SAFETY: observer_ptr points to a live Observer in the arena.
+    // RegisterState was saved by EL0 exception entry (D74) and is
+    // valid for mutation until the Observer is resumed.
+    unsafe {
+        let observer = observer_ptr.as_ref();
+        let rs = &mut *(observer.register_state.as_ptr().as_ptr()
+            as *mut crate::frame::arch::register_state::RegisterState);
+
+        rs.pstate |= SPSR_CARRY_BIT;
+        rs.gprs[0] = error as u64;
+    }
+}
+
+/// Clear the IPC carry flag for a successful IPC return (D49, D76).
+///
+/// Clears the carry flag in SPSR_EL1 (pstate field). On eret,
+/// userspace sees carry clear = success, registers carry message data.
+#[cfg(any(target_os = "none", test))]
+pub fn clear_ipc_carry(observer_ptr: NonNull<Observer>) {
+    // SAFETY: same invariant as write_ipc_error.
+    unsafe {
+        let observer = observer_ptr.as_ref();
+        let rs = &mut *(observer.register_state.as_ptr().as_ptr()
+            as *mut crate::frame::arch::register_state::RegisterState);
+
+        rs.pstate &= !SPSR_CARRY_BIT;
+    }
+}
+
+/// Write a typed operation result to an Observer's saved register state (D49, D76).
+///
+/// Writes `value` to x0 (gprs[0]). D49: non-negative values are success
+/// (slot indices, timestamps, zero-for-void). Negative values (bit 63 set)
+/// are error codes.
+#[cfg(any(target_os = "none", test))]
+pub fn write_typed_result(observer_ptr: NonNull<Observer>, value: u64) {
+    // SAFETY: same invariant as write_ipc_error.
+    unsafe {
+        let observer = observer_ptr.as_ref();
+        let rs = &mut *(observer.register_state.as_ptr().as_ptr()
+            as *mut crate::frame::arch::register_state::RegisterState);
+
+        rs.gprs[0] = value;
+    }
+}
+
+/// Write IPC receive registers to a receiver's saved register state (D76).
+///
+/// Slow-path receive: writes all x0–x7. Used when the receiver is not
+/// on the fast path (different exception entry, or D50 conditions not met).
+///
+/// D47 register mapping: x0–x3 = data words, x4 = label, x5 = badge,
+/// x6 = user cap slot (u64::MAX if absent), x7 = reply cap handle
+/// (u64::MAX if absent).
+///
+/// Takes pre-computed receive-side values — the dispatch layer handles
+/// cap installation (Message.user_cap → slot index) before calling.
+#[cfg(any(target_os = "none", test))]
+pub fn write_message_to_registers(
+    observer_ptr: NonNull<Observer>,
+    data: &[u64; 4],
+    label: u64,
+    badge: u64,
+    user_cap_slot: u64,
+    reply_cap_slot: u64,
+) {
+    // SAFETY: same invariant as write_ipc_error.
+    unsafe {
+        let observer = observer_ptr.as_ref();
+        let rs = &mut *(observer.register_state.as_ptr().as_ptr()
+            as *mut crate::frame::arch::register_state::RegisterState);
+
+        rs.gprs[0] = data[0];
+        rs.gprs[1] = data[1];
+        rs.gprs[2] = data[2];
+        rs.gprs[3] = data[3];
+        rs.gprs[4] = label;
+        rs.gprs[5] = badge;
+        rs.gprs[6] = user_cap_slot;
+        rs.gprs[7] = reply_cap_slot;
+    }
+}
+
+/// Write IPC metadata registers for fast-path receive (D50, D74, D76).
+///
+/// Writes only x4–x7 (label, badge, user cap, reply cap). x0–x3 pass
+/// through in physical registers carrying data words from sender to
+/// receiver — the restore path skips loading them (ResumeFastPath).
+#[cfg(any(target_os = "none", test))]
+pub fn write_metadata_to_registers(
+    observer_ptr: NonNull<Observer>,
+    label: u64,
+    badge: u64,
+    user_cap_slot: u64,
+    reply_cap_slot: u64,
+) {
+    // SAFETY: same invariant as write_ipc_error.
+    unsafe {
+        let observer = observer_ptr.as_ref();
+        let rs = &mut *(observer.register_state.as_ptr().as_ptr()
+            as *mut crate::frame::arch::register_state::RegisterState);
+
+        rs.gprs[4] = label;
+        rs.gprs[5] = badge;
+        rs.gprs[6] = user_cap_slot;
+        rs.gprs[7] = reply_cap_slot;
     }
 }
 
@@ -205,6 +422,7 @@ mod tests {
             register_state: RegisterStateHandle::new(rs_ptr),
             page_table_root: 0,
             cap_table: NonNull::dangling(),
+            cap_table_capacity: 0,
             state: PrimaryState::Runnable,
             suspended: false,
             compute_aggregate: 0,
@@ -246,6 +464,7 @@ mod tests {
             register_state: RegisterStateHandle::new(rs_ptr),
             page_table_root: 0,
             cap_table: NonNull::dangling(),
+            cap_table_capacity: 0,
             state: PrimaryState::Runnable,
             suspended: false,
             compute_aggregate: 0,
@@ -265,5 +484,313 @@ mod tests {
             "target_handle must roundtrip"
         );
         assert_eq!(read.args, written.args, "args must roundtrip");
+    }
+
+    fn make_test_observer(rs_ptr: NonNull<u8>) -> Observer {
+        Observer {
+            register_state: RegisterStateHandle::new(rs_ptr),
+            page_table_root: 0,
+            cap_table: NonNull::dangling(),
+            cap_table_capacity: 0,
+            state: PrimaryState::Runnable,
+            suspended: false,
+            compute_aggregate: 0,
+            responsiveness: DEFAULT_RESPONSIVENESS,
+            throughput: DEFAULT_THROUGHPUT,
+            clock_access: false,
+            wait_state: WaitState::None,
+            refcount: 1,
+            generation: AtomicU64::new(0),
+        }
+    }
+
+    // ── D76 write helper tests ──────────────────────────────────────
+
+    #[test]
+    fn test_d76_write_ipc_error_sets_carry_and_x0() {
+        let rs_ptr = alloc_test_register_state();
+        let mut observer = make_test_observer(rs_ptr);
+        let obs_ptr = NonNull::from(&mut observer);
+
+        write_ipc_error(obs_ptr, SyscallError::InvalidCap);
+
+        let rs = unsafe {
+            &*(rs_ptr.as_ptr() as *const crate::frame::arch::register_state::RegisterState)
+        };
+
+        assert_ne!(
+            rs.pstate & SPSR_CARRY_BIT,
+            0,
+            "D49: carry must be set for IPC error"
+        );
+        assert_eq!(
+            rs.gprs[0],
+            SyscallError::InvalidCap as u64,
+            "D49: x0 must contain error code"
+        );
+    }
+
+    #[test]
+    fn test_d76_clear_ipc_carry() {
+        let rs_ptr = alloc_test_register_state();
+        let mut observer = make_test_observer(rs_ptr);
+        let obs_ptr = NonNull::from(&mut observer);
+
+        write_ipc_error(obs_ptr, SyscallError::QueueFull);
+
+        let rs = unsafe {
+            &*(rs_ptr.as_ptr() as *const crate::frame::arch::register_state::RegisterState)
+        };
+
+        assert_ne!(rs.pstate & SPSR_CARRY_BIT, 0, "precondition: carry set");
+
+        clear_ipc_carry(obs_ptr);
+
+        let rs = unsafe {
+            &*(rs_ptr.as_ptr() as *const crate::frame::arch::register_state::RegisterState)
+        };
+
+        assert_eq!(
+            rs.pstate & SPSR_CARRY_BIT,
+            0,
+            "D49: carry must be cleared for IPC success"
+        );
+    }
+
+    #[test]
+    fn test_d76_write_typed_result() {
+        let rs_ptr = alloc_test_register_state();
+        let mut observer = make_test_observer(rs_ptr);
+        let obs_ptr = NonNull::from(&mut observer);
+
+        write_typed_result(obs_ptr, 42);
+
+        let rs = unsafe {
+            &*(rs_ptr.as_ptr() as *const crate::frame::arch::register_state::RegisterState)
+        };
+
+        assert_eq!(rs.gprs[0], 42, "D49: x0 must contain the return value");
+    }
+
+    #[test]
+    fn test_d76_write_typed_result_negative_is_error() {
+        let rs_ptr = alloc_test_register_state();
+        let mut observer = make_test_observer(rs_ptr);
+        let obs_ptr = NonNull::from(&mut observer);
+        let error_value = (-1i64) as u64;
+
+        write_typed_result(obs_ptr, error_value);
+
+        let rs = unsafe {
+            &*(rs_ptr.as_ptr() as *const crate::frame::arch::register_state::RegisterState)
+        };
+
+        assert_eq!(
+            rs.gprs[0] as i64, -1,
+            "D49: negative x0 signals error for typed ops"
+        );
+    }
+
+    #[test]
+    fn test_d76_write_message_to_registers_all_fields() {
+        let rs_ptr = alloc_test_register_state();
+        let mut observer = make_test_observer(rs_ptr);
+        let obs_ptr = NonNull::from(&mut observer);
+        let data = [0x1111, 0x2222, 0x3333, 0x4444];
+
+        write_message_to_registers(obs_ptr, &data, 0xABCD, 0x5555, 7, u64::MAX);
+
+        let rs = unsafe {
+            &*(rs_ptr.as_ptr() as *const crate::frame::arch::register_state::RegisterState)
+        };
+
+        assert_eq!(rs.gprs[0], 0x1111, "x0 = data[0]");
+        assert_eq!(rs.gprs[1], 0x2222, "x1 = data[1]");
+        assert_eq!(rs.gprs[2], 0x3333, "x2 = data[2]");
+        assert_eq!(rs.gprs[3], 0x4444, "x3 = data[3]");
+        assert_eq!(rs.gprs[4], 0xABCD, "x4 = label");
+        assert_eq!(rs.gprs[5], 0x5555, "x5 = badge");
+        assert_eq!(rs.gprs[6], 7, "x6 = user cap slot");
+        assert_eq!(rs.gprs[7], u64::MAX, "x7 = no reply cap (sentinel)");
+    }
+
+    #[test]
+    fn test_d76_write_metadata_only_x4_through_x7() {
+        let rs_ptr = alloc_test_register_state();
+        let mut observer = make_test_observer(rs_ptr);
+        let obs_ptr = NonNull::from(&mut observer);
+        let sentinel_data: [u64; 4] = [0xDEAD; 4];
+
+        write_message_to_registers(obs_ptr, &sentinel_data, 0, 0, 0, 0);
+        write_metadata_to_registers(obs_ptr, 0x1ABE, 0xBAD6E, 3, 5);
+
+        let rs = unsafe {
+            &*(rs_ptr.as_ptr() as *const crate::frame::arch::register_state::RegisterState)
+        };
+
+        assert_eq!(rs.gprs[0], 0xDEAD, "x0 must be untouched by metadata write");
+        assert_eq!(rs.gprs[1], 0xDEAD, "x1 must be untouched by metadata write");
+        assert_eq!(rs.gprs[2], 0xDEAD, "x2 must be untouched by metadata write");
+        assert_eq!(rs.gprs[3], 0xDEAD, "x3 must be untouched by metadata write");
+        assert_eq!(rs.gprs[4], 0x1ABE, "x4 = label");
+        assert_eq!(rs.gprs[5], 0xBAD6E, "x5 = badge");
+        assert_eq!(rs.gprs[6], 3, "x6 = user cap slot");
+        assert_eq!(rs.gprs[7], 5, "x7 = reply cap slot");
+    }
+
+    #[test]
+    fn test_d76_carry_flag_preserves_other_pstate_bits() {
+        let rs_ptr = alloc_test_register_state();
+
+        unsafe {
+            let rs =
+                &mut *(rs_ptr.as_ptr() as *mut crate::frame::arch::register_state::RegisterState);
+
+            rs.pstate = 0x9000_0000;
+        }
+
+        let mut observer = make_test_observer(rs_ptr);
+        let obs_ptr = NonNull::from(&mut observer);
+
+        write_ipc_error(obs_ptr, SyscallError::NoRight);
+
+        let rs = unsafe {
+            &*(rs_ptr.as_ptr() as *const crate::frame::arch::register_state::RegisterState)
+        };
+
+        assert_ne!(rs.pstate & SPSR_CARRY_BIT, 0, "carry must be set");
+        assert_eq!(
+            rs.pstate & !SPSR_CARRY_BIT,
+            0x9000_0000,
+            "other NZCV bits must be preserved"
+        );
+
+        clear_ipc_carry(obs_ptr);
+
+        let rs = unsafe {
+            &*(rs_ptr.as_ptr() as *const crate::frame::arch::register_state::RegisterState)
+        };
+
+        assert_eq!(rs.pstate & SPSR_CARRY_BIT, 0, "carry must be cleared");
+        assert_eq!(
+            rs.pstate, 0x9000_0000,
+            "original pstate bits must be restored"
+        );
+    }
+
+    // ── D83 PerCoreData layout tests ───────────────────────────────
+
+    #[test]
+    fn test_d83_per_core_data_size() {
+        assert_eq!(
+            core::mem::size_of::<PerCoreData>(),
+            16,
+            "D83: PerCoreData must be exactly 16 bytes (two pointers)"
+        );
+    }
+
+    #[test]
+    fn test_d83_per_core_data_alignment() {
+        assert_eq!(
+            core::mem::align_of::<PerCoreData>(),
+            8,
+            "D83: PerCoreData must be 8-byte aligned (pointer alignment)"
+        );
+    }
+
+    #[test]
+    fn test_d83_register_state_ptr_at_offset_zero() {
+        // The register_state_ptr field must be at offset 0 so assembly
+        // can load it with a simple ldr from the TPIDR_EL1 value.
+        assert_eq!(
+            PER_CORE_DATA_REGISTER_STATE_OFFSET, 0,
+            "D83: register_state_ptr must be at offset 0 for assembly access"
+        );
+
+        // Verify the actual struct layout matches.
+        let base = core::ptr::null::<PerCoreData>();
+        let offset = unsafe { core::ptr::addr_of!((*base).register_state_ptr) as usize };
+
+        assert_eq!(offset, 0, "D83: register_state_ptr actual offset must be 0");
+    }
+
+    #[test]
+    fn test_d83_core_state_ptr_at_offset_eight() {
+        assert_eq!(
+            PER_CORE_DATA_CORE_STATE_OFFSET, 8,
+            "D83: core_state_ptr must be at offset 8"
+        );
+
+        let base = core::ptr::null::<PerCoreData>();
+        let offset = unsafe { core::ptr::addr_of!((*base).core_state_ptr) as usize };
+
+        assert_eq!(offset, 8, "D83: core_state_ptr actual offset must be 8");
+    }
+
+    #[test]
+    fn test_d83_per_core_data_field_access_roundtrip() {
+        // Verify that writing and reading through PerCoreData fields works
+        // correctly — the repr(C) layout must not reorder or pad fields.
+        let rs_ptr = alloc_test_register_state();
+        let mut per_core = PerCoreData {
+            register_state_ptr: rs_ptr.as_ptr()
+                as *mut crate::frame::arch::register_state::RegisterState,
+            core_state_ptr: core::ptr::null_mut(),
+        };
+
+        // Write a sentinel via the register_state_ptr.
+        unsafe {
+            (*per_core.register_state_ptr).gprs[0] = 0xDEAD_BEEF;
+        }
+
+        // Read it back through the raw pointer.
+        let read_back = unsafe { (*per_core.register_state_ptr).gprs[0] };
+
+        assert_eq!(
+            read_back, 0xDEAD_BEEF,
+            "D83: register_state_ptr must provide valid access to RegisterState"
+        );
+
+        // Set and verify core_state_ptr.
+        let sentinel: u64 = 0x1234_5678;
+
+        per_core.core_state_ptr = &sentinel as *const u64 as *mut u8;
+
+        let recovered = unsafe { *(per_core.core_state_ptr as *const u64) };
+
+        assert_eq!(
+            recovered, 0x1234_5678,
+            "D83: core_state_ptr must provide valid type-erased access"
+        );
+    }
+
+    #[test]
+    fn test_d83_per_core_data_raw_byte_access() {
+        // Verify that raw byte access at known offsets yields the correct
+        // field values — this is what assembly will do.
+        let rs_ptr = alloc_test_register_state();
+        let sentinel_core_state: u64 = 0xCAFE_BABE;
+        let per_core = PerCoreData {
+            register_state_ptr: rs_ptr.as_ptr()
+                as *mut crate::frame::arch::register_state::RegisterState,
+            core_state_ptr: &sentinel_core_state as *const u64 as *mut u8,
+        };
+        let base = &per_core as *const PerCoreData as *const u8;
+        // Read register_state_ptr at offset 0 as a raw u64.
+        let rs_from_offset = unsafe { *(base.add(0) as *const u64) };
+
+        assert_eq!(
+            rs_from_offset,
+            rs_ptr.as_ptr() as u64,
+            "D83: raw byte offset 0 must yield register_state_ptr value"
+        );
+
+        // Read core_state_ptr at offset 8 as a raw u64.
+        let cs_from_offset = unsafe { *(base.add(8) as *const u64) };
+
+        assert_eq!(
+            cs_from_offset, &sentinel_core_state as *const u64 as u64,
+            "D83: raw byte offset 8 must yield core_state_ptr value"
+        );
     }
 }

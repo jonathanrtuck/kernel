@@ -17,6 +17,7 @@ pub mod config;
 pub mod core_manager;
 pub mod fault;
 pub mod field;
+pub mod kernel_state;
 pub mod observer;
 #[cfg(any(target_os = "none", test))]
 pub mod print;
@@ -656,7 +657,7 @@ mod integration_tests {
         let outcome = send(&mut field, message).expect("send must succeed");
 
         assert!(
-            matches!(outcome, SendOutcome::WokeReceiver(_)),
+            matches!(outcome, SendOutcome::WokeReceiver(..)),
             "D50: send to field with waiting receiver must return WokeReceiver"
         );
         // 3. Message bypassed the queue — queue must still be empty.
@@ -753,20 +754,23 @@ mod integration_tests {
         let outcome = call(&mut field, message_with_cap, Badge(0))
             .expect("call with user cap must not return QueueFull");
 
+        // D78: waiter present + user cap = WokeReceiverSlowPath (not DirectSwitch).
+        // The waiter IS popped (message bypasses queue), but delivery requires
+        // the slow path for cap transfer. The dispatch layer delivers via
+        // write_message_to_registers.
         assert!(
-            matches!(outcome, CallOutcome::Enqueued),
-            "D50: call with user cap must be Enqueued (slow path), not DirectSwitch"
+            matches!(outcome, CallOutcome::WokeReceiverSlowPath(..)),
+            "D78: call with user cap and waiter must return WokeReceiverSlowPath"
         );
-        // 3. The message must be in the queue — slow path enqueued it.
+        // D78: message bypassed the queue — queue stays empty.
         assert_eq!(
-            field.queue_length, 1,
-            "D50 slow path: message must be in the queue after Enqueued outcome"
+            field.queue_length, 0,
+            "D78: message bypasses queue when waiter is present (slow-path delivery)"
         );
-        // 4. The waiter was NOT consumed (slow path skips the waiter check).
-        //    The waiter remains for a future receive to pop.
+        // D78: waiter was popped for direct delivery.
         assert!(
-            field.waiters_head.is_some(),
-            "D50 slow path: waiter must still be present after Enqueued outcome"
+            field.waiters_head.is_none(),
+            "D78: waiter must be popped on WokeReceiverSlowPath"
         );
     }
 
@@ -807,9 +811,14 @@ mod integration_tests {
             reply_field.queue_length, 1,
             "D16: reply_recv must enqueue the reply message into reply_field"
         );
+        // D78: reply with no waiter → enqueued, no reply delivery.
+        assert!(
+            outcome.reply_delivery.is_none(),
+            "D78: no waiter on reply_field means reply was enqueued"
+        );
 
         // 5. The receive side must have returned the pre-loaded request.
-        match outcome {
+        match outcome.receive_outcome {
             ReceiveOutcome::Received(msg) => {
                 assert_eq!(
                     msg.label, 100,
@@ -1312,7 +1321,7 @@ mod integration_tests {
         let outcome = send(&mut field, message).expect("send must succeed");
 
         match outcome {
-            SendOutcome::WokeReceiver(receiver_ptr) => {
+            SendOutcome::WokeReceiver(receiver_ptr, _message) => {
                 let sched = RoundRobin::new();
                 let approved = sched.should_switch_to(receiver_ptr);
 
@@ -1337,16 +1346,35 @@ mod integration_tests {
 
     #[test]
     fn test_integration_wave3_d2_handle_timer_round_robin_rotation() {
-        use crate::core_manager::{CoreState, DispatchResult};
+        use crate::core_manager::{CoreState, DispatchResult, MAX_DEADLINES_PER_CORE};
+        use crate::kernel_state::KernelState;
         use crate::time_manager::CoreId;
         use crate::time_manager::round_robin::RoundRobin;
 
+        const FREQ: u64 = 24_000_000;
+        let ks = KernelState::new(
+            make_arena(),
+            make_arena(),
+            make_arena(),
+            make_arena(),
+            make_arena(),
+            SpaceManager {
+                root_pool: RootPool {
+                    total_bytes: 16 * 4096,
+                    free_bytes: 16 * 4096,
+                    page_size: 4096,
+                },
+                next_physical_base: 4096,
+                next_va_base: 4096,
+            },
+        );
         let mut core = CoreState {
             core_id: CoreId(0),
             current: None,
             scheduler: RoundRobin::new(),
+            deadlines: [None; MAX_DEADLINES_PER_CORE],
+            deadline_count: 0,
         };
-
         let mut obs_a = make_observer_for_scheduler();
         let mut obs_b = make_observer_for_scheduler();
         let mut obs_c = make_observer_for_scheduler();
@@ -1359,18 +1387,24 @@ mod integration_tests {
         core.scheduler.enqueue(ptr_c);
 
         // Timer tick 1: rotates A to tail → pick_next returns B.
-        match core.handle_timer() {
-            DispatchResult::Resume(ptr) => assert_eq!(ptr, ptr_b, "tick 1: B"),
+        match core.handle_timer(1000, &ks, FREQ) {
+            DispatchResult::Resume(ptr) | DispatchResult::ResumeFastPath(ptr) => {
+                assert_eq!(ptr, ptr_b, "tick 1: B")
+            }
             DispatchResult::Idle => panic!("must not idle with 3 observers"),
         }
         // Timer tick 2: rotates B to tail → pick_next returns C.
-        match core.handle_timer() {
-            DispatchResult::Resume(ptr) => assert_eq!(ptr, ptr_c, "tick 2: C"),
+        match core.handle_timer(1000, &ks, FREQ) {
+            DispatchResult::Resume(ptr) | DispatchResult::ResumeFastPath(ptr) => {
+                assert_eq!(ptr, ptr_c, "tick 2: C")
+            }
             DispatchResult::Idle => panic!("must not idle"),
         }
         // Timer tick 3: rotates C to tail → pick_next returns A.
-        match core.handle_timer() {
-            DispatchResult::Resume(ptr) => assert_eq!(ptr, ptr_a, "tick 3: A"),
+        match core.handle_timer(1000, &ks, FREQ) {
+            DispatchResult::Resume(ptr) | DispatchResult::ResumeFastPath(ptr) => {
+                assert_eq!(ptr, ptr_a, "tick 3: A")
+            }
             DispatchResult::Idle => panic!("must not idle"),
         }
     }
@@ -1423,20 +1457,40 @@ mod integration_tests {
 
     #[test]
     fn test_integration_wave3_d46_idle_after_all_block() {
-        use crate::core_manager::{CoreState, DispatchResult};
+        use crate::core_manager::{CoreState, DispatchResult, MAX_DEADLINES_PER_CORE};
+        use crate::kernel_state::KernelState;
         use crate::time_manager::CoreId;
         use crate::time_manager::round_robin::RoundRobin;
 
+        const FREQ: u64 = 24_000_000;
+        let ks = KernelState::new(
+            make_arena(),
+            make_arena(),
+            make_arena(),
+            make_arena(),
+            make_arena(),
+            SpaceManager {
+                root_pool: RootPool {
+                    total_bytes: 16 * 4096,
+                    free_bytes: 16 * 4096,
+                    page_size: 4096,
+                },
+                next_physical_base: 4096,
+                next_va_base: 4096,
+            },
+        );
         let mut core = CoreState {
             core_id: CoreId(0),
             current: None,
             scheduler: RoundRobin::new(),
+            deadlines: [None; MAX_DEADLINES_PER_CORE],
+            deadline_count: 0,
         };
 
         // No observers enqueued — empty queue.
-        match core.handle_timer() {
-            DispatchResult::Idle => {} // correct
-            DispatchResult::Resume(_) => {
+        match core.handle_timer(1000, &ks, FREQ) {
+            DispatchResult::Idle => {}
+            DispatchResult::Resume(_) | DispatchResult::ResumeFastPath(_) => {
                 panic!("D46: empty run queue must return Idle (WFI)");
             }
         }
@@ -1530,6 +1584,11 @@ mod integration_tests {
             }
             CallOutcome::Enqueued => {
                 panic!("D50: call with 0-cap and waiter must return DirectSwitch");
+            }
+            CallOutcome::WokeReceiverSlowPath(..) => {
+                panic!(
+                    "D50: 0-cap message with waiter must return DirectSwitch, not WokeReceiverSlowPath"
+                );
             }
         }
     }

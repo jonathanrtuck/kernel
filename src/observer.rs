@@ -150,6 +150,14 @@ pub struct Observer {
     /// Updatable: table can grow via D8 table-full fault. Always valid.
     pub cap_table: NonNull<capability::Entry>,
 
+    /// Number of entries in the cap table array (D8, D77).
+    ///
+    /// Required for bounds-checking handle resolution on the hot path.
+    /// D8 put capacity on Table, but the hot path indexes through
+    /// Observer's raw pointer — it needs the bound here. Updated on
+    /// table growth (D8 table-full fault handler provides more Space).
+    pub cap_table_capacity: u32,
+
     /// Primary lifecycle state (D39).
     pub state: PrimaryState,
 
@@ -379,6 +387,7 @@ impl Observer {
             register_state: RegisterStateHandle::new(NonNull::dangling()),
             page_table_root: 0,
             cap_table: NonNull::dangling(),
+            cap_table_capacity: 0,
             state: PrimaryState::Runnable,
             suspended: false,
             compute_aggregate: 100,
@@ -398,7 +407,7 @@ mod tests {
 
     #[test]
     fn observer_layout() {
-        assert_eq!(core::mem::size_of::<Observer>(), 88);
+        assert_eq!(core::mem::size_of::<Observer>(), 96);
     }
 
     #[test]
@@ -418,6 +427,7 @@ mod tests {
             register_state: RegisterStateHandle(NonNull::dangling()),
             page_table_root: 0,
             cap_table: NonNull::dangling(),
+            cap_table_capacity: 0,
             state: PrimaryState::Inert,
             suspended: false,
             compute_aggregate: 0,
@@ -438,6 +448,7 @@ mod tests {
             register_state: RegisterStateHandle(NonNull::dangling()),
             page_table_root: 0,
             cap_table: NonNull::dangling(),
+            cap_table_capacity: 0,
             state: PrimaryState::Inert,
             suspended: false,
             compute_aggregate: 0,
@@ -459,6 +470,7 @@ mod tests {
             register_state: RegisterStateHandle(NonNull::dangling()),
             page_table_root: 0,
             cap_table: NonNull::dangling(),
+            cap_table_capacity: 0,
             state: PrimaryState::Runnable,
             suspended: false,
             compute_aggregate: 0,
@@ -479,6 +491,7 @@ mod tests {
             register_state: RegisterStateHandle(NonNull::dangling()),
             page_table_root: 0,
             cap_table: NonNull::dangling(),
+            cap_table_capacity: 0,
             state: PrimaryState::Inert,
             suspended: false,
             compute_aggregate: 0,
@@ -506,6 +519,7 @@ mod tests {
             register_state: RegisterStateHandle(NonNull::dangling()),
             page_table_root: 0,
             cap_table: NonNull::dangling(),
+            cap_table_capacity: 0,
             state: PrimaryState::Blocked,
             suspended: true,
             compute_aggregate: 0,
@@ -529,6 +543,7 @@ mod tests {
             register_state: RegisterStateHandle(NonNull::dangling()),
             page_table_root: 0,
             cap_table: NonNull::dangling(),
+            cap_table_capacity: 0,
             state: PrimaryState::Blocked,
             suspended: false,
             compute_aggregate: 0,
