@@ -14,6 +14,9 @@
 //!      No base/effective scheduling split (inheritance is userspace policy).
 //!      Core assignment is transient (no struct field).
 //!      Reply field is a cap-table reserved slot (D21 pattern).
+//! D56: placement mechanism settled. Scored placement reads R/T/P to match
+//!      Observer to core. Cache affinity tracked per-core, not per-Observer.
+//!      No core ID field here (D43 preserved).
 
 // TODO: remove
 #![allow(dead_code)]
@@ -102,7 +105,8 @@ pub enum WaitState {
 /// - Reply field: cap-table reserved slot (D16 + D21 pattern).
 /// - Time caps: cap-table regular slots (D30).
 /// - Algorithm-specific scheduler state: per-core (D2).
-/// - Core assignment: transient, re-decided per runnable transition (D31).
+/// - Core assignment: transient, re-decided per runnable transition (D31/D56).
+/// - Cache affinity: per-core tracker with decay (D56).
 pub struct Observer {
     /// Opaque handle to saved register context in structural backing.
     /// Arch core code resolves this for save/restore on context switch.

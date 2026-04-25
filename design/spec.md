@@ -3384,6 +3384,107 @@ adopted), continuation state layout (extends D33).
   deferred-on-send as the permanent solution).
 - **Journal:** `journal/052-field-destroy-routing-cleanup.md`.
 
+### D56 — Cross-core logic: scored placement, steal-then-idle, push+pull rebalance
+
+The kernel-internal mechanisms for Observer placement, cross-core wake, core
+idle management, and rebalancing. Settles the protocols that implement D43's
+"fresh placement decision each wake-up" across multiple cores.
+
+**Per-core run queues.** Each core owns a local run queue. The scheduler pick
+(D1 hot path) reads only local state. Migration between queues is cold-path.
+Global run queue foreclosed by D1 (shared mutable state on hot path).
+
+**Scored placement.** On every runnable transition, the placement function
+scores candidate cores using: idle status (atomic bitmap, boot-sized array of
+AtomicU64), queue depth (atomic per-core counter), profile compatibility
+(Observer's R/T/P matched against core's current scheduler algorithm per D2),
+capacity factor (D36), and cache affinity with decay (~1–5ms half-life). The
+function returns "local" (hot path, no IPI) or "remote(core_id)" (cold path,
+mailbox + IPI). The scoring function is behind a trait — weights are tunable,
+and the implementation is a leaf node swappable without affecting the rest of
+the kernel.
+
+**Cross-core wake protocol.** When placement returns "remote": (1) causing core
+writes Observer reference to per-core mailbox for target, (2) causing core sends
+SGI, (3) target core's IPI handler reads mailbox, (4) handler acquires arena
+locks (D53 ordering: Field < Observer), (5) handler enqueues Observer on local
+run queue. The causing core does not touch the target's run queue directly.
+
+**Idle entry: steal-then-idle.** When a core's last runnable Observer blocks:
+scan other cores' queue depths (atomic reads). If any core has queue depth > 1,
+steal its lowest-affinity runnable Observer (D53 arena locks). If no work found,
+set idle bit and enter WFI (or CPU_SUSPEND per D46 platform policy).
+
+**Rebalancing: push + pull.** Push on timer tick: each core's preemption timer
+handler checks local queue depth against fair-share target, pushes excess
+Observers to least-loaded core via mailbox + IPI. Pull on idle entry:
+steal-then-idle as above. Both are A4-consistent (hardware exception handlers).
+
+**Dynamic core-type classification.** Scheduler algorithm assignment per core
+adapts to workload — the kernel reclassifies based on the (R, T, P) profiles of
+Observers currently on each core. Reclassification rebuilds algorithm-specific
+state from abstract properties (D2). Eliminates wasted capacity from static
+classification.
+
+**Cache affinity: per-core tracker with decay.** Each per-core scheduler
+maintains a tracker (ring buffer of recent Observer IDs with timestamps).
+Affinity weight decays over ~1–5ms (L2 cache lifetime). D43's "no core ID on
+Observer" preserved — affinity state lives in per-core structures. Affinity is a
+tiebreaker, not a binding constraint.
+
+**Boot-sized per-core arrays.** All per-core data structures (idle bitmap, queue
+depths, algorithm tags, capacity factors, affinity trackers) are sized at boot
+based on discovered core count. A3 forbids compile-time core count limits.
+
+Does NOT settle: scoring weights (tuning parameter), mailbox structure
+(implementation detail), reclassification thresholds (tuning parameter),
+affinity decay curve, work stealing synchronization mechanism (lock-based vs.
+lock-free), NUMA awareness (deferred until NUMA hardware is tested), IPC
+locality tracking (would address D50 fast-path locality tension — requires its
+own derivation if needed), admission control on heterogeneous migration (D2
+journal 002 open sub-question — depends on specific scheduler algorithms).
+
+- **Rests on:** D1 (hot/cold split — per-core run queues forced; cold-path
+  migration; "shared cold-path reads cheap on cache-coherent ARM64" enables
+  scored placement), D2 (per-core algorithm heterogeneity — creates the matching
+  problem that scored placement solves; trait boundary for scheduler enables
+  dynamic reclassification), D42 (three-value profile — provides placement
+  signal without core identity; R/T/P → core-type preference is
+  kernel-internal), D43 (transient core assignment — "fresh placement decision
+  each wake-up" is the requirement this derivation implements; "cache affinity
+  is a per-core scheduler hint" constrains affinity tracking), D46 (core
+  lifecycle — idle via WFI, wake via IPI; boot-time activation; deactivation
+  conservation check), D50 (cross-core IPC = enqueue + IPI — establishes the
+  slow-path pattern; same-core fast-path creates a tension with scored
+  placement), D53 (arena lock ordering — governs cross-core IPI handler lock
+  acquisition and work stealing), D36 (normalized compute units — fungibility
+  makes migration costless at cap level; capacity factors feed the scoring
+  function), A4 (purely reactive — forecloses background rebalancer; constrains
+  to four piggy-back triggers), A3 (generic — forbids compile-time core count
+  limits; boot-sized arrays), A5 (leaf node — placement complexity
+  kernel-internal; Observers don't see cores), A2 (ARM64 — cache coherency, SGI
+  for IPI, WFI/CPU_SUSPEND, big.LITTLE motivates heterogeneous placement), A1
+  (Rust — trait boundaries, AtomicU64, ownership model for per-core vs shared),
+  O2 (IPIs for cross-core coordination — the mechanism), O3 (exceptions on
+  causing core — placement runs on the causing core), `design/research/smp.md`
+  (synchronization models, IPI latency, "Wasted Cores" failure modes,
+  heterogeneous scheduling), `design/landscape.md` §4.3 (multicore scheduling —
+  per-core queues universal, work stealing secondary to affinity), §4.7
+  (energy-aware scheduling — EAS maps to scoring function pattern).
+- **Landscape divergence:** No surveyed system combines per-core algorithm
+  heterogeneity, scored placement with profile matching, dynamic
+  reclassification, and reactive-only rebalancing. Linux EAS is closest (scored
+  placement with energy model) but assumes single algorithm. Novel position
+  arises from D2 × D43 × A4 intersection.
+- **Status:** settled — revisit if D1 is revised (changes hot/cold split), if D2
+  is revised (unified scheduler eliminates matching), if D43 is revised (static
+  binding replaces placement), if D50 is revised (changes fast-path locality
+  tradeoff), if scoring overhead proves consistently >500 cycles (>60% of slow-
+  path budget — would motivate fallback to two-tier), or if cache-line bouncing
+  on per-core queue depth proves measurably worse than less-frequent cross-core
+  reads (would motivate Pragmatic variant).
+- **Journal:** `journal/053-cross-core-logic.md`.
+
 ---
 
 ## Open questions
@@ -4030,6 +4131,17 @@ adopted), continuation state layout (extends D33).
   kernel-internal references), IPI-requested removal for cross-core sources (D1
   hot-path isolation + O2). Inline walk rejected (bounded destroy time), lock
   rejected (D1 violation), deferred-on-send noted as Verus stepping stone.
+- `053-cross-core-logic.md` — reasoning for D56: cross-core kernel mechanisms.
+  Scored placement (idle status, queue depth, profile compatibility, capacity,
+  affinity with decay). Steal-then-idle on idle entry. Push+pull rebalancing
+  (push on timer tick, pull on idle entry). Dynamic core-type classification
+  (algorithm adapts to workload). Per-core run queues forced by D1. Cross-core
+  wake via mailbox + SGI + remote handler (D53 lock ordering). Boot-sized
+  per-core arrays (A3). Precise combination chosen over Minimal (no rebalancing)
+  and Pragmatic (two-tier) — bet that scoring overhead is recovered by improved
+  utilization; interfaces make fallback painless. Landscape: no surveyed system
+  combines D2 heterogeneity + D43 transient assignment + A4 reactive-only
+  rebalancing.
 
 ---
 

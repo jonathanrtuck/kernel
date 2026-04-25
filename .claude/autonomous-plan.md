@@ -34,37 +34,39 @@ thorough enough that most implementation is constrained by the derivation graph.
 These can be derived autonomously via `/explore` loops. Each is a self-contained
 derivation with clear inputs and a narrow solution space.
 
-| # | Question | Constraining derivations | Status |
-|---|----------|--------------------------|--------|
-| M1 | Badge size | D17 (64-bit default stated) | not started |
-| M2 | Scheduler callback signature | D2, D42, D50, D53 | not started |
-| M3 | Send-to-waiting-receiver optimization | D13, D50 (probably no separate mechanism) | not started |
-| M4 | Page-addressed vs byte-addressed | A5, D25 (kernel absorbs → byte with rounding) | not started |
-| M5 | Observer schema downstream (register save layout, budget encoding, default profile, self-reference caps) | D43, D39, ARM64 ABI | not started |
-| M6 | Fault message content and enqueue mechanism | D12, D18, D20, D28, D7 | not started |
-| M7 | Pulsar creation API shape | D32, D44, D35 (composable pattern) | not started |
-| M8 | Pulsar message content layout | D28, D44 | not started |
-| M9 | Badge-closure message format | D17, D28 | not started |
-| M10 | Badge on kernel-created send-once caps | D16, D17 | not started |
-| M11 | Clock access authority | D44 (CNTKCTL_EL1 per-Observer) | not started |
+| #   | Question                                                                                                 | Constraining derivations                      | Status      |
+| --- | -------------------------------------------------------------------------------------------------------- | --------------------------------------------- | ----------- |
+| M1  | Badge size                                                                                               | D17 (64-bit default stated)                   | not started |
+| M2  | Scheduler callback signature                                                                             | D2, D42, D50, D53                             | not started |
+| M3  | Send-to-waiting-receiver optimization                                                                    | D13, D50 (probably no separate mechanism)     | not started |
+| M4  | Page-addressed vs byte-addressed                                                                         | A5, D25 (kernel absorbs → byte with rounding) | not started |
+| M5  | Observer schema downstream (register save layout, budget encoding, default profile, self-reference caps) | D43, D39, ARM64 ABI                           | not started |
+| M6  | Fault message content and enqueue mechanism                                                              | D12, D18, D20, D28, D7                        | not started |
+| M7  | Pulsar creation API shape                                                                                | D32, D44, D35 (composable pattern)            | not started |
+| M8  | Pulsar message content layout                                                                            | D28, D44                                      | not started |
+| M9  | Badge-closure message format                                                                             | D17, D28                                      | not started |
+| M10 | Badge on kernel-created send-once caps                                                                   | D16, D17                                      | not started |
+| M11 | Clock access authority                                                                                   | D44 (CNTKCTL_EL1 per-Observer)                | not started |
 
 ### Genuine choices — multiple valid paths, need designer input
 
 These require the designer to make a judgment call. Claude presents the full
 design space; the designer decides.
 
-| # | Question | Core tension | Status |
-|---|----------|--------------|--------|
-| G1 | Revocation add-ons (generation vs CDT vs both) | Speed vs granularity; cross-core prompt-effect | not started |
-| G2 | Shared capability tables | D8 per-Observer sufficiency vs sharing pressure | not started |
-| G3 | Interrupt priority and routing | A5 (absorb) vs A3 (expose for RT workloads) | not started |
-| G4 | Pager unavailability protocol | Timeout/watchdog vs "let it hang" vs cleanup chain | not started |
-| G5 | Interrupt masking during fast path | Worst-case latency vs scheduling consistency | not started |
-| G6 | Sub-page packing under D24 | Waste memory vs copy vs accept no cleanup | not started |
-| G7 | Badge condition form | Range vs bitmask vs predicate (IPC perf impact) | not started |
-| G8 | Split-to-new vs split-to-existing | One syscall or two | not started |
-| G9 | Pulsar: duration vs absolute deadline | API shape and drift compensation | not started |
-| G10 | Send-once exemption encoding | Consumed-by-use vs closed-without-use | not started |
+| #   | Question                                                                                      | Core tension                                                                                                                                                     | Status      |
+| --- | --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| G1  | Revocation add-ons (generation vs CDT vs both)                                                | Speed vs granularity; cross-core prompt-effect                                                                                                                   | not started |
+| G2  | Shared capability tables                                                                      | D8 per-Observer sufficiency vs sharing pressure                                                                                                                  | not started |
+| G3  | Interrupt priority and routing                                                                | A5 (absorb) vs A3 (expose for RT workloads)                                                                                                                      | not started |
+| G4  | Pager unavailability protocol                                                                 | Timeout/watchdog vs "let it hang" vs cleanup chain                                                                                                               | not started |
+| G5  | Interrupt masking during fast path                                                            | Worst-case latency vs scheduling consistency                                                                                                                     | not started |
+| G6  | Sub-page packing under D24                                                                    | Waste memory vs copy vs accept no cleanup                                                                                                                        | not started |
+| G7  | Badge condition form                                                                          | Range vs bitmask vs predicate (IPC perf impact)                                                                                                                  | not started |
+| G8  | Split-to-new vs split-to-existing                                                             | One syscall or two                                                                                                                                               | not started |
+| G9  | Pulsar: duration vs absolute deadline                                                         | API shape and drift compensation                                                                                                                                 | not started |
+| G10 | Send-once exemption encoding                                                                  | Consumed-by-use vs closed-without-use                                                                                                                            | not started |
+| G11 | Cross-core kernel logic (migration, sleep/wake, placement)                                    | A4 (reactive) vs need for rebalancing; D46 (cores kernel-internal) means no userspace policy lever; migration policy must be embedded in existing event handlers | settled (D56) |
+| G12 | Implementation hardening checklist (KASLR, guard pages, freed-memory zeroing, stack canaries) | Not derivable from design graph — leaf-node techniques that don't interact with the object model; track as a checklist, not derivations                          | not started |
 
 ---
 
@@ -72,15 +74,16 @@ design space; the designer decides.
 
 ### Phase A — Derive mechanical questions (autonomous)
 
-**Protocol:** Spawn parallel `/explore` loops, one per question. Each produces
-a journal entry and a spec.md update (new derivation D56+).
+**Protocol:** Spawn parallel `/explore` loops, one per question. Each produces a
+journal entry and a spec.md update (new derivation D56+).
 
 **Parallelism:** Questions M1-M11 are independent. All can run concurrently as
 subagents.
 
 **Output:** Journal entries + spec.md additions. Designer reviews the batch.
 
-**Completion gate:** All 11 questions settled or reclassified as genuine choices.
+**Completion gate:** All 11 questions settled or reclassified as genuine
+choices.
 
 ### Phase B — Settle genuine choices (collaborative)
 
@@ -105,9 +108,9 @@ implementation agents are constrained by the compiler. Bottom-up drift becomes a
 type error.
 
 **Key principle:** Interfaces are architectural decisions. The borrow checker,
-lifetime system, and ownership model will surface constraints that prose couldn't
-express. Expect 2-3 iterations as implementation attempts (Phase D) reveal
-interface gaps.
+lifetime system, and ownership model will surface constraints that prose
+couldn't express. Expect 2-3 iterations as implementation attempts (Phase D)
+reveal interface gaps.
 
 **Output:** Complete type signatures across all kernel domain modules. No
 `todo!()` bodies — absent code for unsettled interfaces, concrete types for
@@ -124,6 +127,7 @@ the branch.
 ### Phase D — Leaf implementations (autonomous)
 
 **Protocol:** TDD subagents (everything-claude-code:tdd skill). For each module:
+
 1. Write tests from spec.md derivations (RED)
 2. Implement to pass tests (GREEN)
 3. Run `scripts/verify`
@@ -134,7 +138,8 @@ concurrently. The arena lock ordering (D53) defines the dependency graph for
 cross-module interactions.
 
 **No `/explore` loops here.** Implementation of a settled interface behind a
-settled spec is engineering, not design exploration. The design already happened.
+settled spec is engineering, not design exploration. The design already
+happened.
 
 **Output:** Working kernel domain code with tests. Each module committed
 independently.
@@ -157,8 +162,8 @@ Every subagent spawned for this plan should receive:
 3. The axioms and observations that constrain the answer
 4. What the output should be (journal entry, type signature, implementation)
 5. What to consult (spec.md sections, landscape.md, research/ docs)
-6. What NOT to do (don't settle things outside scope, don't import patterns
-   from a single system without naming alternatives)
+6. What NOT to do (don't settle things outside scope, don't import patterns from
+   a single system without naming alternatives)
 
 ---
 
@@ -176,8 +181,8 @@ design:
    change (split a struct, add a lifetime, change ownership), that's the medium
    surfacing a design constraint. Record it as a derivation, not a silent code
    fix.
-4. **Reference, don't copy.** The implementation-v1 branch is a reference, not
-   a template. Each module should be derived from spec.md, with the branch
+4. **Reference, don't copy.** The implementation-v1 branch is a reference, not a
+   template. Each module should be derived from spec.md, with the branch
    consulted for "how did they solve this specific Rust problem" — not for
    structure or architecture.
 5. **scripts/verify at every step.** Clippy, build, test, unsafe count, module
