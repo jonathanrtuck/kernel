@@ -1,6 +1,6 @@
 # Kernel structural map.
 #
-# Populated from design/spec.md derivations D1-D6, D8-D49, observations O2-O3,
+# Populated from design/spec.md derivations D1-D6, D8-D49, D74, observations O2-O3,
 # and Vocabulary (Space, Time, Observer, Pulsar). Every box and edge has a
 # corresponding spec.md entry; items labeled "TBD" await downstream derivation.
 #
@@ -262,6 +262,11 @@ kernel.core-manager -> kernel.observer.capabilities: resolve (hot path)
 # D5 + D26: Core manager loads Observer's L0 page table TTBR on context switch
 # (hot path). Observers sharing identical Space cap sets could share TTBR.
 kernel.core-manager -> hardware.mmu: TTBR load (hot path)
+
+# D74: EL0 exceptions save/restore registers directly to/from Observer's
+# RegisterState in structural backing. Per-core state via TPIDR_EL1.
+# EL1h exceptions use stack TrapFrame (kernel-only, no Observer context).
+kernel.core-manager -> kernel.observer: register save/restore (D74, hot path)
 
 # Capabilities designate kernel objects (Space, Time, Field, Observer, Pulsar).
 # The capability table connects Observers to the resources they are authorized

@@ -1,9 +1,12 @@
 //! Exception handling for AArch64.
 //!
-//! The assembly vector table (`exception.S`) saves full register context into a
-//! [`TrapFrame`] on the stack and calls [`exception_handler`]. This module
-//! decodes the exception, prints diagnostic output for fatal cases, and
-//! returns for recoverable ones (e.g., IRQ).
+//! The assembly vector table (`exception.S`) currently saves full register
+//! context into a [`TrapFrame`] on the stack for all exception sources. D74
+//! settles the target design: EL0 exceptions save directly into the current
+//! Observer's RegisterState (via TPIDR_EL1 per-core state pointer); EL1h
+//! exceptions continue to use the stack TrapFrame. The current implementation
+//! predates D74 and uses TrapFrame universally — the EL0 path will be updated
+//! to save to RegisterState when context switching is implemented.
 
 #[cfg(target_os = "none")]
 core::arch::global_asm!(include_str!("exception.S"));

@@ -2,7 +2,9 @@
 //!
 //! Distinct from [`super::exception::TrapFrame`] which captures
 //! exception-specific registers (ESR, FAR) not part of the Observer's
-//! persistent identity.
+//! persistent identity. D74: EL0 exception entry saves directly into
+//! RegisterState (not via TrapFrame). TrapFrame is used only for EL1h
+//! exceptions (kernel-interrupting-kernel).
 
 /// Full saved register context for an Observer (AArch64).
 ///

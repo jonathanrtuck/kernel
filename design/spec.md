@@ -4252,6 +4252,62 @@ exploration — not foreclosed, additive if a concrete workload motivates it).
   cancellation — but D13-compliant form is structurally equivalent).
 - **Journal:** `journal/073-send-once-exemption-encoding.md`.
 
+### D74 — Register save/restore flow: direct-to-RegisterState on EL0, TrapFrame on EL1h
+
+EL0 exceptions (SVC, fault, IRQ from userspace) save registers directly into the
+current Observer's RegisterState in structural backing (D43). No intermediate
+TrapFrame. EL1h exceptions (kernel-interrupting-kernel) save to a
+stack-allocated TrapFrame (unchanged). This eliminates double-write overhead on
+context switches and keeps RegisterState always correct.
+
+**Save path (EL0):** Assembly obtains the current Observer's RegisterState
+pointer via per-core state (TPIDR_EL1 → per-core struct → RegisterState
+pointer). Saves all GPRs (x0–x30), SP_EL0, PC (ELR_EL1), PSTATE (SPSR_EL1),
+TPIDR_EL0, and FP/SIMD (q0–q31, FPCR, FPSR) directly to RegisterState. ESR_EL1
+and FAR_EL1 are read into scratch registers for dispatch — not stored in
+RegisterState (transient, exception-specific).
+
+**Restore path:** Load all registers from the incoming Observer's RegisterState.
+Modify SPSR_EL1 if needed (D49 carry-flag error signaling). Write
+CNTKCTL_EL1.EL0VCTEN from Observer's clock_access flag (D66). Switch TTBR0_EL1
+if address space differs (D5). Eret.
+
+**x0–x3 handling:** Saved unconditionally on the save side (RegisterState always
+accurate — D39 read-registers returns correct values for suspended/blocked
+Observers). On the IPC fast path (D50), x0–x3 are NOT loaded on the restore side
+— they pass through in physical registers carrying data words from sender to
+receiver (D47). Cost of unconditional save: ~4–8 cycles (~1–2% of ~400-cycle
+fast-path budget). Save-side skip (Option C — deferred save with dirty bit)
+rejected: complexity disproportionate to ~2–5% gain, breaks D39 read-registers
+correctness, harms Verus readiness (journal 023).
+
+**TPIDR_EL1 as per-core state pointer:** Set during boot-time per-core
+initialization. Points to a per-core struct containing (at minimum) the current
+Observer's RegisterState pointer. Updated on context switch. Standard ARM64
+kernel convention (Linux, FreeBSD, seL4, Zircon).
+
+Does NOT settle: lazy FP/SIMD save (orthogonal, future optimization), per-core
+state struct layout beyond RegisterState pointer, fast-path assembly as separate
+routine vs. branch within exception.S (implementation detail).
+
+- **Rests on:** D43 (register save pointer in metadata, structural backing
+  location), D47 (x0–x3 pass-through, kernel restricted to x4–x15), D49 (SPSR
+  carry-flag modification), D50 (fast-path conditions — defines when x0–x3
+  pass-through applies), D69 (DAIF.I masking — save/restore in non-preemptible
+  window), D66 (CNTKCTL_EL1 on context switch), D6 (one RegisterState per
+  Observer), D35 (write-registers establishes RegisterState as primary
+  representation), D39 (read-registers must return accurate state — rejects
+  save-side x0–x3 skip), A1 (unsafe in frame/), A2 (ARM64 register set,
+  TPIDR_EL1), A4 (single exception invocation), D1 (per-core hot path),
+  `design/landscape.md` §5.4 (minimal-save + ESR dispatch is microkernel
+  consensus), `design/research/ipc-fastpath-conditions.md` (seL4/L4 save
+  directly to thread save area).
+- **Status:** settled. Revisit if D47 is revised (alters pass-through), if D43
+  is revised (changes RegisterState location), if profiling justifies save-side
+  x0–x3 skip (Option C upgrade), or if a second architecture requires a
+  fundamentally different split.
+- **Journal:** `journal/074-register-save-restore-flow.md`.
+
 ---
 
 ## Open questions
@@ -5002,6 +5058,14 @@ exploration — not foreclosed, additive if a concrete workload motivates it).
   always-tracked (D17 specialization for reply routing correctness under A4).
   Per-Field exemption policy (Option C) not foreclosed — additive if a concrete
   authorization-audit workload motivates it.
+- `074-register-save-restore-flow.md` — reasoning for D74: register save/restore
+  flow between exception entry and persistent per-Observer state. Three options
+  evaluated: TrapFrame intermediate (A, rejected as tech debt), direct-to-
+  RegisterState on EL0 (B, chosen), fast-path specialization with deferred save
+  (C, rejected — complexity disproportionate to ~2–5% cycle gain, breaks D39
+  read-registers). TPIDR_EL1 as per-core state pointer (standard ARM64
+  convention). x0–x3 saved unconditionally (RegisterState always correct),
+  restored conditionally (fast-path pass-through per D47).
 
 ---
 

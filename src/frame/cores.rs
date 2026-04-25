@@ -7,6 +7,7 @@
 //!
 //! D1:  per-core state access via TPIDR_EL1.
 //! D47: IPC register layout (x0–x7) in saved register context.
+//! D74: EL0 exception entry saves directly to RegisterState (not TrapFrame).
 
 #[cfg(test)]
 extern crate alloc;
@@ -74,15 +75,15 @@ pub fn read_core_state_mut<S: Scheduler>() -> &'static mut CoreState<S> {
 /// D47: x0–x3 = data words, x4 = label, x5 = target handle,
 /// x6 = user cap handle (u64::MAX = absent), x7 = reply info.
 ///
-/// The register state was saved by the exception entry code before
-/// calling into the core manager.
+/// The register state was saved by the EL0 exception entry code directly
+/// into RegisterState before calling into the core manager (D74).
 #[cfg(any(target_os = "none", test))]
 pub fn read_ipc_registers(observer_ptr: NonNull<Observer>) -> IpcRegisters {
     // SAFETY: observer_ptr was obtained from CoreState::current, which
     // points to a live Observer in the arena. The Observer's
     // register_state.0 points to a valid RegisterState in structural
-    // backing. The exception entry code saved the full register context
-    // before calling dispatch.
+    // backing. The EL0 exception entry code saved the full register
+    // context directly into RegisterState before calling dispatch (D74).
     unsafe {
         let observer = observer_ptr.as_ref();
         let rs = &*(observer.register_state.as_ptr().as_ptr()
