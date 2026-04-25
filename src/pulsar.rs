@@ -12,6 +12,7 @@
 
 use crate::arena::ObjectId;
 use crate::capability::Badge;
+use core::sync::atomic::AtomicU64;
 
 /// A timer that the kernel programs on behalf of an Observer and
 /// delivers as a Field message when it fires (D44).
@@ -46,6 +47,6 @@ pub struct Pulsar {
     /// Outstanding capability references (D11).
     pub refcount: u32,
 
-    /// Revocation generation counter (D67).
-    pub generation: u64,
+    /// Revocation generation counter (D67). AtomicU64 per D67.
+    pub generation: AtomicU64,
 }

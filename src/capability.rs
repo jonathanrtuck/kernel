@@ -11,6 +11,7 @@
 //! D67: entries store object generation at creation for revocation check.
 
 use crate::arena::ObjectId;
+use core::ptr::NonNull;
 
 // ── Reserved cap-table slot indices (D21, D43, D57) ─────────────────
 
@@ -55,7 +56,7 @@ pub enum ObjectType {
 /// 14 bits across all types. Shared rights (DESTROY, CLONE, SPLIT)
 /// occupy fixed positions; type-specific rights occupy non-overlapping
 /// positions.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rights(u16);
 
 impl Rights {
@@ -242,7 +243,69 @@ pub struct TransferredCap {
 /// - 2: self-cap (D57)
 /// - 3+: user slots
 pub struct Table {
-    pub entries: *mut Entry,
+    /// Always valid — the table is allocated at Observer creation.
+    pub entries: NonNull<Entry>,
     pub capacity: u32,
     pub count: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_rights_bits_are_consistent() {
+        assert!(Rights::SPACE_ALL.contains(Rights::DESTROY));
+        assert!(Rights::SPACE_ALL.contains(Rights::CLONE));
+        assert!(Rights::SPACE_ALL.contains(Rights::SPLIT));
+        assert!(Rights::TIME_ALL.contains(Rights::DESTROY));
+        assert!(Rights::TIME_ALL.contains(Rights::SPLIT));
+        assert!(!Rights::TIME_ALL.contains(Rights::CLONE));
+        assert!(Rights::FIELD_ALL.contains(Rights::DESTROY));
+        assert!(Rights::FIELD_ALL.contains(Rights::CLONE));
+        assert!(Rights::FIELD_ALL.contains(Rights::SPLIT));
+        assert!(Rights::OBSERVER_ALL.contains(Rights::DESTROY));
+        assert!(Rights::OBSERVER_ALL.contains(Rights::CLONE));
+        assert!(Rights::PULSAR_ALL.contains(Rights::DESTROY));
+        assert!(Rights::PULSAR_ALL.contains(Rights::CLONE));
+    }
+
+    #[test]
+    fn per_type_masks_use_correct_bit_counts() {
+        assert_eq!(Rights::SPACE_ALL.bits().count_ones(), 4);
+        assert_eq!(Rights::TIME_ALL.bits().count_ones(), 2);
+        assert_eq!(Rights::FIELD_ALL.bits().count_ones(), 6);
+        assert_eq!(Rights::OBSERVER_ALL.bits().count_ones(), 9);
+        assert_eq!(Rights::PULSAR_ALL.bits().count_ones(), 2);
+    }
+
+    #[test]
+    fn fault_observer_is_subset_of_observer_all() {
+        assert!(Rights::OBSERVER_ALL.contains(Rights::FAULT_OBSERVER));
+        assert_eq!(Rights::FAULT_OBSERVER.bits().count_ones(), 5);
+    }
+
+    #[test]
+    fn all_14_bits_are_within_u16() {
+        let all = Rights::SPACE_ALL
+            .union(Rights::TIME_ALL)
+            .union(Rights::FIELD_ALL)
+            .union(Rights::OBSERVER_ALL)
+            .union(Rights::PULSAR_ALL);
+
+        assert_eq!(all.bits().count_ones(), 14);
+    }
+
+    const _: () = assert!(SLOT_REPLY_FIELD == SLOT_FAULT_HANDLER + 1);
+    const _: () = assert!(SLOT_SELF == SLOT_REPLY_FIELD + 1);
+    const _: () = assert!(SLOT_USER_START == SLOT_SELF + 1);
+
+    #[test]
+    fn attenuate_can_only_remove_rights() {
+        let full = Rights::OBSERVER_ALL;
+        let reduced = full.attenuate(Rights::FAULT_OBSERVER);
+
+        assert_eq!(reduced, Rights::FAULT_OBSERVER);
+        assert!(!reduced.contains(Rights::SUSPEND));
+    }
 }

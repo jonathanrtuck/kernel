@@ -25,10 +25,10 @@
 //!      CNTKCTL_EL1.EL0VCTEN on every context switch.
 //! D67: generation counter for revocation.
 
-#![allow(dead_code)]
-
 use crate::capability;
 use crate::field::Field;
+use core::ptr::NonNull;
+use core::sync::atomic::AtomicU64;
 
 // ── Scheduling constants (D42, D57) ─────────────────────────────────
 
@@ -53,7 +53,7 @@ pub const DEFAULT_THROUGHPUT: u8 = 43;
 /// concrete arch-specific layout for save/restore. This keeps arch types
 /// confined to the core boundary (journal 023).
 #[derive(Clone, Copy)]
-pub struct RegisterStateHandle(*mut u8);
+pub struct RegisterStateHandle(#[allow(dead_code)] NonNull<u8>);
 
 // ---------------------------------------------------------------------------
 // Scheduling state — D39 five-state machine.
@@ -86,10 +86,10 @@ pub enum PrimaryState {
 /// In [`WaitState::Multi`], entries are allocated (source unsettled — D43
 /// defers to downstream derivation).
 pub struct WaitEntry {
-    pub observer: *mut Observer,
-    pub field: *mut Field,
-    pub prev: *mut WaitEntry,
-    pub next: *mut WaitEntry,
+    pub observer: NonNull<Observer>,
+    pub field: NonNull<Field>,
+    pub prev: Option<NonNull<WaitEntry>>,
+    pub next: Option<NonNull<WaitEntry>>,
 }
 
 /// Wait-state for a blocked or fault-pending Observer (D18/D19).
@@ -99,7 +99,7 @@ pub struct WaitEntry {
 pub enum WaitState {
     None,
     Single(WaitEntry),
-    Multi { head: *mut WaitEntry },
+    Multi { head: NonNull<WaitEntry> },
 }
 
 // ---------------------------------------------------------------------------
@@ -128,53 +128,52 @@ pub enum WaitState {
 pub struct Observer {
     /// Opaque handle to saved register context in structural backing.
     /// Arch core code resolves this for save/restore on context switch.
-    register_state: RegisterStateHandle,
+    pub register_state: RegisterStateHandle,
 
     /// Physical address of the per-Observer page table root (D5/D26).
     /// Hot path: loaded into the hardware translation base on context switch.
-    page_table_root: u64,
+    pub page_table_root: u64,
 
     /// Pointer to the flat capability array in structural backing (D4/D8).
     /// Hot path: indexed on every syscall to resolve capability handles.
-    /// Updatable: table can grow via D8 table-full fault.
-    cap_table: *mut capability::Entry,
+    /// Updatable: table can grow via D8 table-full fault. Always valid.
+    pub cap_table: NonNull<capability::Entry>,
 
     /// Primary lifecycle state (D39).
-    state: PrimaryState,
+    pub state: PrimaryState,
 
     /// External suspension overlay (D39). Co-occurs with Blocked or Faulted.
     /// Resume clears this; underlying state remains.
-    suspended: bool,
+    pub suspended: bool,
 
     /// Cached sum of held Time compute units (D30/D31/D36).
     /// Hot path: read by per-core scheduler.
     /// Cold path: updated on Time cap install/remove.
-    compute_aggregate: u32,
+    pub compute_aggregate: u32,
 
     /// Three-value scheduling profile (D42, D57).
     /// Budget = 128. Store R and T; derive P = 128 - R - T.
     /// R + T <= SCHEDULING_BUDGET enforced at creation and modification.
     /// One set of values — no base/effective split (D43).
     /// Modified via modify-scheduling right (D39).
-    responsiveness: u8,
-    throughput: u8,
+    pub responsiveness: u8,
+    pub throughput: u8,
 
     /// Per-Observer clock access flag (D66).
     /// Kernel writes CNTKCTL_EL1.EL0VCTEN on every context switch.
     /// True = Observer can read CNTVCT_EL0 directly (~1 cycle).
     /// False = must use clock_read() typed kernel operation (D48).
-    clock_access: bool,
+    pub clock_access: bool,
 
     /// Wait-state linkage for blocked/pending states (D18/D19).
-    wait_state: WaitState,
+    pub wait_state: WaitState,
 
     /// Outstanding capability references to this Observer (D11/D33).
     /// Decremented on cap close; object eligible for destruction at zero.
-    refcount: u32,
+    pub refcount: u32,
 
-    /// Revocation generation counter (D67). Bumped on explicit
-    /// revocation; capability entries store the value at creation.
-    generation: u64,
+    /// Revocation generation counter (D67). AtomicU64 per D67.
+    pub generation: AtomicU64,
 }
 
 #[cfg(test)]
@@ -182,12 +181,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn observer_is_small() {
-        let size = core::mem::size_of::<Observer>();
-
-        assert!(
-            size <= 128,
-            "Observer metadata struct should be small (D32); got {size} bytes"
-        );
+    fn observer_layout() {
+        assert_eq!(core::mem::size_of::<Observer>(), 88);
     }
 }

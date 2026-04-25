@@ -9,6 +9,8 @@
 //! D52: rights — split, destroy (2 bits). No clone.
 //! D67: generation counter for revocation.
 
+use core::sync::atomic::AtomicU64;
+
 /// A claim to a portion of the system's compute capacity, denominated
 /// in normalized compute units (D36).
 ///
@@ -24,6 +26,11 @@ pub struct Time {
     /// Normalized compute units (D36).
     pub compute_units: u32,
 
-    /// Revocation generation counter (D67).
-    pub generation: u64,
+    /// Outstanding capability references (D11). Always 0 or 1 under
+    /// D38 linearity — stored for cross-type uniformity with Space,
+    /// Field, Observer, and Pulsar.
+    pub refcount: u32,
+
+    /// Revocation generation counter (D67). AtomicU64 per D67.
+    pub generation: AtomicU64,
 }

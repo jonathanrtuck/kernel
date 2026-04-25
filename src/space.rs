@@ -11,6 +11,8 @@
 //! D60: byte-addressed inputs; kernel rounds to PAGE_SIZE internally.
 //! D67: generation counter for revocation.
 
+use core::sync::atomic::AtomicU64;
+
 /// A claim to a portion of the system's bounded memory resource.
 ///
 /// Each Space has a kernel-assigned VA base (D26), stable for the
@@ -30,7 +32,19 @@ pub struct Space {
     /// Number of capability references to this Space (D11).
     pub refcount: u32,
 
-    /// Revocation generation counter (D67). Bumped on explicit
-    /// revocation; capability entries store the value at creation.
-    pub generation: u64,
+    /// Revocation generation counter (D67). Bumped atomically on
+    /// explicit revocation; capability entries store the value at
+    /// creation. AtomicU64 per D67: hot-path cap checks may read
+    /// this without holding the arena lock.
+    pub generation: AtomicU64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn space_layout() {
+        assert_eq!(core::mem::size_of::<Space>(), 32);
+    }
 }

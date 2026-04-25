@@ -60,8 +60,10 @@ pub trait Scheduler {
 
 /// Cross-core placement trait (D56, D59).
 ///
-/// One instance per system, not per-core. Uses a CoreSnapshot array
-/// to avoid repeated cross-core atomic reads.
+/// One instance per system, not per-core. D56's scored placement
+/// requires comparing idle status, queue depth, and profile
+/// compatibility across all candidate cores. Snapshots are populated
+/// once before scoring to avoid cache-line bouncing (D59).
 pub trait Placement {
     fn place(&self, observer: &Observer, snapshots: &[CoreSnapshot]) -> PlacementDecision;
 }

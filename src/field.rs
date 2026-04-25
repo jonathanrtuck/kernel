@@ -15,6 +15,8 @@
 
 use crate::arena::ObjectId;
 use crate::capability::{Badge, TransferredCap};
+use core::ptr::NonNull;
+use core::sync::atomic::AtomicU64;
 
 // ── Message (D28) ───────────────────────────────────────────────────
 
@@ -47,11 +49,16 @@ pub struct Message {
 }
 
 // ── Known message labels ────────────────────────────────────────────
+//
+// Numeric values are provisional — D63 and D64 defer label assignment.
+// The 0xFFFF_FFFF_FFFF_xxxx range reserves the top 48 bits to avoid
+// colliding with user-chosen labels. Settle via derivation before
+// Phase D delivery paths are implemented.
 
-/// Label for Pulsar fire messages (D63).
+/// Label for Pulsar fire messages (D63). Value provisional.
 pub const LABEL_TIMER_FIRE: u64 = 0xFFFF_FFFF_FFFF_0001;
 
-/// Label for badge-closure notifications (D64).
+/// Label for badge-closure notifications (D64). Value provisional.
 pub const LABEL_CLOSURE: u64 = 0xFFFF_FFFF_FFFF_0002;
 
 // ── Routing (D45, D54, D71) ─────────────────────────────────────────
@@ -76,8 +83,9 @@ pub struct RoutingEntry {
 
     /// Back-pointer intrusive list linkage (D54, D55).
     /// Enables O(1)-per-source cleanup when the destination is destroyed.
-    pub back_prev: *mut RoutingEntry,
-    pub back_next: *mut RoutingEntry,
+    /// None at list endpoints.
+    pub back_prev: Option<NonNull<RoutingEntry>>,
+    pub back_next: Option<NonNull<RoutingEntry>>,
 }
 
 /// Per-Field routing table (D54).
@@ -86,7 +94,9 @@ pub struct RoutingEntry {
 /// allocated from root Space (D31). Sorted by badge_low for binary
 /// search (D71).
 pub struct RoutingTable {
-    pub entries: *mut RoutingEntry,
+    /// Contiguous sorted array of routing entries. Always valid when the
+    /// RoutingTable exists (the table itself is nullable on Field).
+    pub entries: NonNull<RoutingEntry>,
     pub count: u32,
     pub capacity: u32,
 }
@@ -101,18 +111,18 @@ pub struct RoutingTable {
 /// notifications (D12), interrupt signals (D22), badge-closure (D17),
 /// Pulsar fires (D44) — uses this mechanism.
 pub struct Field {
-    /// Bounded circular queue of Message (D13).
-    pub queue: *mut Message,
+    /// Bounded circular queue of Message (D13). Always allocated.
+    pub queue: NonNull<Message>,
     pub queue_capacity: u32,
     pub queue_length: u32,
     pub queue_head: u32,
 
     /// Intrusive waiters list head — Observers blocked on Receive (D13).
-    /// Null when no waiters.
-    pub waiters_head: *mut crate::observer::WaitEntry,
+    /// None when no waiters.
+    pub waiters_head: Option<NonNull<crate::observer::WaitEntry>>,
 
-    /// Nullable routing table (D54). Null = unsplit.
-    pub routing_table: *mut RoutingTable,
+    /// Nullable routing table (D54). None = unsplit (zero hot-path cost).
+    pub routing_table: Option<NonNull<RoutingTable>>,
 
     /// Per-badge refcount tracking enabled (D17 opt-in).
     /// Reply Fields are always-tracked (D73).
@@ -121,11 +131,36 @@ pub struct Field {
     /// Back-pointer list head for D55 routing cleanup.
     /// When this Field is a routing destination, source Fields link
     /// their routing entries here for O(1) cleanup on destroy.
-    pub back_pointer_head: *mut RoutingEntry,
+    /// None when no sources route here.
+    pub back_pointer_head: Option<NonNull<RoutingEntry>>,
 
     /// Outstanding capability references (D11).
     pub refcount: u32,
 
-    /// Revocation generation counter (D67).
-    pub generation: u64,
+    /// Revocation generation counter (D67). AtomicU64 per D67.
+    pub generation: AtomicU64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn field_layout() {
+        assert_eq!(core::mem::size_of::<Field>(), 64);
+    }
+
+    #[test]
+    fn message_is_concrete_type() {
+        assert!(
+            core::mem::size_of::<Message>() > 0,
+            "Message must be a concrete fixed-size type (D28)"
+        );
+    }
+
+    #[test]
+    fn routing_entry_has_back_pointers() {
+        let _ = core::mem::offset_of!(RoutingEntry, back_prev);
+        let _ = core::mem::offset_of!(RoutingEntry, back_next);
+    }
 }
