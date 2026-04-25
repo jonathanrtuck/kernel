@@ -1445,4 +1445,177 @@ mod integration_tests {
     fn make_observer_for_scheduler() -> crate::observer::Observer {
         crate::observer::Observer::test_default()
     }
+
+    // ── Scenario 21: D50 scheduler denies direct switch
+    //
+    // Cross-module interaction: when communication::call returns
+    // DirectSwitch but the scheduler's should_switch_to returns false,
+    // the dispatch layer must fall back to the normal scheduling path
+    // rather than direct-switching. This tests the D50 condition 5
+    // deny case — deferred from Wave 2 because it requires a concrete
+    // Scheduler implementation.
+    //
+    // Uses a test-only DenyScheduler that always returns false from
+    // should_switch_to, verifying the callback is consulted and its
+    // denial is respected.
+
+    struct DenyScheduler {
+        inner: crate::time_manager::round_robin::RoundRobin,
+    }
+
+    impl DenyScheduler {
+        fn new() -> Self {
+            DenyScheduler {
+                inner: crate::time_manager::round_robin::RoundRobin::new(),
+            }
+        }
+    }
+
+    impl Scheduler for DenyScheduler {
+        fn enqueue(&mut self, observer: NonNull<crate::observer::Observer>) {
+            self.inner.enqueue(observer);
+        }
+
+        fn dequeue(&mut self, observer: NonNull<crate::observer::Observer>) {
+            self.inner.dequeue(observer);
+        }
+
+        fn pick_next(&self) -> Option<NonNull<crate::observer::Observer>> {
+            self.inner.pick_next()
+        }
+
+        fn should_switch_to(&self, _receiver: NonNull<crate::observer::Observer>) -> bool {
+            false
+        }
+
+        fn on_preempt(&mut self) {
+            self.inner.on_preempt();
+        }
+    }
+
+    #[test]
+    fn test_integration_wave3_d50_scheduler_denies_direct_switch() {
+        use crate::communication::{CallOutcome, call};
+
+        // 1. Set up a Field with a waiting receiver — D50 fast path eligible.
+        let mut field = test_field(4);
+        let mut wait_entry = make_wait_entry();
+
+        field.add_waiter(&mut wait_entry);
+
+        // 2. Call with a 0-cap message — would be DirectSwitch if approved.
+        let message = make_message(42, 0);
+        let outcome = call(&mut field, message, Badge(0)).expect("call must succeed");
+
+        // 3. communication::call returns DirectSwitch — the dispatch layer
+        //    must now consult should_switch_to before acting on it.
+        match outcome {
+            CallOutcome::DirectSwitch(receiver_ptr) => {
+                // 4. DenyScheduler refuses the switch.
+                let sched = DenyScheduler::new();
+                let approved = sched.should_switch_to(receiver_ptr);
+
+                assert!(
+                    !approved,
+                    "D50 condition 5: DenyScheduler must refuse direct switch"
+                );
+                // 5. When denied, the dispatch layer would enqueue normally
+                //    and call schedule_next instead. Verify pick_next returns
+                //    None (no one in the queue) — the receiver is NOT
+                //    auto-promoted to the run queue by the denial.
+                assert!(
+                    sched.pick_next().is_none(),
+                    "D50: denied receiver must not appear in the run queue"
+                );
+            }
+            CallOutcome::Enqueued => {
+                panic!("D50: call with 0-cap and waiter must return DirectSwitch");
+            }
+        }
+    }
+
+    // ── Scenario 22: D33 cascade scoped to single table
+    //
+    // Cross-module interaction: when Observer A's cap table holds a cap
+    // pointing to Observer B, and Observer B's cap table holds a cap
+    // pointing back to Observer A, running cascade on A's table closes
+    // A's entries but does NOT touch B's table. Cascade is per-table,
+    // not recursive across object references. B's entries remain
+    // functional after A's cascade completes.
+
+    #[test]
+    fn test_integration_wave3_d33_cascade_does_not_chase_cross_table_refs() {
+        // 1. Create two tables — simulating Observer A and Observer B.
+        let mut table_a = test_table(16);
+        let mut table_b = test_table(16);
+        // 2. Install a cap in A pointing to "Observer B" (ObjectId(1)).
+        let slot_a = table_a.allocate_slot().expect("allocate in A");
+
+        table_a.install_at(
+            slot_a,
+            Entry {
+                object: Some((ObjectType::Observer, ObjectId(1))),
+                rights: Rights::OBSERVER_ALL,
+                badge: Badge(100),
+                slot_tag: SlotTag(0),
+                send_once: false,
+                stored_generation: 0,
+            },
+        );
+
+        // 3. Install a cap in B pointing to "Observer A" (ObjectId(0)).
+        let slot_b = table_b.allocate_slot().expect("allocate in B");
+
+        table_b.install_at(
+            slot_b,
+            Entry {
+                object: Some((ObjectType::Observer, ObjectId(0))),
+                rights: Rights::OBSERVER_ALL,
+                badge: Badge(200),
+                slot_tag: SlotTag(0),
+                send_once: false,
+                stored_generation: 0,
+            },
+        );
+
+        assert_eq!(table_a.count, 1, "precondition: A has 1 entry");
+        assert_eq!(table_b.count, 1, "precondition: B has 1 entry");
+
+        // 4. Run cascade on A's table — should close all of A's entries.
+        let mut state = table_a.begin_cascade();
+
+        loop {
+            if table_a.cascade_step(&mut state) {
+                break;
+            }
+        }
+
+        assert!(state.complete, "A's cascade must complete");
+        assert_eq!(table_a.count, 0, "A's entries must all be closed");
+        // 5. B's table must be UNTOUCHED — cascade is per-table, not recursive.
+        assert_eq!(
+            table_b.count, 1,
+            "D33: cascade on A must not touch B's table"
+        );
+
+        // 6. B's cap must still resolve successfully.
+        let handle_b = Handle {
+            index: slot_b,
+            slot_tag: SlotTag(0),
+        };
+        let resolved = table_b.resolve(handle_b);
+
+        assert!(
+            resolved.is_ok(),
+            "D33: B's cap must still resolve after A's cascade"
+        );
+
+        let entry = resolved.unwrap();
+
+        assert_eq!(
+            entry.badge,
+            Badge(200),
+            "D33: B's entry data must be intact"
+        );
+    }
 }

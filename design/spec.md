@@ -4537,6 +4537,29 @@ exploration — not foreclosed, additive if a concrete workload motivates it).
   subsequent holders increment reference count. Per-Observer intermediate page
   table pages (L1/L2) charged via D8 fault mechanism (handler provides Space in
   fault reply). Kernel per-object metadata from root Space.
+- **CoreState arena references for dispatch.** `dispatch_ipc` and
+  `dispatch_typed` need to dereference resolved ObjectIds to reach the target
+  kernel object (Field, Observer, Space, Time, Pulsar). CoreState currently
+  holds only core_id, current, and scheduler. The dispatch path needs arena
+  references — either stored in CoreState or passed through a separate per-core
+  context struct. Surfaced by Phase D Wave 3 implementation.
+- **Observer cap table capacity.** `Observer::cap_table` is a raw pointer to the
+  flat entry array (D8), but the table capacity is not stored on the Observer.
+  The dispatch hot path needs capacity for bounds-checking handle resolution.
+  D43's remaining item "cap table capacity tracking placement" is this gap.
+  Options: add `cap_table_capacity: u32` to Observer metadata (hot path, ~4
+  bytes), or store capacity in structural backing adjacent to the entry array
+  (cold-path lookup). Surfaced by Phase D Wave 3 implementation.
+- **Per-core Pulsar deadline queue.** `handle_timer` (D44) must check pending
+  Pulsar deadlines on each preemption tick. This requires a per-core sorted
+  deadline structure in CoreState (min-heap or sorted list of upcoming
+  `next_deadline_ticks`). The Pulsar struct and fire_message are implemented;
+  the per-core scheduling of deadline checks is not.
+- **IRQ-to-Field routing table.** `handle_irq` (D22) must map IRQ numbers to
+  registered driver Fields with per-IRQ badges and send-once ack caps. This
+  mapping is not yet in CoreState or any shared kernel structure. The D22
+  derivation describes the mechanism; the data structure is
+  implementation-level.
 
 ---
 

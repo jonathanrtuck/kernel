@@ -77,8 +77,8 @@ interface exists and why it has that particular shape.
 | `field.rs`         | `Message`, `RoutingEntry`, `RoutingTable`, `Field`, `FieldError`                                                      | Message: timer_fire, badge_closure (D63, D64); Field: enqueue, dequeue, is_empty, is_full, add_waiter, remove_waiter, pop_waiter, resolve_route, add_route, revoke (D13, D18, D45, D54, D67)                                                    |
 | `observer.rs`      | `Observer`, `PrimaryState`, `WaitState`, `WaitEntry`, `ObserverError`                                                 | validate_profile, precision, resume, suspend, block, unblock, fault, set_scheduling, add_compute, remove_compute, revoke (D14, D39, D42, D57, D67); PrimaryState: is_stopped                                                                    |
 | `pulsar.rs`        | `Pulsar`                                                                                                              | new, is_repeating, fire_message, rearm, record_overrun, revoke (D44, D62, D63, D67, D72)                                                                                                                                                        |
-| `time_manager/`    | `CoreId`, `CoreSnapshot`, `PlacementDecision`                                                                         | traits: Scheduler (5 methods), Placement (1 method) (D2, D50, D56, D59)                                                                                                                                                                         |
-| `core_manager.rs`  | `CoreState<S>`, `DispatchResult`                                                                                      | dispatch_ipc, dispatch_typed, handle_timer, handle_irq, schedule_next (D1, D7, D22, D46)                                                                                                                                                        |
+| `time_manager/`    | `CoreId`, `CoreSnapshot`, `PlacementDecision`                                                                         | traits: Scheduler (5 methods), Placement (1 method) (D2, D50, D56, D59); RoundRobin: new (D59); ScoredPlacement: new (D56)                                                                                                                      |
+| `core_manager.rs`  | `CoreState<S>`, `DispatchResult`                                                                                      | dispatch_ipc(IpcOperation), dispatch_typed(TypedOperation), handle_timer, handle_irq, schedule_next (D1, D7, D22, D46); current_core[_mut] (bare-metal, D1)                                                                                     |
 | `space_manager.rs` | `RootPool`, `VaAssignment`, `SpaceManager`                                                                            | allocate_pages, return_pages, assign_va, type_conversion_overhead (D3, D31, D32, D70)                                                                                                                                                           |
 | `ipc.rs`           | `SendOutcome`, `ReceiveOutcome`, `CallOutcome`                                                                        | send, receive, call, reply_recv, yield_cpu (D7, D13, D16, D50)                                                                                                                                                                                  |
 | `fault.rs`         | `FaultType`, `AccessType`, `ResourceType`                                                                             | label, data_words, to_message (D12, D61)                                                                                                                                                                                                        |
@@ -100,9 +100,17 @@ Documented here rather than guessed at in code:
 - **Cross-core scheduling infrastructure.** D56 idle bitmap, mailboxes, IPI
   send/receive handlers. The `Placement` trait defines the interface; the
   backing data structures are deferred.
-- **Scheduling algorithm implementations.** The `Scheduler` trait in
-  `time_manager/` defines the interface; concrete algorithms (round-robin, EDF,
-  etc.) will be sibling files in the same directory module.
+- **CoreState arena references.** `dispatch_ipc` and `dispatch_typed` need
+  access to `Arena<Field>`, `Arena<Observer>`, etc. to dereference resolved
+  ObjectIds. CoreState currently holds only the scheduler — arena references are
+  needed for the full dispatch path. Surfaced by Wave 3 implementation.
+- **Observer cap table capacity.** `Observer::cap_table` is a `NonNull<Entry>`
+  but the table capacity is not stored on the Observer. The dispatch path needs
+  capacity for bounds-checking handle resolution. Surfaced by Wave 3.
+- **IRQ-to-Field routing.** `handle_irq` needs a mapping from IRQ numbers to
+  registered driver Fields with per-IRQ badges. Not yet in CoreState.
+- **Pulsar deadline queue.** `handle_timer` checks pending Pulsar deadlines
+  (D44) but needs a per-core deadline queue data structure in CoreState.
 
 ## Spec drives code
 
