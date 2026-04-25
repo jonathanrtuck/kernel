@@ -194,7 +194,3 @@ coalescing) is the closest analog, but operates on a different mechanism
   (implementation detail)
 - Exact routing entry layout (D54 open item)
 - Catch-all entry semantics (expressible as normal range, no special status)
-
-## Exploration source
-
-`.brain/explorations/G07-badge-condition-form/`

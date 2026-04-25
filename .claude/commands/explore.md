@@ -45,18 +45,18 @@ entry.
 
 ## State
 
-Read `.brain/session.json` to determine the current phase.
+Read `.explore/session.json` to determine the current phase.
 
 - If the file does not exist or `phase` is null, start at Phase 1.
 - If `phase` has a value, check whether earlier phases' artifacts exist in
-  `.brain/state/` (check.md for Phase 2, derive.md for Phase 3, present.md for
+  `.explore/state/` (check.md for Phase 2, derive.md for Phase 3, present.md for
   Phase 4). Missing artifacts mean those phases must be redone — the phase
   number alone is insufficient to resume.
-- If `.brain/state/question.md` has content but `session.json` does not exist,
+- If `.explore/state/question.md` has content but `session.json` does not exist,
   this is stale state from a previous exploration. Ignore it and start fresh.
 
 **Resuming:** When session.json indicates an in-progress exploration, read all
-existing artifacts in `.brain/state/` (question.md, check.md, derive.md,
+existing artifacts in `.explore/state/` (question.md, check.md, derive.md,
 present.md) to restore context — these files ARE the conversation history across
 sessions. Verify that question.md matches the `question` field in session.json;
 if any artifact's content is about a different question, treat it as stale and
@@ -65,7 +65,7 @@ and derive.md exists), the phase was completed but the session ended before the
 user gave a transition signal. Present a summary of the existing work and wait
 for the user's signal — exactly as if you had just produced it.
 
-Write `.brain/session.json` at every phase transition:
+Write `.explore/session.json` at every phase transition:
 
 ```json
 { "phase": <number>, "question": "<the question>", "started": "<ISO timestamp>" }
@@ -107,7 +107,7 @@ Phase 3 when every derivation says "depends on X."
 - Start exploring
 
 **Transition:** The user confirms the question (with or without the level
-caveat). Write it to `.brain/state/question.md`. If the user acknowledged
+caveat). Write it to `.explore/state/question.md`. If the user acknowledged
 premature depth, note it in the question file. Advance to Phase 2.
 
 ---
@@ -146,7 +146,7 @@ level, note it as a finding ("Research suggests this may actually be a question
 about X") and let the user decide whether to return to Phase 1. Do not reframe
 the question yourself.
 
-**Write** findings to `.brain/state/check.md`.
+**Write** findings to `.explore/state/check.md`.
 
 **Before transitioning, verify:**
 
@@ -208,7 +208,7 @@ original framing or return to Phase 1 to reframe at a higher level.
 **If you notice spec.md inconsistencies unrelated to this question:** Note them
 briefly at the end, but do not let them derail the current exploration.
 
-**Write** derivations to `.brain/state/derive.md`.
+**Write** derivations to `.explore/state/derive.md`.
 
 **Before transitioning, verify:**
 
@@ -244,7 +244,7 @@ Clearly separate:
 **If reaffirming a settled question:** "The current answer is X. It costs Y.
 Reopening would require Z. The alternatives are [from Phase 3]."
 
-**Write** the decision brief to `.brain/state/present.md`.
+**Write** the decision brief to `.explore/state/present.md`.
 
 **You do NOT:**
 

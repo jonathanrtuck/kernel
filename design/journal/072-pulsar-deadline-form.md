@@ -1,24 +1,23 @@
 # Journal 072 — Pulsar deadline form: relative duration
 
 Settles G09: the `create_pulsar` deadline parameter is a relative duration
-("fire in N nanoseconds from now"), not an absolute deadline. The kernel
-absorbs the conversion to an absolute comparator value internally.
+("fire in N nanoseconds from now"), not an absolute deadline. The kernel absorbs
+the conversion to an absolute comparator value internally.
 
 ## Context
 
-D44 explicitly deferred "duration vs. absolute deadline API" as an open
-question (G09). D62 settled the creation shape (single-call, armed-at-creation)
-but left the deadline parameter form open. G09's exploration
-(`.brain/explorations/G09-pulsar-duration-vs-deadline/`) evaluated three
-viable options: absolute-only (Zircon), relative-only (L4, Plan 9), and both
-via flag bit (POSIX/QNX). All three fit within the D49 ABI budget; all three
-produce identical kernel-internal behavior (the kernel always works in absolute
-space after the syscall entry).
+D44 explicitly deferred "duration vs. absolute deadline API" as an open question
+(G09). D62 settled the creation shape (single-call, armed-at-creation) but left
+the deadline parameter form open. The exploration evaluated three viable
+options: absolute-only (Zircon), relative-only (L4, Plan 9), and both via flag
+bit (POSIX/QNX). All three fit within the D49 ABI budget; all three produce
+identical kernel-internal behavior (the kernel always works in absolute space
+after the syscall entry).
 
 The key dependency G09 identified was M11 (clock access authority) — whether
 Observers have direct CNTVCT_EL0 access affects the ergonomic cost of each
-option. D66 (clock access mechanism) settled the per-Observer mechanism but
-left the authority model and default policy open.
+option. D66 (clock access mechanism) settled the per-Observer mechanism but left
+the authority model and default policy open.
 
 ## D66 establishes the decisive pattern
 
@@ -28,21 +27,21 @@ transfer. The argument that closed the routing-exposure option was:
 
 > "The API would let userspace say what the kernel already knows."
 
-The kernel knows the receive-cap-holder → core mapping; a routing API would
-only restate information the kernel derives from existing relationships. D66
-rejected the API as redundant.
+The kernel knows the receive-cap-holder → core mapping; a routing API would only
+restate information the kernel derives from existing relationships. D66 rejected
+the API as redundant.
 
 The absolute-only timer design has the same structure. The kernel knows the
 current counter value (CNTPCT_EL0). When the caller wants "fire in 10ms," the
 kernel can compute `now + 10_000_000 ns` internally — one counter read and one
 addition, both negligible. An absolute-only API forces the caller to obtain
-`now` (via direct counter access or `clock_read` syscall), add the duration,
-and pass the result — recomputing what the kernel already has. For Observers
-without clock access (D66/M11), this requires a `clock_read` round-trip solely
-to tell the kernel something it knows natively.
+`now` (via direct counter access or `clock_read` syscall), add the duration, and
+pass the result — recomputing what the kernel already has. For Observers without
+clock access (D66/M11), this requires a `clock_read` round-trip solely to tell
+the kernel something it knows natively.
 
-This is the same anti-pattern D66 rejected: the caller providing information
-the kernel already has, at cost to the caller and no benefit to the kernel.
+This is the same anti-pattern D66 rejected: the caller providing information the
+kernel already has, at cost to the caller and no benefit to the kernel.
 
 ## Relative-only is the D66-consistent resolution
 
@@ -61,15 +60,14 @@ comparator. This follows D66's routing precedent and A5's absorption principle:
    absolute internals. Drift compensation is fully kernel-managed regardless of
    parameter form.
 
-3. **One-shot precision loop served adequately.** D44's "manual control"
-   escape hatch (one-shot Pulsars in a loop for adaptive timing) can maintain
+3. **One-shot precision loop served adequately.** D44's "manual control" escape
+   hatch (one-shot Pulsars in a loop for adaptive timing) can maintain
    drift-free operation: the Pulsar message includes the actual fire time in raw
    CNTVCT_EL0 ticks (D63). The Observer computes
    `next_duration = desired_time - now`, requiring one counter read (direct
-   access) or one `clock_read` syscall. This is the same cost as
-   absolute-only's common case for Observers without clock access — the cost
-   is merely shifted to the minority precision use case rather than the majority
-   common case.
+   access) or one `clock_read` syscall. This is the same cost as absolute-only's
+   common case for Observers without clock access — the cost is merely shifted
+   to the minority precision use case rather than the majority common case.
 
 4. **ABI simplicity.** The `duration` parameter has one interpretation. No flag
    bit, no mode, no dual-path dispatch in the kernel. The kernel reads the
@@ -78,16 +76,16 @@ comparator. This follows D66's routing precedent and A5's absorption principle:
 ## Forward-compatibility
 
 Relative-only is forward-compatible with adding absolute mode later. A future
-derivation could add a flag bit (bit 63 of the duration field, reducing range
-to ~292 years — practically unlimited) or a second operation code. Either
-approach is additive: existing callers using relative durations are unbroken.
-The reverse — shipping absolute-only now and adding relative later — is equally
-additive, but that direction penalizes the majority use case now to serve the
-minority use case first.
+derivation could add a flag bit (bit 63 of the duration field, reducing range to
+~292 years — practically unlimited) or a second operation code. Either approach
+is additive: existing callers using relative durations are unbroken. The reverse
+— shipping absolute-only now and adding relative later — is equally additive,
+but that direction penalizes the majority use case now to serve the minority use
+case first.
 
 D66 used this same forward-compatibility argument for priority: flat absorption
-now, exposure additive later. The principle applies identically here: start
-with the option that serves the common case, defer the minority option until a
+now, exposure additive later. The principle applies identically here: start with
+the option that serves the common case, defer the minority option until a
 concrete workload demonstrates the need.
 
 ## The parameter is named `duration`, not `deadline`
@@ -155,30 +153,29 @@ durations natively; Zircon is the only one requiring absolute.
 
 ## Summary
 
-| Aspect | Resolution |
-|--------|-----------|
-| Parameter form | Relative duration in nanoseconds |
-| Parameter name | `duration` (replaces `deadline`) |
-| Kernel conversion | Counter read + frequency conversion on every `create_pulsar` — negligible |
-| Common case cost | One syscall, all Observers |
-| Precision one-shot cost | One clock read (direct or syscall) + one `create_pulsar` |
-| Forward path | Flag bit or second operation additive; not foreclosed |
+| Aspect                  | Resolution                                                                |
+| ----------------------- | ------------------------------------------------------------------------- |
+| Parameter form          | Relative duration in nanoseconds                                          |
+| Parameter name          | `duration` (replaces `deadline`)                                          |
+| Kernel conversion       | Counter read + frequency conversion on every `create_pulsar` — negligible |
+| Common case cost        | One syscall, all Observers                                                |
+| Precision one-shot cost | One clock read (direct or syscall) + one `create_pulsar`                  |
+| Forward path            | Flag bit or second operation additive; not foreclosed                     |
 
-- **Rests on:** D44 (Pulsar semantics — deferred G09 here; kernel-managed
-  re-arm uses absolute internals regardless of API form), D66 (clock access
-  mechanism — established the "kernel already knows" anti-pattern for
-  redundant APIs; per-Observer CNTKCTL_EL1 means some Observers lack direct
-  counter access), D49 (ABI encoding — duration fits in x2 under resolved
-  register mapping; no flag bit needed), D62 (creation API shape — single-call,
-  armed-at-creation; duration is the fourth parameter), D63 (message layout —
-  fire time in raw ticks enables drift-free one-shot loops with relative API),
-  A5 (absorb complexity — kernel absorbs relative-to-absolute conversion and
+- **Rests on:** D44 (Pulsar semantics — deferred G09 here; kernel-managed re-arm
+  uses absolute internals regardless of API form), D66 (clock access mechanism —
+  established the "kernel already knows" anti-pattern for redundant APIs;
+  per-Observer CNTKCTL_EL1 means some Observers lack direct counter access), D49
+  (ABI encoding — duration fits in x2 under resolved register mapping; no flag
+  bit needed), D62 (creation API shape — single-call, armed-at-creation;
+  duration is the fourth parameter), D63 (message layout — fire time in raw
+  ticks enables drift-free one-shot loops with relative API), A5 (absorb
+  complexity — kernel absorbs relative-to-absolute conversion and
   nanosecond-to-tick frequency conversion), A3 (generic — relative serves all
-  workloads; absolute mode not foreclosed for future hard-RT needs), A2 (ARM64
-  — TVAL/CVAL symmetric; nanosecond API with kernel frequency conversion),
-  `.brain/explorations/G09-pulsar-duration-vs-deadline/`.
+  workloads; absolute mode not foreclosed for future hard-RT needs), A2 (ARM64 —
+  TVAL/CVAL symmetric; nanosecond API with kernel frequency conversion).
 - **Status:** settled. Closes G09. Revisit if a defined workload demonstrates
   that the `clock_read` cost in precision one-shot loops is a correctness or
-  performance bottleneck not addressable by granting clock access authority —
-  in that case, add the flag-bit absolute mode (additive, non-breaking).
+  performance bottleneck not addressable by granting clock access authority — in
+  that case, add the flag-bit absolute mode (additive, non-breaking).
 - **Journal:** `journal/072-pulsar-deadline-form.md`.

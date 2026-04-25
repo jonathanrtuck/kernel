@@ -34,8 +34,7 @@ removal path where badge-closure checking lives.
 
 ### Option analysis
 
-Four options were evaluated (full analysis in
-`.brain/explorations/G10-send-once-exemption-encoding/`):
+Four options were evaluated:
 
 **Option A — Structural exemption.** The consume-on-delivery path simply does
 not call D11's close logic. Badge-closure is in D11 close only. The exemption

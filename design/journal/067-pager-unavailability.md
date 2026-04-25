@@ -11,10 +11,9 @@ unavailability protocol" as a separate question. D31 committed to fault handler
 chains and explicitly foreclosed double-fault-kill as a sole strategy. The
 question: what does the kernel do when the chain cannot be traversed?
 
-The `.brain/explorations/G04-pager-unavailability/` exploration evaluated five
-options spanning let-it-hang through cooperative escalation. The key finding is
-that G04 resists resolution as a single design choice because it is three
-independent failure modes sharing a label.
+The exploration evaluated five options spanning let-it-hang through cooperative
+escalation. The key finding is that G04 resists resolution as a single design
+choice because it is three independent failure modes sharing a label.
 
 ## The decomposition
 
@@ -254,8 +253,7 @@ machine (implementation detail).
   embedded timeout policy), A4 (purely reactive — no background scanning), A5
   (kernel absorbs detection and notification; userspace provides policy), D4
   (designation = authority — kernel-autonomous destroy only at chain terminus
-  where kernel IS the authority),
-  `.brain/explorations/G04-pager-unavailability/`.
+  where kernel IS the authority).
 - **Status:** settled. Closes G04. Revisit if downstream userspace framework
   design reveals that cooperative escalation's silent-failure mode is
   structurally unacceptable (would re-open kernel-automatic traversal with

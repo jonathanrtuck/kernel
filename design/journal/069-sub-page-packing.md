@@ -1,7 +1,7 @@
 # Journal 069 — Sub-page packing: slab allocator with page return
 
 **Date:** 2026-04-24 **Settles:** D70 — Arena internal structure: per-type slab
-with page return **Exploration:** `.brain/explorations/G06-sub-page-packing/`
+with page return
 
 ---
 

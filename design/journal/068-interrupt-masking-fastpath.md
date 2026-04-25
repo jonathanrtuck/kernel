@@ -11,10 +11,10 @@ masking as an open question: "whether interrupts are masked for the ~400-cycle
 fast-path window. Trades worst-case interrupt latency for scheduling-check
 consistency. Implementation concern within the ~400-cycle budget."
 
-The `.brain/explorations/G05-interrupt-masking-fastpath/` exploration evaluated
-four options: (A) mask all via DAIF, (B) don't mask, (C) priority-based masking
-via GICv3 ICC_PMR_EL1, (D) restartable fast path. The question decomposes along
-two axes: fast-path correctness complexity and interrupt responsiveness.
+The exploration evaluated four options: (A) mask all via DAIF, (B) don't mask,
+(C) priority-based masking via GICv3 ICC_PMR_EL1, (D) restartable fast path. The
+question decomposes along two axes: fast-path correctness complexity and
+interrupt responsiveness.
 
 ## Why masking wins — five convergences
 

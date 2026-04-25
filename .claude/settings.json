@@ -15,7 +15,7 @@
       {
         "hooks": [
           {
-            "command": "node .brain/trigger.js",
+            "command": "node .explore/trigger.js",
             "disabled": true,
             "timeout": 5,
             "type": "command"

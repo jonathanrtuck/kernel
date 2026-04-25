@@ -3900,7 +3900,7 @@ naturally lazy/weak; prompt revocation requires IPI), stale slot reclamation
   (preemptible cascade — generation counters avoid CDT's O(N) WCET concern), D53
   (arena lock ordering — generation counters don't create cross-type traversal),
   Coyotos allocation count (primary precedent), seL4 CDT (rejected precedent for
-  CDT-only), `.brain/explorations/G01-revocation-addons/`.
+  CDT-only).
 - **Status:** settled — revisit if measurement shows generation check cost on
   IPC hot path exceeds 5 cycles (re-opens scoped-vs-universal), or if a
   downstream userspace framework derivation reveals transitive delegation chains
@@ -3958,7 +3958,7 @@ state machine.
   (generic — no embedded timeout policy), A4 (purely reactive — no background
   scanning), A5 (kernel absorbs detection/notification, userspace provides
   policy), D4 (designation = authority — kernel-autonomous destroy only at chain
-  terminus), `.brain/explorations/G04-pager-unavailability/`.
+  terminus).
 - **Status:** settled. Closes G04. Revisit if cooperative escalation's
   silent-failure mode proves structurally unacceptable (re-opens
   kernel-automatic traversal with back-pointers), or if Pulsar watchdog proves
@@ -4012,8 +4012,7 @@ fast-path frequency is low.
   the dominant contributor to worst-case interrupt latency is already addressed
   by preemption points in long paths), journal 023 (framekernel/Verus readiness
   — non-preemptible fast path is the verification prerequisite), journal 066
-  (flat interrupt priority — priority-based masking contradicts),
-  `.brain/explorations/G05-interrupt-masking-fastpath/`.
+  (flat interrupt priority — priority-based masking contradicts).
 - **Status:** settled. Closes G05. Revisit if a concrete workload requires <200
   ns interrupt latency AND cannot use dedicated-core isolation (D2), or if a
   formally verified restartable fast path is demonstrated in any kernel.
@@ -4072,8 +4071,7 @@ zeroing policy on slot reuse, root Space pool internal recycling behavior.
   well-established unsafe pattern; contained in framekernel core), D31 (root
   Space — slab pages drawn from and returned to root Space pool), D25 (page size
   exposed — slab configures slots-per-page at boot), journal 023 (framekernel
-  discipline — all slab unsafe at the core boundary),
-  `.brain/explorations/G06-sub-page-packing/`.
+  discipline — all slab unsafe at the core boundary).
 - **Status:** settled. Closes G06. Revisit if a concrete workload demonstrates
   slab page-return overhead is significant (would motivate grows-never-shrinks),
   if formal verification requires one-per-page simplicity (would revisit the
@@ -4139,8 +4137,7 @@ no special status needed).
   overflow — queue fills with skipped messages), A3 (generic kernel — condition
   form must work for all badge allocation strategies), A5 (leaf node — predicate
   interpreter in kernel is complexity in the wrong place; bitmask expressiveness
-  gap addressable by userspace allocation strategy or multiple routing entries),
-  `.brain/explorations/G07-badge-condition-form/`.
+  gap addressable by userspace allocation strategy or multiple routing entries).
 - **Status:** settled. Closes D45's "badge condition form" and D44's
   "badge-filtered receive." Revisit if D54 is revised (changes the routing table
   structure), if D1 is revised (changes the hot-path constraint), if a concrete
@@ -4191,8 +4188,7 @@ Does NOT settle: minimum/maximum duration bounds, duration = 0 semantics
   ticks enables drift-free one-shot loops with relative API), A5 (absorb
   complexity — kernel absorbs relative-to-absolute and ns-to-tick conversion),
   A3 (generic — relative serves all workloads; absolute mode not foreclosed), A2
-  (ARM64 — TVAL/CVAL symmetric; no hardware preference),
-  `.brain/explorations/G09-pulsar-duration-vs-deadline/`.
+  (ARM64 — TVAL/CVAL symmetric; no hardware preference).
 - **Status:** settled. Closes G09. Revisit if a defined workload demonstrates
   that `clock_read` cost in precision one-shot loops is a correctness or
   performance bottleneck not addressable by granting clock access authority —
@@ -4248,8 +4244,7 @@ exploration — not foreclosed, additive if a concrete workload motivates it).
   code), D33 (destroy cascade — cascade-triggered close is D11 close, fires
   badge-closure as expected), A4 (purely reactive — reply Field without tracking
   allows permanent blocking with no signal), A1 (Rust — consume = move, close =
-  drop; naturally distinct operations),
-  `.brain/explorations/G10-send-once-exemption-encoding/`.
+  drop; naturally distinct operations).
 - **Status:** settled. Closes G10. Revisit if a concrete authorization-audit
   workload requires consumed-by-use notification (motivates per-Field exemption
   policy — additive), or if a workload demonstrates that D18 queue-full drop on
