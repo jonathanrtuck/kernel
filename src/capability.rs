@@ -242,11 +242,17 @@ pub struct TransferredCap {
 /// - 1: reply Field (D43)
 /// - 2: self-cap (D57)
 /// - 3+: user slots
+const FREELIST_END: u64 = u64::MAX;
+
 pub struct Table {
     /// Always valid — the table is allocated at Observer creation.
     pub entries: NonNull<Entry>,
     pub capacity: u32,
     pub count: u32,
+    /// Head of intrusive freelist through empty entries. Empty entries
+    /// store the next-free index in `stored_generation`. None when all
+    /// user slots are occupied.
+    pub free_head: Option<u32>,
 }
 
 // ── Error types ────────────────────────────────────────────────────
@@ -323,11 +329,6 @@ pub enum CloseResult {
 pub struct CascadeState {
     /// Current position in the cap table being iterated.
     pub position: u32,
-    /// Stack of Observer ObjectIds whose cascades are pending.
-    /// Depth bounded by exclusively-held Observer chains.
-    pub pending: [Option<ObjectId>; 8],
-    /// Current depth in the pending stack.
-    pub depth: u8,
     /// Whether the cascade has completed.
     pub complete: bool,
 }
@@ -383,7 +384,22 @@ impl Entry {
 
 // ── Table methods ──────────────────────────────────────────────────
 
+/// Maximum entries processed per cascade step (D33 preemption bound).
+const CASCADE_STEP_SIZE: u32 = 16;
+
 impl Table {
+    /// Validate that an entry is occupied and its slot tag matches the handle.
+    fn validate_entry(entry: &Entry, handle: Handle) -> Result<(), CapError> {
+        if !entry.is_occupied() {
+            return Err(CapError::InvalidHandle);
+        }
+        if entry.slot_tag != handle.slot_tag {
+            return Err(CapError::SlotTagMismatch);
+        }
+
+        Ok(())
+    }
+
     /// Resolve a handle to an entry reference.
     ///
     /// D4/D8: the universal entry point for every syscall. Validates
@@ -396,13 +412,23 @@ impl Table {
     ///
     /// Performance: O(1) — array index + tag comparison.
     /// Security: prevents stale-handle aliasing of reused table slots.
-    pub fn resolve(&self, _handle: Handle) -> Result<&Entry, CapError> {
-        todo!()
+    pub fn resolve(&self, handle: Handle) -> Result<&Entry, CapError> {
+        let entry = crate::frame::cap_ops::entry_ref(self.entries, self.capacity, handle.index)
+            .ok_or(CapError::InvalidHandle)?;
+
+        Self::validate_entry(entry, handle)?;
+
+        Ok(entry)
     }
 
     /// Mutable resolve for operations that modify the entry.
-    pub fn resolve_mut(&mut self, _handle: Handle) -> Result<&mut Entry, CapError> {
-        todo!()
+    pub fn resolve_mut(&mut self, handle: Handle) -> Result<&mut Entry, CapError> {
+        let entry = crate::frame::cap_ops::entry_mut(self.entries, self.capacity, handle.index)
+            .ok_or(CapError::InvalidHandle)?;
+
+        Self::validate_entry(entry, handle)?;
+
+        Ok(entry)
     }
 
     /// Find and return the index of a free slot.
@@ -411,15 +437,46 @@ impl Table {
     /// free slots exist — this triggers the cap-table-full fault (D40),
     /// routing to the handler which provides Space for table growth.
     pub fn allocate_slot(&mut self) -> Result<u32, CapError> {
-        todo!()
+        let index = self.free_head.ok_or(CapError::TableFull)?;
+        let entry = crate::frame::cap_ops::entry_ref(self.entries, self.capacity, index)
+            .ok_or(CapError::TableFull)?;
+        let next = entry.stored_generation;
+
+        self.free_head = if next == FREELIST_END {
+            None
+        } else {
+            Some(next as u32)
+        };
+
+        Ok(index)
     }
 
     /// Free a slot, bumping its slot tag for ABA defense (D11).
     ///
     /// The slot becomes empty and available for reuse. The bumped tag
     /// ensures any outstanding handles to this slot will fail resolution.
-    pub fn free_slot(&mut self, _index: u32) {
-        todo!()
+    pub fn free_slot(&mut self, index: u32) {
+        if index >= self.capacity {
+            return;
+        }
+
+        let entry = crate::frame::cap_ops::entry_mut(self.entries, self.capacity, index);
+
+        if let Some(e) = entry {
+            let was_occupied = e.is_occupied();
+
+            e.slot_tag = SlotTag(e.slot_tag.0.wrapping_add(1));
+            e.object = None;
+            e.stored_generation = match self.free_head {
+                Some(head) => head as u64,
+                None => FREELIST_END,
+            };
+            self.free_head = Some(index);
+
+            if was_occupied {
+                self.count = self.count.saturating_sub(1);
+            }
+        }
     }
 
     /// Install a capability entry at a specific slot index.
@@ -428,8 +485,25 @@ impl Table {
     /// (D21), reply field at slot 1 (D43), self-cap at slot 2 (D57).
     /// Also used for cap transfer during IPC (D28) and fault resolution
     /// (D40).
-    pub fn install_at(&mut self, _index: u32, _entry: Entry) {
-        todo!()
+    pub fn install_at(&mut self, index: u32, entry: Entry) {
+        if index >= self.capacity {
+            return;
+        }
+
+        let slot = crate::frame::cap_ops::entry_mut(self.entries, self.capacity, index);
+
+        if let Some(s) = slot {
+            let was_occupied = s.is_occupied();
+            let new_is_occupied = entry.is_occupied();
+
+            *s = entry;
+
+            if !was_occupied && new_is_occupied {
+                self.count += 1;
+            } else if was_occupied && !new_is_occupied {
+                self.count = self.count.saturating_sub(1);
+            }
+        }
     }
 
     /// Install a capability at the next free slot, returning the index.
@@ -439,21 +513,58 @@ impl Table {
     /// installs Space caps via D40), and dynamic capability delegation.
     ///
     /// Returns `TableFull` if no free slot exists.
-    pub fn install(&mut self, _entry: Entry) -> Result<u32, CapError> {
-        todo!()
+    pub fn install(&mut self, entry: Entry) -> Result<u32, CapError> {
+        let index = self.allocate_slot()?;
+
+        self.install_at(index, entry);
+
+        Ok(index)
     }
 
     /// Close a capability slot, returning the outcome.
     ///
     /// D11: drops the reference. The slot tag is bumped (ABA defense).
     /// For tracked Fields (D17), closing the last send cap with a given
-    /// badge produces `ClosedWithBadgeClosure`.
+    /// badge produces `ClosedWithBadgeClosure`. Badge tracking is
+    /// deferred — the internal map data structure does not exist yet.
     ///
     /// The caller is responsible for: decrementing the target object's
     /// refcount, handling badge-closure delivery, and initiating destroy
     /// cascade (D33) if the refcount reached zero.
-    pub fn close(&mut self, _index: u32) -> CloseResult {
-        todo!()
+    pub fn close(&mut self, index: u32) -> CloseResult {
+        if index >= self.capacity {
+            return CloseResult::AlreadyEmpty;
+        }
+
+        let entry = crate::frame::cap_ops::entry_mut(self.entries, self.capacity, index);
+        let Some(e) = entry else {
+            return CloseResult::AlreadyEmpty;
+        };
+
+        if !e.is_occupied() {
+            return CloseResult::AlreadyEmpty;
+        }
+
+        let (object_type, object_id) = e.object.unwrap();
+
+        e.object = None;
+        e.slot_tag = SlotTag(e.slot_tag.0.wrapping_add(1));
+        e.stored_generation = match self.free_head {
+            Some(head) => head as u64,
+            None => FREELIST_END,
+        };
+        self.free_head = Some(index);
+        self.count = self.count.saturating_sub(1);
+
+        // was_last_reference is always false here — Table cannot determine
+        // refcount status (the refcount lives on the target object in its
+        // arena). The caller must check the object's refcount after this
+        // returns and act accordingly (D11/D33).
+        CloseResult::Closed {
+            object_type,
+            object_id,
+            was_last_reference: false,
+        }
     }
 
     /// Begin preemptible destroy cascade for the Observer that owns
@@ -467,7 +578,10 @@ impl Table {
     /// D33: only Observers cascade (only Observers hold caps). Space,
     /// Time, Field, and Pulsar destruction is O(1).
     pub fn begin_cascade(&mut self) -> CascadeState {
-        todo!()
+        CascadeState {
+            position: 0,
+            complete: false,
+        }
     }
 
     /// Process the next bounded step of a destroy cascade.
@@ -480,8 +594,37 @@ impl Table {
     ///
     /// Performance: bounded per-step cost. Total cascade is
     /// O(N + M) — N entries closed, M badge-closure checks.
-    pub fn cascade_step(&mut self, _state: &mut CascadeState) -> bool {
-        todo!()
+    pub fn cascade_step(&mut self, state: &mut CascadeState) -> bool {
+        if state.complete {
+            return true;
+        }
+
+        if self.count == 0 {
+            state.complete = true;
+
+            return true;
+        }
+
+        let end = self
+            .capacity
+            .min(state.position.saturating_add(CASCADE_STEP_SIZE));
+        let mut position = state.position;
+
+        while position < end {
+            self.close(position);
+
+            position += 1;
+        }
+
+        state.position = position;
+
+        if self.count == 0 || state.position >= self.capacity {
+            state.complete = true;
+
+            return true;
+        }
+
+        false
     }
 }
 
@@ -543,5 +686,1314 @@ mod tests {
 
         assert_eq!(reduced, Rights::FAULT_OBSERVER);
         assert!(!reduced.contains(Rights::SUSPEND));
+    }
+
+    // ── Test helpers ───────────────────────────────────────────────
+
+    /// Construct a Table backed by real memory for testing.
+    ///
+    /// Allocates `capacity` empty entries via `frame::cap_ops::alloc_test_entries`.
+    /// All entries start as `Entry::empty(SlotTag(0))`.
+    fn test_table(capacity: u32) -> Table {
+        let entries = crate::frame::cap_ops::alloc_test_entries(capacity);
+
+        crate::frame::cap_ops::init_freelist(entries, capacity, SLOT_USER_START);
+
+        Table {
+            entries,
+            capacity,
+            count: 0,
+            free_head: if capacity > SLOT_USER_START {
+                Some(SLOT_USER_START)
+            } else {
+                None
+            },
+        }
+    }
+
+    /// Construct a Table with dangling pointer for construction-only tests.
+    ///
+    /// Used when testing Table struct construction at extreme capacities
+    /// (e.g. u32::MAX) where real allocation is impossible. Methods that
+    /// dereference entries MUST NOT be called on this table.
+    fn test_table_dangling(capacity: u32) -> Table {
+        Table {
+            entries: NonNull::dangling(),
+            capacity,
+            count: 0,
+            free_head: None,
+        }
+    }
+
+    /// Build an occupied Entry for a Field with the given badge.
+    fn field_entry(badge_value: u64, slot_tag: u32) -> Entry {
+        Entry {
+            object: Some((ObjectType::Field, ObjectId(0))),
+            rights: Rights::FIELD_ALL,
+            badge: Badge(badge_value),
+            slot_tag: SlotTag(slot_tag),
+            send_once: false,
+            stored_generation: 0,
+        }
+    }
+
+    /// Build an occupied Entry for an Observer.
+    fn observer_entry(object_id: u32, slot_tag: u32) -> Entry {
+        Entry {
+            object: Some((ObjectType::Observer, ObjectId(object_id))),
+            rights: Rights::OBSERVER_ALL,
+            badge: Badge(0),
+            slot_tag: SlotTag(slot_tag),
+            send_once: false,
+            stored_generation: 0,
+        }
+    }
+
+    // ── Spec verifier tests ──────────────────────────────────────
+    //
+    // Verify that each settled design decision (D-number) is
+    // correctly realized in the implementation. One test per
+    // assertion, named test_d{N}_{description}.
+
+    // ── D4/D8: Handle resolution ─────────────────────────────────
+
+    /// D4: resolve a valid handle to the installed entry.
+    #[test]
+    fn test_d4_resolve_valid_handle() {
+        let mut table = test_table(16);
+        let entry = field_entry(42, 0);
+
+        table.install_at(3, entry);
+
+        let handle = Handle {
+            index: 3,
+            slot_tag: SlotTag(0),
+        };
+        let resolved = table.resolve(handle).unwrap();
+
+        assert_eq!(resolved.badge, Badge(42));
+        assert!(resolved.check_type(ObjectType::Field));
+    }
+
+    /// D8: resolve with index >= capacity returns InvalidHandle.
+    #[test]
+    fn test_d8_resolve_out_of_bounds() {
+        let table = test_table(8);
+        let handle = Handle {
+            index: 8,
+            slot_tag: SlotTag(0),
+        };
+        let result = table.resolve(handle);
+
+        assert!(
+            matches!(result, Err(CapError::InvalidHandle)),
+            "D8: out-of-bounds index must return InvalidHandle"
+        );
+    }
+
+    /// D8: resolve handle pointing to an empty slot returns InvalidHandle.
+    #[test]
+    fn test_d8_resolve_empty_slot() {
+        let table = test_table(16);
+        let handle = Handle {
+            index: SLOT_USER_START,
+            slot_tag: SlotTag(0),
+        };
+        let result = table.resolve(handle);
+
+        assert!(
+            matches!(result, Err(CapError::InvalidHandle)),
+            "D8: empty slot must return InvalidHandle"
+        );
+    }
+
+    // ── D11: ABA defense and close ───────────────────────────────
+
+    /// D11: resolve with wrong slot_tag fails.
+    #[test]
+    fn test_d11_resolve_slot_tag_mismatch() {
+        let mut table = test_table(16);
+
+        table.install_at(3, field_entry(10, 0));
+
+        let handle = Handle {
+            index: 3,
+            slot_tag: SlotTag(999),
+        };
+        let result = table.resolve(handle);
+
+        assert!(
+            matches!(result, Err(CapError::SlotTagMismatch)),
+            "D11: wrong slot_tag must return SlotTagMismatch"
+        );
+    }
+
+    /// D11: free_slot bumps the slot tag so old handles fail resolution.
+    #[test]
+    fn test_d11_free_slot_bumps_tag() {
+        let mut table = test_table(16);
+
+        table.install_at(3, field_entry(10, 0));
+
+        let old_handle = Handle {
+            index: 3,
+            slot_tag: SlotTag(0),
+        };
+
+        // Verify it resolves before freeing.
+        assert!(table.resolve(old_handle).is_ok());
+
+        table.free_slot(3);
+
+        // Old handle must now fail — slot tag was bumped.
+        let result = table.resolve(old_handle);
+
+        assert!(
+            result.is_err(),
+            "stale handle after free_slot must fail resolution"
+        );
+    }
+
+    /// D11: close an occupied slot returns Closed with correct type and id.
+    #[test]
+    fn test_d11_close_occupied_returns_closed() {
+        let mut table = test_table(16);
+        let entry = Entry {
+            object: Some((ObjectType::Observer, ObjectId(7))),
+            rights: Rights::OBSERVER_ALL,
+            badge: Badge(0),
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+
+        table.install_at(3, entry);
+
+        let result = table.close(3);
+
+        match result {
+            CloseResult::Closed {
+                object_type,
+                object_id,
+                ..
+            } => {
+                assert_eq!(object_type, ObjectType::Observer);
+                assert_eq!(object_id, ObjectId(7));
+            }
+            other => panic!("expected CloseResult::Closed, got {other:?}"),
+        }
+    }
+
+    /// D11: close an empty slot returns AlreadyEmpty.
+    #[test]
+    fn test_d11_close_empty_returns_already_empty() {
+        let mut table = test_table(16);
+        let result = table.close(SLOT_USER_START);
+
+        assert!(
+            matches!(result, CloseResult::AlreadyEmpty),
+            "close on empty slot must return AlreadyEmpty"
+        );
+    }
+
+    /// D11: close bumps the slot tag so old handles fail resolution.
+    #[test]
+    fn test_d11_close_bumps_slot_tag() {
+        let mut table = test_table(16);
+
+        table.install_at(3, field_entry(10, 0));
+
+        let old_handle = Handle {
+            index: 3,
+            slot_tag: SlotTag(0),
+        };
+        // Close bumps the tag.
+        let _ = table.close(3);
+        // Old handle must now fail.
+        let result = table.resolve(old_handle);
+
+        assert!(
+            result.is_err(),
+            "stale handle after close must fail resolution"
+        );
+    }
+
+    // ── D8: Slot allocation ──────────────────────────────────────
+
+    /// D8: allocate_slot on a fresh table returns a user slot.
+    #[test]
+    fn test_d8_allocate_slot_finds_free() {
+        let mut table = test_table(16);
+        let index = table.allocate_slot().unwrap();
+
+        assert!(
+            index >= SLOT_USER_START,
+            "allocated slot must be >= SLOT_USER_START, got {index}"
+        );
+    }
+
+    /// D8: allocate_slot on a full table returns TableFull.
+    #[test]
+    fn test_d8_allocate_slot_table_full() {
+        // Table with capacity <= SLOT_USER_START has no user slots.
+        let mut table = test_table(SLOT_USER_START);
+        let result = table.allocate_slot();
+
+        assert_eq!(result.unwrap_err(), CapError::TableFull);
+    }
+
+    /// D8: allocate_slot skips occupied slots, returning different indices.
+    #[test]
+    fn test_d8_allocate_slot_skips_occupied() {
+        let mut table = test_table(16);
+        let first = table.allocate_slot().unwrap();
+
+        table.install_at(first, field_entry(1, 0));
+
+        let second = table.allocate_slot().unwrap();
+
+        assert_ne!(
+            first, second,
+            "second allocation must return a different slot"
+        );
+        assert!(second >= SLOT_USER_START);
+    }
+
+    // ── D8/D35: Installation ─────────────────────────────────────
+
+    /// D8: install_at places an entry that resolves with correct badge/type.
+    #[test]
+    fn test_d8_install_at_places_entry() {
+        let mut table = test_table(16);
+        let entry = field_entry(99, 0);
+
+        table.install_at(5, entry);
+
+        let handle = Handle {
+            index: 5,
+            slot_tag: SlotTag(0),
+        };
+        let resolved = table.resolve(handle).unwrap();
+
+        assert_eq!(resolved.badge, Badge(99));
+        assert!(resolved.check_type(ObjectType::Field));
+    }
+
+    /// D8/D35: install finds a free slot and returns index >= SLOT_USER_START.
+    #[test]
+    fn test_d8_install_finds_free_slot() {
+        let mut table = test_table(16);
+        let entry = observer_entry(1, 0);
+        let index = table.install(entry).unwrap();
+
+        assert!(
+            index >= SLOT_USER_START,
+            "install must return index >= SLOT_USER_START, got {index}"
+        );
+    }
+
+    /// D8: install on a full table returns TableFull.
+    #[test]
+    fn test_d8_install_table_full() {
+        let mut table = test_table(8);
+
+        // Fill all user slots (SLOT_USER_START..8).
+        for _ in SLOT_USER_START..8 {
+            let idx = table.allocate_slot().unwrap();
+
+            table.install_at(idx, field_entry(0, 0));
+        }
+
+        let result = table.install(field_entry(0, 0));
+
+        assert_eq!(result.unwrap_err(), CapError::TableFull);
+    }
+
+    // ── D17: Badge closure (deferred) ────────────────────────────
+
+    /// D17: closing the last send cap with a given badge on a tracked Field
+    /// should produce ClosedWithBadgeClosure. Deferred — the badge tracking
+    /// map data structure does not exist yet.
+    #[test]
+    #[ignore]
+    fn test_d17_close_tracked_field_last_badge() {
+        // Badge tracking map is not yet implemented.
+        // When it exists, this test should:
+        // 1. Create a Field with badge_tracking = true
+        // 2. Install a send cap with a specific badge
+        // 3. Close that cap (the last with that badge)
+        // 4. Assert CloseResult::ClosedWithBadgeClosure
+        unimplemented!("badge tracking map deferred — see design/spec.md D17");
+    }
+
+    // ── D33: Preemptible cascade ─────────────────────────────────
+
+    /// D33: begin_cascade returns initial state with position 0.
+    #[test]
+    fn test_d33_begin_cascade_returns_initial_state() {
+        let mut table = test_table(16);
+        let state = table.begin_cascade();
+
+        assert_eq!(state.position, 0);
+        assert!(!state.complete);
+    }
+
+    /// D33: cascade_step advances position past processed entries.
+    #[test]
+    fn test_d33_cascade_step_progresses() {
+        let mut table = test_table(32);
+
+        // Install entries to process.
+        for i in 0..20 {
+            table.install_at(i, observer_entry(i, 0));
+        }
+
+        let mut state = table.begin_cascade();
+        let done = table.cascade_step(&mut state);
+
+        assert!(
+            state.position > 0,
+            "cascade_step must advance position (got {})",
+            state.position
+        );
+
+        // With 20 entries and CASCADE_STEP_SIZE=16, one step should not
+        // complete the cascade.
+        if !done {
+            assert!(!state.complete);
+        }
+    }
+
+    /// D33: cascade_step on an empty table completes immediately.
+    #[test]
+    fn test_d33_cascade_step_completes() {
+        let mut table = test_table(8);
+        let mut state = table.begin_cascade();
+        let done = table.cascade_step(&mut state);
+
+        assert!(done, "cascade on empty table must complete in one step");
+        assert!(state.complete);
+    }
+
+    /// D33: cascade is bounded per step — many entries require multiple steps.
+    #[test]
+    fn test_d33_cascade_is_bounded_per_step() {
+        let mut table = test_table(64);
+
+        // Install entries across the full table.
+        for i in 0..64 {
+            table.install_at(i, observer_entry(i, 0));
+        }
+
+        let mut state = table.begin_cascade();
+        let done = table.cascade_step(&mut state);
+
+        // CASCADE_STEP_SIZE is 16 and we have 64 entries —
+        // one step must not complete the entire cascade.
+        assert!(
+            !done,
+            "cascade with 64 entries must not complete in one step"
+        );
+        assert!(!state.complete);
+        assert!(
+            state.position > 0 && state.position < 64,
+            "position must have advanced but not reached the end (got {})",
+            state.position
+        );
+    }
+
+    // ── D51: Send-once flag ──────────────────────────────────────
+
+    /// D51: send_once flag is preserved through install and resolve.
+    #[test]
+    fn test_d51_send_once_preserved_through_operations() {
+        let mut table = test_table(16);
+        let entry = Entry {
+            object: Some((ObjectType::Field, ObjectId(0))),
+            rights: Rights::FIELD_ALL,
+            badge: Badge(0),
+            slot_tag: SlotTag(0),
+            send_once: true,
+            stored_generation: 0,
+        };
+
+        table.install_at(SLOT_USER_START, entry);
+
+        let handle = Handle {
+            index: SLOT_USER_START,
+            slot_tag: SlotTag(0),
+        };
+        let resolved = table.resolve(handle).unwrap();
+
+        assert!(
+            resolved.is_send_once(),
+            "D51: send_once must be true after install and resolve"
+        );
+    }
+
+    // ── D67: Generation check ────────────────────────────────────
+
+    /// D67: check_generation returns true when stored matches live.
+    #[test]
+    fn test_d67_entry_check_generation_match() {
+        let entry = Entry {
+            object: Some((ObjectType::Space, ObjectId(0))),
+            rights: Rights::SPACE_ALL,
+            badge: Badge(0),
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: 5,
+        };
+
+        assert!(
+            entry.check_generation(5),
+            "D67: matching generation must return true"
+        );
+    }
+
+    /// D67: check_generation returns false on mismatch.
+    #[test]
+    fn test_d67_entry_check_generation_mismatch() {
+        let entry = Entry {
+            object: Some((ObjectType::Space, ObjectId(0))),
+            rights: Rights::SPACE_ALL,
+            badge: Badge(0),
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: 5,
+        };
+
+        assert!(
+            !entry.check_generation(6),
+            "D67: mismatched generation must return false"
+        );
+        assert!(
+            !entry.check_generation(0),
+            "D67: zero vs stored=5 must return false"
+        );
+    }
+
+    // ── D57: Reserved slots ──────────────────────────────────────
+
+    /// D57: allocate_slot never returns a reserved slot index.
+    #[test]
+    fn test_d57_allocate_slot_skips_reserved() {
+        let mut table = test_table(16);
+
+        // Allocate all available user slots.
+        for _ in SLOT_USER_START..16 {
+            let index = table.allocate_slot().unwrap();
+
+            assert!(
+                index >= SLOT_USER_START,
+                "D57: allocated slot {index} is in the reserved range [0, {SLOT_USER_START})"
+            );
+
+            table.install_at(index, field_entry(0, 0));
+        }
+    }
+
+    // ── Adversarial tests ─────────────────────────────────────────
+    //
+    // Boundary conditions, interleaved operations, state corruption
+    // sequences, and edge cases designed to surface bugs in the
+    // capability module implementation.
+
+    // ── Table boundary conditions ─────────────────────────────────
+
+    /// Resolve with index 0 — minimum valid index (reserved slot).
+    #[test]
+
+    fn test_adversarial_cap_resolve_index_zero() {
+        let table = test_table(16);
+        let handle = Handle {
+            index: 0,
+            slot_tag: SlotTag(0),
+        };
+        let _result = table.resolve(handle);
+    }
+
+    /// Resolve with index = capacity - 1 — last valid index.
+    #[test]
+
+    fn test_adversarial_cap_resolve_last_valid_index() {
+        let table = test_table(16);
+        let handle = Handle {
+            index: 15,
+            slot_tag: SlotTag(0),
+        };
+        let _result = table.resolve(handle);
+    }
+
+    /// Resolve with index = capacity — first invalid index (off-by-one).
+    /// Must return InvalidHandle, not access out-of-bounds memory.
+    #[test]
+
+    fn test_adversarial_cap_resolve_at_capacity_boundary() {
+        let table = test_table(16);
+        let handle = Handle {
+            index: 16,
+            slot_tag: SlotTag(0),
+        };
+        let result = table.resolve(handle);
+
+        assert!(matches!(result, Err(CapError::InvalidHandle)));
+    }
+
+    /// Resolve with index far beyond capacity — u32::MAX.
+    #[test]
+
+    fn test_adversarial_cap_resolve_index_u32_max() {
+        let table = test_table(16);
+        let handle = Handle {
+            index: u32::MAX,
+            slot_tag: SlotTag(0),
+        };
+        let result = table.resolve(handle);
+
+        assert!(matches!(result, Err(CapError::InvalidHandle)));
+    }
+
+    /// Resolve on a zero-capacity table — any index is out of bounds.
+    #[test]
+
+    fn test_adversarial_cap_resolve_zero_capacity_table() {
+        let table = test_table(0);
+        let handle = Handle {
+            index: 0,
+            slot_tag: SlotTag(0),
+        };
+        let result = table.resolve(handle);
+
+        assert!(matches!(result, Err(CapError::InvalidHandle)));
+    }
+
+    /// allocate_slot on a table with capacity 1 — single-slot table.
+    #[test]
+
+    fn test_adversarial_cap_allocate_slot_capacity_one() {
+        let mut table = test_table(1);
+        let _result = table.allocate_slot();
+    }
+
+    /// allocate_slot on a table with capacity 0 — empty table.
+    /// Must return TableFull without panicking.
+    #[test]
+
+    fn test_adversarial_cap_allocate_slot_capacity_zero() {
+        let mut table = test_table(0);
+        let result = table.allocate_slot();
+
+        assert!(matches!(result, Err(CapError::TableFull)));
+    }
+
+    /// install_at with index = capacity - 1 — boundary of valid range.
+    #[test]
+
+    fn test_adversarial_cap_install_at_last_valid_index() {
+        let mut table = test_table(16);
+        let entry = field_entry(99, 0);
+
+        table.install_at(15, entry);
+    }
+
+    /// install_at with index = capacity — out of bounds.
+    /// Must not silently corrupt memory.
+    #[test]
+
+    fn test_adversarial_cap_install_at_capacity_boundary() {
+        let mut table = test_table(16);
+        let entry = field_entry(99, 0);
+
+        table.install_at(16, entry);
+    }
+
+    /// close with index 0 — minimum index (reserved fault handler slot).
+    #[test]
+
+    fn test_adversarial_cap_close_index_zero() {
+        let mut table = test_table(16);
+        let _result = table.close(0);
+    }
+
+    /// close with index = capacity — out of bounds.
+    /// Must not access memory past the table.
+    #[test]
+
+    fn test_adversarial_cap_close_at_capacity_boundary() {
+        let mut table = test_table(16);
+        let _result = table.close(16);
+    }
+
+    /// close with index = u32::MAX — far out of bounds.
+    #[test]
+
+    fn test_adversarial_cap_close_index_u32_max() {
+        let mut table = test_table(16);
+        let _result = table.close(u32::MAX);
+    }
+
+    /// free_slot with index = capacity — out of bounds.
+    #[test]
+
+    fn test_adversarial_cap_free_slot_at_capacity_boundary() {
+        let mut table = test_table(16);
+
+        table.free_slot(16);
+    }
+
+    /// resolve_mut with valid index — mutable resolution path.
+    #[test]
+
+    fn test_adversarial_cap_resolve_mut_valid() {
+        let mut table = test_table(16);
+        let handle = Handle {
+            index: 3,
+            slot_tag: SlotTag(0),
+        };
+        let _result = table.resolve_mut(handle);
+    }
+
+    /// resolve_mut with index = capacity — out of bounds.
+    #[test]
+
+    fn test_adversarial_cap_resolve_mut_out_of_bounds() {
+        let mut table = test_table(16);
+        let handle = Handle {
+            index: 16,
+            slot_tag: SlotTag(0),
+        };
+        let result = table.resolve_mut(handle);
+
+        assert!(matches!(result, Err(CapError::InvalidHandle)));
+    }
+
+    // ── Interleaved operations ────────────────────────────────────
+
+    /// allocate_slot -> install_at -> close -> allocate_slot.
+    /// After closing a slot, it should be available for reuse.
+    #[test]
+
+    fn test_adversarial_cap_slot_reuse_after_close() {
+        let mut table = test_table(4);
+        let idx = table.allocate_slot().unwrap();
+
+        table.install_at(idx, observer_entry(1, 0));
+
+        let _close_result = table.close(idx);
+        let idx2 = table.allocate_slot().unwrap();
+
+        assert!(idx2 < 4);
+    }
+
+    /// install -> resolve -> close -> resolve.
+    /// After close, resolve with the old handle must fail (stale handle).
+    #[test]
+
+    fn test_adversarial_cap_stale_handle_after_close() {
+        let mut table = test_table(16);
+        let entry = field_entry(42, 0);
+        let idx = table.install(entry).unwrap();
+        let handle = Handle {
+            index: idx,
+            slot_tag: SlotTag(0),
+        };
+        let _resolved = table.resolve(handle).unwrap();
+        let _close_result = table.close(idx);
+        let stale_result = table.resolve(handle);
+
+        assert!(
+            matches!(
+                stale_result,
+                Err(CapError::SlotTagMismatch) | Err(CapError::InvalidHandle)
+            ),
+            "stale handle after close must fail"
+        );
+    }
+
+    /// Double close on the same index — must not corrupt state.
+    #[test]
+
+    fn test_adversarial_cap_double_close() {
+        let mut table = test_table(16);
+
+        table.install_at(5, observer_entry(1, 0));
+
+        let first = table.close(5);
+
+        assert!(matches!(first, CloseResult::Closed { .. }));
+
+        let second = table.close(5);
+
+        assert!(matches!(second, CloseResult::AlreadyEmpty));
+    }
+
+    /// Fill table completely, free one slot, allocate again.
+    /// The freed slot must be the one returned.
+    #[test]
+
+    fn test_adversarial_cap_fill_free_reallocate() {
+        let mut table = test_table(8);
+
+        // Fill all user slots (3..8).
+        for _ in SLOT_USER_START..8 {
+            let idx = table.allocate_slot().unwrap();
+
+            table.install_at(idx, field_entry(0, 0));
+        }
+
+        // Table should be full for user allocations.
+        let full_result = table.allocate_slot();
+
+        assert!(matches!(full_result, Err(CapError::TableFull)));
+
+        // Free slot 5 specifically.
+        table.free_slot(5);
+
+        // Now allocate — must get slot 5 back (only free slot).
+        let recovered = table.allocate_slot().unwrap();
+
+        assert_eq!(recovered, 5);
+    }
+
+    // ── State corruption sequences ────────────────────────────────
+
+    /// Install at every slot, close every slot, verify count is 0.
+    #[test]
+
+    fn test_adversarial_cap_install_all_close_all_count_zero() {
+        let mut table = test_table(8);
+
+        for i in 0..8 {
+            table.install_at(i, observer_entry(i, 0));
+        }
+        for i in 0..8 {
+            let result = table.close(i);
+
+            assert!(
+                matches!(result, CloseResult::Closed { .. }),
+                "slot {i} should have been occupied"
+            );
+        }
+
+        assert_eq!(table.count, 0, "count must be 0 after closing all slots");
+    }
+
+    /// Rapidly interleave install and close — count must stay consistent.
+    #[test]
+
+    fn test_adversarial_cap_interleaved_install_close_count() {
+        let mut table = test_table(16);
+
+        for i in 0..5u32 {
+            table.install_at(SLOT_USER_START + i, field_entry(i as u64, 0));
+        }
+        for i in 0..3u32 {
+            let _result = table.close(SLOT_USER_START + i);
+        }
+
+        let _a = table.install(field_entry(100, 0)).unwrap();
+        let _b = table.install(field_entry(101, 0)).unwrap();
+
+        // 5 installed - 3 closed + 2 installed = 4 occupied.
+        assert_eq!(table.count, 4, "count must reflect install/close balance");
+    }
+
+    /// free_slot then close on the same index — free_slot makes it empty,
+    /// close should return AlreadyEmpty.
+    #[test]
+
+    fn test_adversarial_cap_free_then_close_same_slot() {
+        let mut table = test_table(16);
+
+        table.install_at(5, field_entry(42, 0));
+        table.free_slot(5);
+
+        let result = table.close(5);
+
+        assert!(
+            matches!(result, CloseResult::AlreadyEmpty),
+            "close after free_slot should return AlreadyEmpty"
+        );
+    }
+
+    // ── CascadeState edge cases ───────────────────────────────────
+
+    /// begin_cascade on an empty table (capacity 0).
+    #[test]
+
+    fn test_adversarial_cap_begin_cascade_empty_table() {
+        let mut table = test_table(0);
+        let state = table.begin_cascade();
+
+        assert_eq!(state.position, 0);
+        assert!(!state.complete);
+    }
+
+    /// cascade_step called repeatedly until complete — must terminate.
+    #[test]
+
+    fn test_adversarial_cap_cascade_terminates() {
+        let mut table = test_table(64);
+
+        table.count = 64;
+
+        let mut state = table.begin_cascade();
+        let mut steps = 0u32;
+
+        loop {
+            let done = table.cascade_step(&mut state);
+
+            steps += 1;
+
+            if done {
+                break;
+            }
+
+            assert!(
+                steps < 1000,
+                "cascade did not terminate after {steps} steps"
+            );
+        }
+
+        assert!(state.complete);
+    }
+
+    /// cascade_step on an already-complete state.
+    /// Must not panic or corrupt state — should remain complete.
+    #[test]
+
+    fn test_adversarial_cap_cascade_step_on_complete() {
+        let mut table = test_table(0);
+        let mut state = table.begin_cascade();
+        let done = table.cascade_step(&mut state);
+
+        assert!(done);
+        assert!(state.complete);
+
+        let done_again = table.cascade_step(&mut state);
+
+        assert!(done_again);
+        assert!(state.complete);
+    }
+
+    /// CascadeState initial conditions — position 0, not complete.
+    #[test]
+    fn test_adversarial_cap_cascade_state_initial() {
+        let state = CascadeState {
+            position: 0,
+            complete: false,
+        };
+
+        assert_eq!(state.position, 0);
+        assert!(!state.complete);
+    }
+
+    // ── Entry edge cases ──────────────────────────────────────────
+
+    /// check_rights with Rights::empty() — no rights required, always passes.
+    #[test]
+    fn test_adversarial_cap_check_rights_empty_required() {
+        let entry = field_entry(0, 0);
+
+        assert!(entry.check_rights(Rights::empty()));
+    }
+
+    /// check_rights with Rights::empty() on an entry with no rights.
+    #[test]
+    fn test_adversarial_cap_check_rights_empty_on_empty() {
+        let entry = Entry {
+            object: Some((ObjectType::Field, ObjectId(0))),
+            rights: Rights::empty(),
+            badge: Badge(0),
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+
+        assert!(entry.check_rights(Rights::empty()));
+        assert!(!entry.check_rights(Rights::SEND));
+    }
+
+    /// check_rights with the full type mask — all rights present.
+    #[test]
+    fn test_adversarial_cap_check_rights_full_mask() {
+        let entry = Entry {
+            object: Some((ObjectType::Observer, ObjectId(0))),
+            rights: Rights::OBSERVER_ALL,
+            badge: Badge(0),
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+
+        assert!(entry.check_rights(Rights::OBSERVER_ALL));
+        assert!(entry.check_rights(Rights::RESUME));
+        assert!(entry.check_rights(Rights::DESTROY));
+        assert!(entry.check_rights(Rights::INSTALL_CAP));
+        assert!(entry.check_rights(Rights::WRITE_REGISTERS));
+        assert!(entry.check_rights(Rights::READ_REGISTERS));
+        assert!(entry.check_rights(Rights::SUSPEND));
+        assert!(entry.check_rights(Rights::CHANGE_HANDLER));
+        assert!(entry.check_rights(Rights::MODIFY_SCHEDULING));
+        assert!(entry.check_rights(Rights::CLONE));
+    }
+
+    /// check_rights for a right NOT in the type's mask — cross-type leak.
+    #[test]
+    fn test_adversarial_cap_check_rights_cross_type_right() {
+        let entry = Entry {
+            object: Some((ObjectType::Space, ObjectId(0))),
+            rights: Rights::SPACE_ALL,
+            badge: Badge(0),
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+
+        assert!(!entry.check_rights(Rights::SEND));
+        assert!(!entry.check_rights(Rights::RESUME));
+    }
+
+    /// check_type with wrong type returns false.
+    #[test]
+    fn test_adversarial_cap_check_type_mismatch() {
+        let entry = field_entry(0, 0);
+
+        assert!(!entry.check_type(ObjectType::Space));
+        assert!(!entry.check_type(ObjectType::Time));
+        assert!(!entry.check_type(ObjectType::Observer));
+        assert!(!entry.check_type(ObjectType::Pulsar));
+        assert!(entry.check_type(ObjectType::Field));
+    }
+
+    /// check_type on an empty entry — must return false for any type.
+    #[test]
+    fn test_adversarial_cap_check_type_on_empty() {
+        let entry = Entry::empty(SlotTag(0));
+
+        assert!(!entry.check_type(ObjectType::Space));
+        assert!(!entry.check_type(ObjectType::Time));
+        assert!(!entry.check_type(ObjectType::Field));
+        assert!(!entry.check_type(ObjectType::Observer));
+        assert!(!entry.check_type(ObjectType::Pulsar));
+    }
+
+    /// is_occupied on Entry::empty() — must return false.
+    #[test]
+    fn test_adversarial_cap_is_occupied_on_empty() {
+        let entry = Entry::empty(SlotTag(0));
+
+        assert!(!entry.is_occupied());
+    }
+
+    /// is_occupied on an occupied entry — must return true.
+    #[test]
+    fn test_adversarial_cap_is_occupied_on_occupied() {
+        let entry = observer_entry(0, 0);
+
+        assert!(entry.is_occupied());
+    }
+
+    /// check_generation with 0 vs 0 — both zero, should match.
+    #[test]
+    fn test_adversarial_cap_check_generation_zero() {
+        let entry = Entry::empty(SlotTag(0));
+
+        assert!(entry.check_generation(0));
+        assert!(!entry.check_generation(1));
+    }
+
+    /// check_generation at u64 boundary values.
+    #[test]
+    fn test_adversarial_cap_check_generation_u64_extremes() {
+        let entry = Entry {
+            object: Some((ObjectType::Space, ObjectId(0))),
+            rights: Rights::SPACE_ALL,
+            badge: Badge(0),
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: u64::MAX,
+        };
+
+        assert!(entry.check_generation(u64::MAX));
+        assert!(!entry.check_generation(u64::MAX - 1));
+        assert!(!entry.check_generation(0));
+    }
+
+    /// is_send_once on entry with flag set.
+    #[test]
+    fn test_adversarial_cap_is_send_once_true() {
+        let entry = Entry {
+            object: Some((ObjectType::Field, ObjectId(0))),
+            rights: Rights::FIELD_ALL,
+            badge: Badge(0),
+            slot_tag: SlotTag(0),
+            send_once: true,
+            stored_generation: 0,
+        };
+
+        assert!(entry.is_send_once());
+    }
+
+    /// is_send_once on entry without flag — must return false.
+    #[test]
+    fn test_adversarial_cap_is_send_once_false() {
+        let entry = field_entry(0, 0);
+
+        assert!(!entry.is_send_once());
+    }
+
+    // ── SlotTag edge cases ────────────────────────────────────────
+
+    /// free_slot called — slot tag wrapping concern documented.
+    /// If the tag wraps around u32::MAX -> 0, it could alias old handles.
+    #[test]
+
+    fn test_adversarial_cap_slot_tag_wraps_on_overflow() {
+        let mut table = test_table(4);
+
+        table.free_slot(0);
+    }
+
+    // ── Handle construction extremes ──────────────────────────────
+
+    /// Handle with index u32::MAX — must not cause arithmetic overflow
+    /// during bounds checking.
+    #[test]
+
+    fn test_adversarial_cap_handle_index_u32_max() {
+        let table = test_table(16);
+        let handle = Handle {
+            index: u32::MAX,
+            slot_tag: SlotTag(0),
+        };
+        let result = table.resolve(handle);
+
+        assert!(matches!(result, Err(CapError::InvalidHandle)));
+    }
+
+    /// Handle with slot_tag u32::MAX — must not cause comparison issues.
+    #[test]
+
+    fn test_adversarial_cap_handle_slot_tag_u32_max() {
+        let table = test_table(16);
+        let handle = Handle {
+            index: 0,
+            slot_tag: SlotTag(u32::MAX),
+        };
+        let result = table.resolve(handle);
+
+        assert!(
+            matches!(
+                result,
+                Err(CapError::SlotTagMismatch) | Err(CapError::InvalidHandle)
+            ),
+            "extreme slot tag must not crash"
+        );
+    }
+
+    /// Handle with both index and slot_tag at u32::MAX.
+    #[test]
+
+    fn test_adversarial_cap_handle_all_max() {
+        let table = test_table(16);
+        let handle = Handle {
+            index: u32::MAX,
+            slot_tag: SlotTag(u32::MAX),
+        };
+        let result = table.resolve(handle);
+
+        assert!(matches!(result, Err(CapError::InvalidHandle)));
+    }
+
+    // ── Rights algebra edge cases ─────────────────────────────────
+
+    /// Attenuate with empty mask zeroes all rights.
+    #[test]
+    fn test_adversarial_cap_attenuate_with_empty_mask() {
+        let full = Rights::OBSERVER_ALL;
+        let result = full.attenuate(Rights::empty());
+
+        assert_eq!(result, Rights::empty());
+        assert_eq!(result.bits(), 0);
+    }
+
+    /// Attenuate is idempotent — applying the same mask twice gives
+    /// the same result.
+    #[test]
+    fn test_adversarial_cap_attenuate_idempotent() {
+        let full = Rights::FIELD_ALL;
+        let mask = Rights::SEND.union(Rights::RECEIVE);
+        let once = full.attenuate(mask);
+        let twice = once.attenuate(mask);
+
+        assert_eq!(once, twice);
+    }
+
+    /// Union is commutative.
+    #[test]
+    fn test_adversarial_cap_union_commutative() {
+        let a = Rights::SEND;
+        let b = Rights::DESTROY;
+
+        assert_eq!(a.union(b), b.union(a));
+    }
+
+    /// Contains is reflexive — any rights set contains itself.
+    #[test]
+    fn test_adversarial_cap_contains_reflexive() {
+        assert!(Rights::OBSERVER_ALL.contains(Rights::OBSERVER_ALL));
+        assert!(Rights::empty().contains(Rights::empty()));
+        assert!(Rights::SEND.contains(Rights::SEND));
+    }
+
+    /// No type-specific rights bits overlap between different types.
+    #[test]
+    fn test_adversarial_cap_type_specific_bits_disjoint() {
+        let shared = Rights::DESTROY.union(Rights::CLONE).union(Rights::SPLIT);
+        let space_specific = Rights(Rights::SPACE_ALL.bits() & !shared.bits());
+        let time_specific = Rights(Rights::TIME_ALL.bits() & !shared.bits());
+        let field_specific = Rights(Rights::FIELD_ALL.bits() & !shared.bits());
+        let observer_specific = Rights(Rights::OBSERVER_ALL.bits() & !shared.bits());
+        let pulsar_specific = Rights(Rights::PULSAR_ALL.bits() & !shared.bits());
+
+        assert_eq!(
+            field_specific.bits() & observer_specific.bits(),
+            0,
+            "Field and Observer type-specific rights overlap"
+        );
+        assert_eq!(
+            space_specific.bits() & field_specific.bits(),
+            0,
+            "Space and Field type-specific rights overlap"
+        );
+        assert_eq!(
+            space_specific.bits() & observer_specific.bits(),
+            0,
+            "Space and Observer type-specific rights overlap"
+        );
+        assert_eq!(
+            time_specific.bits(),
+            0,
+            "Time has unexpected specific rights"
+        );
+        assert_eq!(
+            pulsar_specific.bits(),
+            0,
+            "Pulsar has unexpected specific rights"
+        );
+    }
+
+    // ── Badge edge cases ──────────────────────────────────────────
+
+    /// Badge with u64::MAX — maximum value.
+    #[test]
+    fn test_adversarial_cap_badge_u64_max() {
+        let badge = Badge(u64::MAX);
+
+        assert_eq!(badge.0, u64::MAX);
+
+        let entry = Entry {
+            object: Some((ObjectType::Field, ObjectId(0))),
+            rights: Rights::FIELD_ALL,
+            badge,
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+
+        assert_eq!(entry.badge, Badge(u64::MAX));
+    }
+
+    /// Badge 0 is valid — distinguishable from CAP_ABSENT.
+    #[test]
+    fn test_adversarial_cap_badge_zero_not_absent() {
+        let badge = Badge(0);
+
+        assert_ne!(badge.0, CAP_ABSENT);
+    }
+
+    // ── Entry::empty edge cases ───────────────────────────────────
+
+    /// Entry::empty preserves the given slot tag.
+    #[test]
+    fn test_adversarial_cap_empty_entry_preserves_tag() {
+        let tag = SlotTag(42);
+        let entry = Entry::empty(tag);
+
+        assert_eq!(entry.slot_tag.0, 42);
+        assert!(!entry.is_occupied());
+        assert_eq!(entry.rights, Rights::empty());
+        assert_eq!(entry.badge, Badge(0));
+        assert!(!entry.send_once);
+        assert_eq!(entry.stored_generation, 0);
+    }
+
+    /// Entry::empty with SlotTag(u32::MAX).
+    #[test]
+    fn test_adversarial_cap_empty_entry_max_tag() {
+        let entry = Entry::empty(SlotTag(u32::MAX));
+
+        assert_eq!(entry.slot_tag.0, u32::MAX);
+        assert!(!entry.is_occupied());
+    }
+
+    // ── TransferredCap construction ───────────────────────────────
+
+    /// TransferredCap can represent all object types with extreme values.
+    #[test]
+    fn test_adversarial_cap_transferred_cap_extreme_values() {
+        let cap = TransferredCap {
+            object_type: ObjectType::Field,
+            object_id: ObjectId(u32::MAX),
+            rights: Rights::FIELD_ALL,
+            badge: Badge(u64::MAX),
+            send_once: true,
+            stored_generation: u64::MAX,
+        };
+
+        assert_eq!(cap.object_id, ObjectId(u32::MAX));
+        assert_eq!(cap.badge, Badge(u64::MAX));
+        assert_eq!(cap.stored_generation, u64::MAX);
+        assert!(cap.send_once);
+    }
+
+    // ── Sentinel value correctness ────────────────────────────────
+
+    /// CAP_ABSENT must never collide with a valid slot index.
+    #[test]
+    fn test_adversarial_cap_absent_not_valid_index() {
+        assert_eq!(CAP_ABSENT, u64::MAX);
+        assert!(CAP_ABSENT > u32::MAX as u64);
+    }
+
+    // ── Table with large capacity ─────────────────────────────────
+
+    /// Table with capacity u32::MAX — construction should not panic.
+    #[test]
+    fn test_adversarial_cap_table_max_capacity() {
+        let table = test_table_dangling(u32::MAX);
+
+        assert_eq!(table.capacity, u32::MAX);
+        assert_eq!(table.count, 0);
+    }
+
+    /// Resolve on a large table at the last valid index — the entry is
+    /// empty so resolve returns InvalidHandle. Uses a realistically-sized
+    /// table (not u32::MAX, which cannot be allocated in test memory).
+    #[test]
+    fn test_adversarial_cap_resolve_large_table_last_index() {
+        let table = test_table(1024);
+        let handle = Handle {
+            index: 1023,
+            slot_tag: SlotTag(0),
+        };
+        let result = table.resolve(handle);
+
+        assert!(
+            matches!(result, Err(CapError::InvalidHandle)),
+            "empty slot at last valid index must return InvalidHandle"
+        );
     }
 }
