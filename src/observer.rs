@@ -14,15 +14,33 @@
 //!      No base/effective scheduling split (inheritance is userspace policy).
 //!      Core assignment is transient (no struct field).
 //!      Reply field is a cap-table reserved slot (D21 pattern).
+//! D52: rights — all nine (9 bits).
 //! D56: placement mechanism settled. Scored placement reads R/T/P to match
 //!      Observer to core. Cache affinity tracked per-core, not per-Observer.
 //!      No core ID field here (D43 preserved).
+//! D57: budget = 128. Store R and T as u8; P = 128 - R - T (derived).
+//!      Default profile: R=43, T=43, P=42.
+//!      Self-reference cap at reserved slot 2 with full rights.
+//! D66: per-Observer clock_access: bool. Kernel writes
+//!      CNTKCTL_EL1.EL0VCTEN on every context switch.
+//! D67: generation counter for revocation.
 
-// TODO: remove
 #![allow(dead_code)]
 
 use crate::capability;
 use crate::field::Field;
+
+// ── Scheduling constants (D42, D57) ─────────────────────────────────
+
+/// Scheduling budget (D57). R + T <= SCHEDULING_BUDGET.
+/// Precision is derived: P = SCHEDULING_BUDGET - R - T.
+pub const SCHEDULING_BUDGET: u8 = 128;
+
+/// Default responsiveness (D57). Closest equal distribution on 128.
+pub const DEFAULT_RESPONSIVENESS: u8 = 43;
+
+/// Default throughput (D57).
+pub const DEFAULT_THROUGHPUT: u8 = 43;
 
 // ---------------------------------------------------------------------------
 // Register state handle — opaque reference into structural backing.
@@ -133,12 +151,19 @@ pub struct Observer {
     /// Cold path: updated on Time cap install/remove.
     compute_aggregate: u32,
 
-    /// Three-value scheduling profile (D42). Budget: R + T + P <= budget.
+    /// Three-value scheduling profile (D42, D57).
+    /// Budget = 128. Store R and T; derive P = 128 - R - T.
+    /// R + T <= SCHEDULING_BUDGET enforced at creation and modification.
     /// One set of values — no base/effective split (D43).
     /// Modified via modify-scheduling right (D39).
     responsiveness: u8,
     throughput: u8,
-    precision: u8,
+
+    /// Per-Observer clock access flag (D66).
+    /// Kernel writes CNTKCTL_EL1.EL0VCTEN on every context switch.
+    /// True = Observer can read CNTVCT_EL0 directly (~1 cycle).
+    /// False = must use clock_read() typed kernel operation (D48).
+    clock_access: bool,
 
     /// Wait-state linkage for blocked/pending states (D18/D19).
     wait_state: WaitState,
@@ -146,6 +171,10 @@ pub struct Observer {
     /// Outstanding capability references to this Observer (D11/D33).
     /// Decremented on cap close; object eligible for destruction at zero.
     refcount: u32,
+
+    /// Revocation generation counter (D67). Bumped on explicit
+    /// revocation; capability entries store the value at creation.
+    generation: u64,
 }
 
 #[cfg(test)]

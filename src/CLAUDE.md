@@ -40,19 +40,19 @@ design.
 Each module corresponds to a design concept. Derivation references in module doc
 comments link to `design/spec.md`.
 
-| Module          | Design concept                   | Key derivations                            |
-| --------------- | -------------------------------- | ------------------------------------------ |
-| `capability.rs` | Authority mechanism              | D4, D8, D11, D17, D38, D39, D40, D44, D48  |
-| `space.rs`      | Memory object                    | D9, D25, D26, D27, D41                     |
-| `time.rs`       | Compute allocation               | D29, D30, D31, D36–D38                     |
-| `field.rs`      | IPC mechanism + message format   | D13, D15, D16, D28, D37, D45, D47–D49      |
-| `observer.rs`   | Execution unit                   | D6, D14, D20, D21, D39, D40, D42, D43, D56 |
-| `pulsar.rs`     | Timer mechanism                  | D44                                        |
-| `arch/`         | Hardware abstraction (core half) | A2, D1, D5, D46, D47, D49, D56             |
-
-Management modules (core manager, scheduler, space manager) will emerge during
-implementation — their shapes depend on implementation strategy more than
-settled design.
+| Module          | Design concept                   | Key derivations                                      |
+| --------------- | -------------------------------- | ---------------------------------------------------- |
+| `arena.rs`      | Per-type slab + generation       | D53, D67, D70                                        |
+| `capability.rs` | Authority mechanism              | D4, D8, D11, D17, D51, D52, D57, D58, D67            |
+| `space.rs`      | Memory object                    | D9, D25, D26, D27, D41, D60, D67                     |
+| `time.rs`       | Compute allocation               | D29, D30, D31, D36–D38, D67                          |
+| `field.rs`      | IPC mechanism + message format   | D13, D15–D18, D28, D45, D54, D67, D71, D73           |
+| `observer.rs`   | Execution unit                   | D6, D14, D20, D21, D39, D42, D43, D56, D57, D66, D67 |
+| `pulsar.rs`     | Timer mechanism                  | D44, D52, D62, D63, D67, D72                         |
+| `scheduler.rs`  | Scheduler + placement traits     | D2, D50, D56, D59                                    |
+| `fault.rs`      | Fault types and delivery         | D12, D40, D61                                        |
+| `syscall.rs`    | Syscall ABI types                | D47, D48, D49                                        |
+| `arch/`         | Hardware abstraction (core half) | A2, D1, D5, D46, D47, D49, D56                       |
 
 ## Spec drives code
 
