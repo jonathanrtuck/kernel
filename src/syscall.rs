@@ -8,7 +8,7 @@
 ///
 /// The kernel dispatches IPC operations from ESR_EL1 alone — before
 /// reading any GPR (D47).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
 pub enum IpcOperation {
     Send = 1,

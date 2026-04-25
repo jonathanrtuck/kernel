@@ -55,6 +55,17 @@ pub const DEFAULT_THROUGHPUT: u8 = 43;
 #[derive(Clone, Copy)]
 pub struct RegisterStateHandle(#[allow(dead_code)] NonNull<u8>);
 
+#[cfg(any(target_os = "none", test))]
+impl RegisterStateHandle {
+    pub(crate) fn new(ptr: NonNull<u8>) -> Self {
+        RegisterStateHandle(ptr)
+    }
+
+    pub(crate) fn as_ptr(&self) -> NonNull<u8> {
+        self.0
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Scheduling state — D39 five-state machine.
 // ---------------------------------------------------------------------------
@@ -358,6 +369,26 @@ impl Observer {
     pub fn revoke(&self) {
         self.generation
             .fetch_add(1, core::sync::atomic::Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+impl Observer {
+    pub(crate) fn test_default() -> Self {
+        Observer {
+            register_state: RegisterStateHandle::new(NonNull::dangling()),
+            page_table_root: 0,
+            cap_table: NonNull::dangling(),
+            state: PrimaryState::Runnable,
+            suspended: false,
+            compute_aggregate: 100,
+            responsiveness: DEFAULT_RESPONSIVENESS,
+            throughput: DEFAULT_THROUGHPUT,
+            clock_access: false,
+            wait_state: WaitState::None,
+            refcount: 1,
+            generation: AtomicU64::new(0),
+        }
     }
 }
 

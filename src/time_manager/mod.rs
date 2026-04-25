@@ -21,7 +21,7 @@ use crate::observer::Observer;
 use core::ptr::NonNull;
 
 /// Core identifier. Not exposed to Observers (D46).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CoreId(pub u16);
 
 /// Snapshot of per-core state for placement decisions (D56, D59).
@@ -77,3 +77,6 @@ pub trait Scheduler {
 pub trait Placement {
     fn place(&self, observer: &Observer, snapshots: &[CoreSnapshot]) -> PlacementDecision;
 }
+
+pub mod round_robin;
+pub mod scored_placement;

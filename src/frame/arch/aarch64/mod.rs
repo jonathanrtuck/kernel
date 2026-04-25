@@ -74,6 +74,14 @@ pub fn halt() {
     }
 }
 
+/// Read the per-core data pointer (TPIDR_EL1).
+///
+/// Each core stores a pointer to its `CoreState` in this register at boot.
+/// Used by `frame::core_ops::read_core_state` to find per-core kernel state.
+pub fn tpidr_el1() -> u64 {
+    sysreg::tpidr_el1()
+}
+
 /// Signal a fatal crash to the hypervisor via the pvpanic device.
 ///
 /// Writes 0x01 to the pvpanic MMIO register, which tells QEMU/HVF that
