@@ -336,6 +336,172 @@ pub fn write_metadata_to_registers(
     }
 }
 
+// ── Observer access helpers for dispatch ──────────────────────────
+//
+// Safe dispatch (core_manager.rs) cannot dereference NonNull<Observer>
+// directly — that would violate the framekernel boundary. These helpers
+// provide the unsafe access, with the same safety invariant as
+// read_ipc_registers: the pointer is the current core's Observer
+// (or a recently-resolved Observer from an arena), and A4 non-reentrancy
+// guarantees no aliasing on a single core.
+
+/// Read an Observer's cap table pointer and capacity (D8, D77).
+///
+/// Returns the raw (entries pointer, capacity) pair needed for
+/// `resolve_cap_entry` on the hot path. The cap table is part of
+/// the Observer's structural backing (D43) — always valid while
+/// the Observer is alive.
+#[cfg(any(target_os = "none", test))]
+pub fn observer_cap_table(
+    observer_ptr: NonNull<Observer>,
+) -> (core::ptr::NonNull<crate::capability::Entry>, u32) {
+    // SAFETY: observer_ptr points to a live Observer in the arena.
+    // A4 non-reentrancy guarantees no aliasing on a single core.
+    // The cap_table and cap_table_capacity fields are always valid
+    // while the Observer is alive (D8, D43).
+    unsafe {
+        let observer = observer_ptr.as_ref();
+
+        (observer.cap_table, observer.cap_table_capacity)
+    }
+}
+
+/// Prepare an Observer's wait_state for a blocking Receive (D18, D13).
+///
+/// Sets observer.wait_state = WaitState::Single(WaitEntry{...}) with the
+/// given observer pointer and field pointer, and returns a mutable reference
+/// to the WaitEntry inside. The WaitEntry must persist if the Observer
+/// blocks — it's linked into the Field's waiters list.
+///
+/// The returned reference is valid for the duration of the dispatch
+/// (A4 non-reentrancy). The caller must NOT drop or move the Observer
+/// while the WaitEntry reference is live.
+#[cfg(any(target_os = "none", test))]
+pub fn observer_prepare_wait(
+    observer_ptr: NonNull<Observer>,
+    field_ptr: NonNull<crate::field::Field>,
+) -> &'static mut crate::observer::WaitEntry {
+    use crate::observer::{WaitEntry, WaitState};
+
+    // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy
+    // guarantees exclusive access on this core. We set the wait_state
+    // field and then return a mutable reference into it. The 'static
+    // lifetime is bounded by the Observer's arena lifetime (same
+    // invariant as read_ipc_registers).
+    unsafe {
+        let observer = &mut *observer_ptr.as_ptr();
+
+        observer.wait_state = WaitState::Single(WaitEntry {
+            observer: observer_ptr,
+            field: field_ptr,
+            prev: None,
+            next: None,
+        });
+
+        match &mut observer.wait_state {
+            WaitState::Single(entry) => &mut *(entry as *mut WaitEntry),
+            _ => core::hint::unreachable_unchecked(),
+        }
+    }
+}
+
+/// Call reply_recv with two distinct &mut Field references (D16).
+///
+/// Safe dispatch cannot obtain two &mut Field references from the arena
+/// simultaneously (Arena::get_mut borrows the whole arena). This helper
+/// takes NonNull pointers to two distinct Field slots and converts them to
+/// mutable references for the reply_recv call.
+///
+/// The caller guarantees that reply_field_ptr and recv_field_ptr point
+/// to different arena slots (different ObjectIds, checked before calling).
+#[cfg(any(target_os = "none", test))]
+pub fn call_reply_recv(
+    reply_field_ptr: NonNull<crate::field::Field>,
+    recv_field_ptr: NonNull<crate::field::Field>,
+    reply_message: crate::field::Message,
+    receiver: &mut crate::observer::WaitEntry,
+) -> crate::communication::ReplyRecvOutcome {
+    // SAFETY: The caller has verified that reply_field_ptr and recv_field_ptr
+    // point to different arena slots (different ObjectIds). Both pointers
+    // were obtained from Arena::get_mut within the same lock acquisition,
+    // so they point to valid, live Field objects. The arena lock is held
+    // for the duration of this call, preventing deallocation. No aliasing
+    // occurs because the two pointers target different slots.
+    unsafe {
+        let reply_field = &mut *reply_field_ptr.as_ptr();
+        let recv_field = &mut *recv_field_ptr.as_ptr();
+
+        crate::communication::reply_recv(reply_field, recv_field, reply_message, receiver)
+    }
+}
+
+/// Clear an Observer's wait_state back to None after a non-blocking receive.
+///
+/// Called when Receive returns Received (not Blocked) — the WaitEntry
+/// was never linked into any list, so we just clean up the state.
+#[cfg(any(target_os = "none", test))]
+pub fn observer_clear_wait(observer_ptr: NonNull<Observer>) {
+    use crate::observer::WaitState;
+
+    // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy.
+    unsafe {
+        let observer = &mut *observer_ptr.as_ptr();
+
+        observer.wait_state = WaitState::None;
+    }
+}
+
+/// Transition an Observer from Runnable to Blocked (D39).
+///
+/// Called after the Observer's WaitEntry has been linked into a Field's
+/// waiters list. The wait_state is already set up by observer_prepare_wait.
+///
+/// Returns Ok(()) on success, Err if the transition is invalid.
+#[cfg(any(target_os = "none", test))]
+pub fn observer_set_blocked(
+    observer_ptr: NonNull<Observer>,
+) -> Result<(), crate::observer::ObserverError> {
+    use crate::observer::PrimaryState;
+
+    // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy.
+    unsafe {
+        let observer = &mut *observer_ptr.as_ptr();
+
+        match observer.state {
+            PrimaryState::Runnable => {
+                observer.state = PrimaryState::Blocked;
+                Ok(())
+            }
+            _ => Err(crate::observer::ObserverError::InvalidTransition),
+        }
+    }
+}
+
+/// Transition an Observer from Blocked to Runnable (D39).
+///
+/// Returns Ok(true) if the Observer should be enqueued (not suspended),
+/// Ok(false) if suspended, Err if the transition is invalid.
+#[cfg(any(target_os = "none", test))]
+pub fn observer_unblock(
+    observer_ptr: NonNull<Observer>,
+) -> Result<bool, crate::observer::ObserverError> {
+    use crate::observer::PrimaryState;
+
+    // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy.
+    unsafe {
+        let observer = &mut *observer_ptr.as_ptr();
+
+        match observer.state {
+            PrimaryState::Blocked => {
+                observer.state = PrimaryState::Runnable;
+                observer.wait_state = crate::observer::WaitState::None;
+                Ok(!observer.suspended)
+            }
+            _ => Err(crate::observer::ObserverError::InvalidTransition),
+        }
+    }
+}
+
 /// Allocate a test RegisterState and return a handle to it (test-only).
 ///
 /// Returns a NonNull<u8> suitable for use as Observer::register_state.
