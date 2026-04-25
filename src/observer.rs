@@ -176,6 +176,191 @@ pub struct Observer {
     pub generation: AtomicU64,
 }
 
+// ── Error types ────────────────────────────────────────────────────
+
+/// Errors from Observer operations (D39).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObserverError {
+    /// State machine violation — the requested transition is not valid
+    /// from the Observer's current state. D39 five-state machine with
+    /// explicit transition rules.
+    InvalidTransition,
+    /// D57: R + T > SCHEDULING_BUDGET. Invalid scheduling profile.
+    InvalidProfile,
+}
+
+// ── Observer methods ───────────────────────────────────────────────
+
+impl PrimaryState {
+    /// Whether this state means the Observer is not currently scheduled.
+    pub const fn is_stopped(&self) -> bool {
+        matches!(self, PrimaryState::Inert | PrimaryState::Faulted)
+    }
+}
+
+impl Observer {
+    /// Validate a scheduling profile before applying it.
+    ///
+    /// D57: R + T must not exceed SCHEDULING_BUDGET (128). The kernel
+    /// enforces this at creation and on every modify-scheduling call.
+    /// Storing two values and deriving the third (P = 128 - R - T)
+    /// eliminates the three-way sum invariant by construction — invalid
+    /// states are unrepresentable (A1 applied to data representation).
+    pub fn validate_profile(responsiveness: u8, throughput: u8) -> Result<(), ObserverError> {
+        if responsiveness as u16 + throughput as u16 > SCHEDULING_BUDGET as u16 {
+            return Err(ObserverError::InvalidProfile);
+        }
+
+        Ok(())
+    }
+
+    /// Derived precision value (D57).
+    ///
+    /// P = SCHEDULING_BUDGET - R - T. The scheduler reads this to
+    /// determine hard-RT eligibility (D42 EDF admission).
+    pub const fn precision(&self) -> u8 {
+        SCHEDULING_BUDGET - self.responsiveness - self.throughput
+    }
+
+    /// Transition from a stopped state to Runnable (D14, D35, D39).
+    ///
+    /// Valid from: Inert (first start), Faulted (after handler resolves).
+    /// Also clears the suspension flag if set.
+    ///
+    /// The caller must enqueue this Observer into the per-core scheduler
+    /// (D2) and make a placement decision (D56) after this returns.
+    ///
+    /// Security: requires RESUME right (D39).
+    pub fn resume(&mut self) -> Result<(), ObserverError> {
+        match self.state {
+            PrimaryState::Inert | PrimaryState::Faulted => {
+                self.state = PrimaryState::Runnable;
+                self.suspended = false;
+
+                Ok(())
+            }
+            _ => Err(ObserverError::InvalidTransition),
+        }
+    }
+
+    /// Set the external suspension overlay (D39).
+    ///
+    /// Can co-occur with Blocked or Faulted. The Observer is removed
+    /// from the run queue (if Runnable) or remains in its current
+    /// non-runnable state. Resume clears the suspension; the underlying
+    /// state remains.
+    ///
+    /// Use cases: debugging, checkpointing, resource pressure (A3).
+    /// Security: requires SUSPEND right (D39).
+    pub fn suspend(&mut self) {
+        self.suspended = true;
+    }
+
+    /// Transition to Blocked when waiting on a Field (D13).
+    ///
+    /// Valid from Runnable only. The Observer is removed from the run
+    /// queue and linked into the Field's waiters list via wait_state.
+    pub fn block(&mut self, wait_state: WaitState) -> Result<(), ObserverError> {
+        match self.state {
+            PrimaryState::Runnable => {
+                self.state = PrimaryState::Blocked;
+                self.wait_state = wait_state;
+
+                Ok(())
+            }
+            _ => Err(ObserverError::InvalidTransition),
+        }
+    }
+
+    /// Transition from Blocked to Runnable when a message arrives.
+    ///
+    /// D39: suspension co-occurs with Blocked. When a message arrives
+    /// for a blocked+suspended Observer, the blocking condition IS
+    /// resolved (primary state → Runnable), but the suspension overlay
+    /// stays. The caller checks `self.suspended` afterward: if true,
+    /// do NOT enqueue into the scheduler — the Observer remains off
+    /// the run queue until explicitly resumed.
+    ///
+    /// Returns `true` if the Observer should be enqueued (not suspended),
+    /// `false` if it transitioned to Runnable but remains suspended.
+    pub fn unblock(&mut self) -> Result<bool, ObserverError> {
+        match self.state {
+            PrimaryState::Blocked => {
+                self.state = PrimaryState::Runnable;
+                self.wait_state = WaitState::None;
+
+                Ok(!self.suspended)
+            }
+            _ => Err(ObserverError::InvalidTransition),
+        }
+    }
+
+    /// Transition to Faulted (D12, D39, D61).
+    ///
+    /// The Observer is descheduled. Fault delivery proceeds via the
+    /// handler Field at cap-table slot 0 (D21). The Observer's
+    /// wait_state may be reused for D18 pending-list linkage if the
+    /// handler Field is full.
+    pub fn fault(&mut self) -> Result<(), ObserverError> {
+        match self.state {
+            PrimaryState::Runnable => {
+                self.state = PrimaryState::Faulted;
+
+                Ok(())
+            }
+            _ => Err(ObserverError::InvalidTransition),
+        }
+    }
+
+    /// Update the scheduling profile (D39, D42, D57).
+    ///
+    /// Validates R + T <= 128 before applying. The cached precision
+    /// (P = 128 - R - T) is derived, not stored. The per-core scheduler
+    /// reads the new values on the next scheduling decision.
+    ///
+    /// D43: one set of values — no base/effective split. Scheduling
+    /// adjustment during IPC (priority inheritance) is a userspace
+    /// policy concern via modify-scheduling, not kernel policy.
+    ///
+    /// Security: requires MODIFY_SCHEDULING right (D39).
+    pub fn set_scheduling(
+        &mut self,
+        responsiveness: u8,
+        throughput: u8,
+    ) -> Result<(), ObserverError> {
+        Self::validate_profile(responsiveness, throughput)?;
+
+        self.responsiveness = responsiveness;
+        self.throughput = throughput;
+
+        Ok(())
+    }
+
+    /// Add compute units to the cached aggregate (D30).
+    ///
+    /// Called when a Time cap is installed into this Observer's table.
+    /// D36: the scheduler reads the aggregate on the hot path to
+    /// determine the Observer's scheduling quantum.
+    pub fn add_compute(&mut self, units: u32) {
+        self.compute_aggregate += units;
+    }
+
+    /// Remove compute units from the cached aggregate (D30).
+    ///
+    /// Called when a Time cap is removed from this Observer's table
+    /// (close, transfer via IPC, or destroy cascade).
+    pub fn remove_compute(&mut self, units: u32) {
+        self.compute_aggregate = self.compute_aggregate.saturating_sub(units);
+    }
+
+    /// D67: atomically increment the generation counter, revoking all
+    /// capabilities that stored the previous generation value.
+    pub fn revoke(&self) {
+        self.generation
+            .fetch_add(1, core::sync::atomic::Ordering::Release);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,5 +368,149 @@ mod tests {
     #[test]
     fn observer_layout() {
         assert_eq!(core::mem::size_of::<Observer>(), 88);
+    }
+
+    #[test]
+    fn default_profile_is_valid() {
+        assert!(Observer::validate_profile(DEFAULT_RESPONSIVENESS, DEFAULT_THROUGHPUT).is_ok());
+    }
+
+    #[test]
+    fn profile_rejects_overflow() {
+        assert!(Observer::validate_profile(100, 100).is_err());
+        assert!(Observer::validate_profile(129, 0).is_err());
+    }
+
+    #[test]
+    fn precision_is_derived() {
+        let observer = Observer {
+            register_state: RegisterStateHandle(NonNull::dangling()),
+            page_table_root: 0,
+            cap_table: NonNull::dangling(),
+            state: PrimaryState::Inert,
+            suspended: false,
+            compute_aggregate: 0,
+            responsiveness: 43,
+            throughput: 43,
+            clock_access: false,
+            wait_state: WaitState::None,
+            refcount: 1,
+            generation: AtomicU64::new(0),
+        };
+
+        assert_eq!(observer.precision(), 42);
+    }
+
+    #[test]
+    fn resume_from_inert() {
+        let mut observer = Observer {
+            register_state: RegisterStateHandle(NonNull::dangling()),
+            page_table_root: 0,
+            cap_table: NonNull::dangling(),
+            state: PrimaryState::Inert,
+            suspended: false,
+            compute_aggregate: 0,
+            responsiveness: DEFAULT_RESPONSIVENESS,
+            throughput: DEFAULT_THROUGHPUT,
+            clock_access: false,
+            wait_state: WaitState::None,
+            refcount: 1,
+            generation: AtomicU64::new(0),
+        };
+
+        assert!(observer.resume().is_ok());
+        assert!(matches!(observer.state, PrimaryState::Runnable));
+    }
+
+    #[test]
+    fn resume_from_runnable_fails() {
+        let mut observer = Observer {
+            register_state: RegisterStateHandle(NonNull::dangling()),
+            page_table_root: 0,
+            cap_table: NonNull::dangling(),
+            state: PrimaryState::Runnable,
+            suspended: false,
+            compute_aggregate: 0,
+            responsiveness: DEFAULT_RESPONSIVENESS,
+            throughput: DEFAULT_THROUGHPUT,
+            clock_access: false,
+            wait_state: WaitState::None,
+            refcount: 1,
+            generation: AtomicU64::new(0),
+        };
+
+        assert!(observer.resume().is_err());
+    }
+
+    #[test]
+    fn compute_aggregate_tracking() {
+        let mut observer = Observer {
+            register_state: RegisterStateHandle(NonNull::dangling()),
+            page_table_root: 0,
+            cap_table: NonNull::dangling(),
+            state: PrimaryState::Inert,
+            suspended: false,
+            compute_aggregate: 0,
+            responsiveness: DEFAULT_RESPONSIVENESS,
+            throughput: DEFAULT_THROUGHPUT,
+            clock_access: false,
+            wait_state: WaitState::None,
+            refcount: 1,
+            generation: AtomicU64::new(0),
+        };
+
+        observer.add_compute(100);
+        observer.add_compute(50);
+
+        assert_eq!(observer.compute_aggregate, 150);
+
+        observer.remove_compute(30);
+
+        assert_eq!(observer.compute_aggregate, 120);
+    }
+
+    #[test]
+    fn unblock_while_suspended_transitions_but_signals_no_enqueue() {
+        let mut observer = Observer {
+            register_state: RegisterStateHandle(NonNull::dangling()),
+            page_table_root: 0,
+            cap_table: NonNull::dangling(),
+            state: PrimaryState::Blocked,
+            suspended: true,
+            compute_aggregate: 0,
+            responsiveness: DEFAULT_RESPONSIVENESS,
+            throughput: DEFAULT_THROUGHPUT,
+            clock_access: false,
+            wait_state: WaitState::None,
+            refcount: 1,
+            generation: AtomicU64::new(0),
+        };
+        let should_enqueue = observer.unblock().unwrap();
+
+        assert!(!should_enqueue, "suspended Observer should not be enqueued");
+        assert!(matches!(observer.state, PrimaryState::Runnable));
+        assert!(observer.suspended, "suspension overlay preserved");
+    }
+
+    #[test]
+    fn unblock_without_suspension_signals_enqueue() {
+        let mut observer = Observer {
+            register_state: RegisterStateHandle(NonNull::dangling()),
+            page_table_root: 0,
+            cap_table: NonNull::dangling(),
+            state: PrimaryState::Blocked,
+            suspended: false,
+            compute_aggregate: 0,
+            responsiveness: DEFAULT_RESPONSIVENESS,
+            throughput: DEFAULT_THROUGHPUT,
+            clock_access: false,
+            wait_state: WaitState::None,
+            refcount: 1,
+            generation: AtomicU64::new(0),
+        };
+        let should_enqueue = observer.unblock().unwrap();
+
+        assert!(should_enqueue, "non-suspended Observer should be enqueued");
+        assert!(matches!(observer.state, PrimaryState::Runnable));
     }
 }

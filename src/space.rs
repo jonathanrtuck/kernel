@@ -39,6 +39,103 @@ pub struct Space {
     pub generation: AtomicU64,
 }
 
+// ── Error types ────────────────────────────────────────────────────
+
+/// Errors from Space topology operations (D41, D60).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpaceError {
+    /// D60: size = 0 is an error. A zero-size Space is meaningless.
+    ZeroSize,
+    /// Split requests more bytes than this Space contains (minus one
+    /// page — a Space cannot be emptied; destroy is the way to
+    /// eliminate a Space).
+    InsufficientSpace,
+    /// D41: merge requires adjacent VA space. The kernel's internal
+    /// VA layout has no room to extend the target upward.
+    NotAdjacent,
+}
+
+// ── Space methods ──────────────────────────────────────────────────
+
+impl Space {
+    /// Split this Space, extracting `size` bytes into a new Space.
+    ///
+    /// D41: split is one of two topology-changing operations (with merge).
+    /// D60: `size` is in bytes; the kernel rounds up to `page_size`.
+    /// The new Space receives a kernel-assigned VA base (D26). This
+    /// Space's VA range contracts — holders may lose access to the
+    /// extracted portion (parallels D11 destroy visibility).
+    ///
+    /// Returns `(new_va_base, rounded_size)` for the new Space. The
+    /// caller (frame/) allocates an arena slot, constructs the new Space,
+    /// and handles page table subtree splitting.
+    ///
+    /// **Ordering constraint:** this method mutates `self.size` immediately.
+    /// The caller must ensure the subsequent arena allocation succeeds. On
+    /// allocation failure, restore via `self.size += rounded_size`.
+    ///
+    /// D32 conservation: pages change membership, not quantity.
+    /// Performance: cold path (D1). Requires cross-core TLB invalidation
+    /// for shared Spaces (O2).
+    /// Security: SPLIT right (D52) checked at the cap layer before this.
+    pub fn split(&mut self, size: usize, page_size: usize) -> Result<(usize, usize), SpaceError> {
+        let rounded = (size + page_size - 1) & !(page_size - 1);
+
+        if rounded == 0 {
+            return Err(SpaceError::ZeroSize);
+        }
+        if rounded >= self.size {
+            return Err(SpaceError::InsufficientSpace);
+        }
+
+        let new_va = self.va_base + self.size - rounded;
+
+        self.size -= rounded;
+
+        Ok((new_va, rounded))
+    }
+
+    /// Merge a source Space into this Space.
+    ///
+    /// D41: the source is absorbed — it ceases to exist as an independent
+    /// Space. This Space's VA range extends upward from its stable base
+    /// (D26). All holders see the extended range immediately (D24).
+    ///
+    /// D41 resolves D40's demand-paging gap: a pager handling an OOB
+    /// fault merges a source Space into the faulting Space to cover the
+    /// offset, then resumes the Observer.
+    ///
+    /// D32 conservation: total pages unchanged. The source's physical
+    /// pages and page table subtree memory are absorbed.
+    ///
+    /// Security: MERGE right (D52) checked at the cap layer before this.
+    pub fn merge(&mut self, source: &Space) -> Result<(), SpaceError> {
+        let expected_va = self.va_base + self.size;
+
+        if source.va_base != expected_va {
+            return Err(SpaceError::NotAdjacent);
+        }
+
+        self.size += source.size;
+
+        Ok(())
+    }
+
+    /// Check whether a byte offset falls within this Space.
+    ///
+    /// D26: Observers access Spaces via (cap, offset) pairs. This
+    /// validates that the offset is within bounds before the kernel
+    /// translates it to a virtual address.
+    pub const fn contains_offset(&self, offset: usize) -> bool {
+        offset < self.size
+    }
+
+    /// Number of pages backing this Space (D25).
+    pub const fn page_count(&self, page_size: usize) -> usize {
+        self.size / page_size
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -46,5 +143,84 @@ mod tests {
     #[test]
     fn space_layout() {
         assert_eq!(core::mem::size_of::<Space>(), 32);
+    }
+
+    #[test]
+    fn split_rounds_up_to_page_size() {
+        let mut space = Space {
+            va_base: 0x1000,
+            size: 0x4000,
+            refcount: 1,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let (new_va, rounded) = space.split(100, 4096).unwrap();
+
+        assert_eq!(rounded, 4096);
+        assert_eq!(space.size, 0x3000);
+        assert_eq!(new_va, 0x1000 + 0x3000);
+    }
+
+    #[test]
+    fn split_rejects_zero_size() {
+        let mut space = Space {
+            va_base: 0,
+            size: 4096,
+            refcount: 1,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+
+        assert_eq!(space.split(0, 4096), Err(SpaceError::ZeroSize));
+    }
+
+    #[test]
+    fn split_rejects_oversized() {
+        let mut space = Space {
+            va_base: 0,
+            size: 4096,
+            refcount: 1,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+
+        assert_eq!(space.split(4096, 4096), Err(SpaceError::InsufficientSpace));
+    }
+
+    #[test]
+    fn merge_requires_adjacency() {
+        let mut target = Space {
+            va_base: 0x1000,
+            size: 0x2000,
+            refcount: 1,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let adjacent = Space {
+            va_base: 0x3000,
+            size: 0x1000,
+            refcount: 1,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let nonadjacent = Space {
+            va_base: 0x5000,
+            size: 0x1000,
+            refcount: 1,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+
+        assert!(target.merge(&adjacent).is_ok());
+        assert_eq!(target.size, 0x3000);
+        assert_eq!(target.merge(&nonadjacent), Err(SpaceError::NotAdjacent));
+    }
+
+    #[test]
+    fn contains_offset_boundary() {
+        let space = Space {
+            va_base: 0,
+            size: 4096,
+            refcount: 1,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+
+        assert!(space.contains_offset(0));
+        assert!(space.contains_offset(4095));
+        assert!(!space.contains_offset(4096));
     }
 }

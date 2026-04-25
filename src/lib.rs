@@ -12,14 +12,17 @@ pub mod frame;
 
 pub mod arena;
 pub mod capability;
+pub mod communication;
 pub mod config;
+pub mod core_manager;
 pub mod fault;
 pub mod field;
 pub mod observer;
 #[cfg(any(target_os = "none", test))]
 pub mod print;
 pub mod pulsar;
-pub mod scheduler;
 pub mod space;
+pub mod space_manager;
 pub mod syscall;
 pub mod time;
+pub mod time_manager;

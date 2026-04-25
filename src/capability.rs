@@ -40,7 +40,7 @@ pub const CAP_ABSENT: u64 = u64::MAX;
 /// Kernel object types designated by capabilities (D14, D44).
 ///
 /// Exactly five. Exhaustive — no extension point.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ObjectType {
     Space,
     Time,
@@ -157,7 +157,7 @@ impl Rights {
 ///
 /// u64 forced by ABI: badge delivered in x5, a 64-bit register (D47).
 /// The minter provides a u64 at clone time; the receiver reads a u64.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Badge(pub u64);
 
 // ── Handle (D8, D11) ────────────────────────────────────────────────
@@ -247,6 +247,242 @@ pub struct Table {
     pub entries: NonNull<Entry>,
     pub capacity: u32,
     pub count: u32,
+}
+
+// ── Error types ────────────────────────────────────────────────────
+
+/// Errors from capability operations (D4, D8, D11, D67).
+///
+/// Every typed kernel operation and IPC path begins with handle
+/// resolution. These errors represent the ways that resolution or
+/// subsequent rights checking can fail.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CapError {
+    /// Handle index out of bounds or slot is empty.
+    InvalidHandle,
+    /// D11: slot tag mismatch — stale handle referencing a reused slot.
+    SlotTagMismatch,
+    /// D67: stored generation doesn't match the object's live generation.
+    /// Slot should be lazily rewritten to empty (Coyotos pattern, A4).
+    StaleGeneration,
+    /// D52: required right not present in the cap's rights mask.
+    InsufficientRights,
+    /// Operation targets the wrong object type for this syscall.
+    TypeMismatch,
+    /// D8: no free slots in the cap table.
+    /// Triggers the cap-table-full fault (D40), routing to the handler
+    /// to provide more Space for table growth.
+    TableFull,
+    /// D51: send-once cap already consumed on a previous Send.
+    SendOnceConsumed,
+    /// D38: clone forbidden for this object type (Time is linear).
+    CloneForbidden,
+}
+
+/// Outcome of closing a capability slot (D11, D17).
+///
+/// The close operation has three possible outcomes, distinguished so
+/// the caller can handle badge-closure notifications (D17) and
+/// object destruction on last-reference (D11/D33).
+#[derive(Debug)]
+pub enum CloseResult {
+    /// Slot freed. The caller must decrement the target object's refcount
+    /// and initiate destruction if it reached zero (D11/D33).
+    Closed {
+        object_type: ObjectType,
+        object_id: ObjectId,
+        was_last_reference: bool,
+    },
+    /// D17: last send cap with this badge on a tracked Field was closed.
+    /// The caller must enqueue a LABEL_CLOSURE message to the Field.
+    /// D11/D33: if `was_last_reference` is true, the Field itself must
+    /// also be destroyed — both obligations apply to the same close.
+    ClosedWithBadgeClosure {
+        field_id: ObjectId,
+        badge: Badge,
+        was_last_reference: bool,
+    },
+    /// Slot was already empty — no action needed.
+    AlreadyEmpty,
+}
+
+/// Continuation state for preemptible destroy cascade (D33).
+///
+/// Object destruction cascades through held capabilities: each cap is
+/// closed, and objects reaching refcount zero are destroyed recursively.
+/// The cascade is preemptible — the kernel processes cleanup in bounded
+/// steps. Between steps, the timer interrupt can preempt and the
+/// scheduler can run higher-priority Observers.
+///
+/// D33: the object is dead before cleanup begins (D11). No partially-
+/// alive state is externally visible.
+///
+/// Performance: O(N + M) per Observer — N cap table entries closed,
+/// M badge-closure checks. Preemption bounded by step count, not
+/// total cascade size. seL4 MCS demonstrates feasibility.
+pub struct CascadeState {
+    /// Current position in the cap table being iterated.
+    pub position: u32,
+    /// Stack of Observer ObjectIds whose cascades are pending.
+    /// Depth bounded by exclusively-held Observer chains.
+    pub pending: [Option<ObjectId>; 8],
+    /// Current depth in the pending stack.
+    pub depth: u8,
+    /// Whether the cascade has completed.
+    pub complete: bool,
+}
+
+// ── Entry methods ──────────────────────────────────────────────────
+
+impl Entry {
+    /// Create an empty (unoccupied) entry for a given slot tag.
+    pub const fn empty(tag: SlotTag) -> Entry {
+        Entry {
+            object: None,
+            rights: Rights::empty(),
+            badge: Badge(0),
+            slot_tag: tag,
+            send_once: false,
+            stored_generation: 0,
+        }
+    }
+
+    /// Whether this slot is occupied (has a live capability).
+    pub const fn is_occupied(&self) -> bool {
+        self.object.is_some()
+    }
+
+    /// D67: compare stored generation against the object's live generation.
+    ///
+    /// Returns `false` on mismatch — the capability has been revoked.
+    /// The caller should lazily rewrite the slot to empty on mismatch
+    /// (Coyotos pattern), maintaining A4 compliance.
+    ///
+    /// Performance: one comparison. The generation field shares a cache
+    /// line with fields already loaded on the syscall path, so the
+    /// branch predictor correctly predicts "match" in the common case.
+    pub fn check_generation(&self, live_generation: u64) -> bool {
+        self.stored_generation == live_generation
+    }
+
+    /// D52: check whether all required rights are present in this cap.
+    pub fn check_rights(&self, required: Rights) -> bool {
+        self.rights.contains(required)
+    }
+
+    /// Verify the entry targets the expected object type.
+    pub fn check_type(&self, expected: ObjectType) -> bool {
+        self.object.map(|(t, _)| t == expected).unwrap_or(false)
+    }
+
+    /// D51: check the send-once flag.
+    pub const fn is_send_once(&self) -> bool {
+        self.send_once
+    }
+}
+
+// ── Table methods ──────────────────────────────────────────────────
+
+impl Table {
+    /// Resolve a handle to an entry reference.
+    ///
+    /// D4/D8: the universal entry point for every syscall. Validates
+    /// the handle's index bounds and slot tag (D11 ABA defense).
+    ///
+    /// Does NOT check generation (D67) — the caller must do that after
+    /// resolving, since it requires the object's live generation from
+    /// the arena. This two-step pattern keeps Table independent of the
+    /// arena types.
+    ///
+    /// Performance: O(1) — array index + tag comparison.
+    /// Security: prevents stale-handle aliasing of reused table slots.
+    pub fn resolve(&self, _handle: Handle) -> Result<&Entry, CapError> {
+        todo!()
+    }
+
+    /// Mutable resolve for operations that modify the entry.
+    pub fn resolve_mut(&mut self, _handle: Handle) -> Result<&mut Entry, CapError> {
+        todo!()
+    }
+
+    /// Find and return the index of a free slot.
+    ///
+    /// D8: kernel-managed slot allocation. Returns `TableFull` if no
+    /// free slots exist — this triggers the cap-table-full fault (D40),
+    /// routing to the handler which provides Space for table growth.
+    pub fn allocate_slot(&mut self) -> Result<u32, CapError> {
+        todo!()
+    }
+
+    /// Free a slot, bumping its slot tag for ABA defense (D11).
+    ///
+    /// The slot becomes empty and available for reuse. The bumped tag
+    /// ensures any outstanding handles to this slot will fail resolution.
+    pub fn free_slot(&mut self, _index: u32) {
+        todo!()
+    }
+
+    /// Install a capability entry at a specific slot index.
+    ///
+    /// Used for kernel-reserved slot setup: fault handler at slot 0
+    /// (D21), reply field at slot 1 (D43), self-cap at slot 2 (D57).
+    /// Also used for cap transfer during IPC (D28) and fault resolution
+    /// (D40).
+    pub fn install_at(&mut self, _index: u32, _entry: Entry) {
+        todo!()
+    }
+
+    /// Install a capability at the next free slot, returning the index.
+    ///
+    /// D35: general-purpose cap installation. Same primitive serves
+    /// Observer pre-start configuration, fault resolution (handler
+    /// installs Space caps via D40), and dynamic capability delegation.
+    ///
+    /// Returns `TableFull` if no free slot exists.
+    pub fn install(&mut self, _entry: Entry) -> Result<u32, CapError> {
+        todo!()
+    }
+
+    /// Close a capability slot, returning the outcome.
+    ///
+    /// D11: drops the reference. The slot tag is bumped (ABA defense).
+    /// For tracked Fields (D17), closing the last send cap with a given
+    /// badge produces `ClosedWithBadgeClosure`.
+    ///
+    /// The caller is responsible for: decrementing the target object's
+    /// refcount, handling badge-closure delivery, and initiating destroy
+    /// cascade (D33) if the refcount reached zero.
+    pub fn close(&mut self, _index: u32) -> CloseResult {
+        todo!()
+    }
+
+    /// Begin preemptible destroy cascade for the Observer that owns
+    /// this table (D33).
+    ///
+    /// Returns a `CascadeState` for incremental processing. The caller
+    /// advances the cascade via `cascade_step`, yielding to the scheduler
+    /// between steps. The cascade is cleanup of an already-dead object —
+    /// no partially-alive state is externally visible (D11).
+    ///
+    /// D33: only Observers cascade (only Observers hold caps). Space,
+    /// Time, Field, and Pulsar destruction is O(1).
+    pub fn begin_cascade(&mut self) -> CascadeState {
+        todo!()
+    }
+
+    /// Process the next bounded step of a destroy cascade.
+    ///
+    /// Returns `true` when the cascade is complete.
+    ///
+    /// D33: between steps, the timer interrupt can preempt and the
+    /// scheduler can run higher-priority Observers. Each step processes
+    /// a bounded number of cap-table entries.
+    ///
+    /// Performance: bounded per-step cost. Total cascade is
+    /// O(N + M) — N entries closed, M badge-closure checks.
+    pub fn cascade_step(&mut self, _state: &mut CascadeState) -> bool {
+        todo!()
+    }
 }
 
 #[cfg(test)]

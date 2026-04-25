@@ -1,11 +1,21 @@
-//! Scheduler and placement traits.
+//! Time manager: scheduling traits, placement, and compute allocation.
+//!
+//! Named after the graph.d2 component nested inside each core manager.
+//! The time manager owns per-core scheduling: algorithm selection,
+//! run queue management, and placement decisions.
 //!
 //! D2:  per-core schedulers may run different algorithms.
+//! D29: Time is a capability-held kernel object (managed here).
 //! D50: scheduler callback for IPC fast-path approval.
 //! D56: scored placement with profile matching.
 //! D59: two traits — Scheduler (per-core, 5 methods) and Placement
 //!      (cross-core). Separate because D1 (per-core hot path) conflicts
 //!      with D56's placement function reading cross-core state.
+//!
+//! Algorithm implementations live in sibling files within this module
+//! (e.g., `round_robin.rs`, `edf.rs`). The traits here are the
+//! interface; implementations are leaf nodes (philosophy: push
+//! complexity to the leaves).
 
 use crate::observer::Observer;
 use core::ptr::NonNull;

@@ -7,3 +7,4 @@
 #[cfg(any(target_os = "none", test))]
 pub mod arch;
 pub mod firmware;
+pub mod lock;
