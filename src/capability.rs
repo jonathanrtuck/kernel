@@ -413,8 +413,9 @@ impl Table {
     /// Performance: O(1) — array index + tag comparison.
     /// Security: prevents stale-handle aliasing of reused table slots.
     pub fn resolve(&self, handle: Handle) -> Result<&Entry, CapError> {
-        let entry = crate::frame::cap_ops::entry_ref(self.entries, self.capacity, handle.index)
-            .ok_or(CapError::InvalidHandle)?;
+        let entry =
+            crate::frame::capabilities::entry_ref(self.entries, self.capacity, handle.index)
+                .ok_or(CapError::InvalidHandle)?;
 
         Self::validate_entry(entry, handle)?;
 
@@ -423,8 +424,9 @@ impl Table {
 
     /// Mutable resolve for operations that modify the entry.
     pub fn resolve_mut(&mut self, handle: Handle) -> Result<&mut Entry, CapError> {
-        let entry = crate::frame::cap_ops::entry_mut(self.entries, self.capacity, handle.index)
-            .ok_or(CapError::InvalidHandle)?;
+        let entry =
+            crate::frame::capabilities::entry_mut(self.entries, self.capacity, handle.index)
+                .ok_or(CapError::InvalidHandle)?;
 
         Self::validate_entry(entry, handle)?;
 
@@ -438,7 +440,7 @@ impl Table {
     /// routing to the handler which provides Space for table growth.
     pub fn allocate_slot(&mut self) -> Result<u32, CapError> {
         let index = self.free_head.ok_or(CapError::TableFull)?;
-        let entry = crate::frame::cap_ops::entry_ref(self.entries, self.capacity, index)
+        let entry = crate::frame::capabilities::entry_ref(self.entries, self.capacity, index)
             .ok_or(CapError::TableFull)?;
         let next = entry.stored_generation;
 
@@ -460,7 +462,7 @@ impl Table {
             return;
         }
 
-        let entry = crate::frame::cap_ops::entry_mut(self.entries, self.capacity, index);
+        let entry = crate::frame::capabilities::entry_mut(self.entries, self.capacity, index);
 
         if let Some(e) = entry {
             let was_occupied = e.is_occupied();
@@ -490,7 +492,7 @@ impl Table {
             return;
         }
 
-        let slot = crate::frame::cap_ops::entry_mut(self.entries, self.capacity, index);
+        let slot = crate::frame::capabilities::entry_mut(self.entries, self.capacity, index);
 
         if let Some(s) = slot {
             let was_occupied = s.is_occupied();
@@ -536,7 +538,7 @@ impl Table {
             return CloseResult::AlreadyEmpty;
         }
 
-        let entry = crate::frame::cap_ops::entry_mut(self.entries, self.capacity, index);
+        let entry = crate::frame::capabilities::entry_mut(self.entries, self.capacity, index);
         let Some(e) = entry else {
             return CloseResult::AlreadyEmpty;
         };
@@ -692,12 +694,12 @@ mod tests {
 
     /// Construct a Table backed by real memory for testing.
     ///
-    /// Allocates `capacity` empty entries via `frame::cap_ops::alloc_test_entries`.
+    /// Allocates `capacity` empty entries via `frame::capabilities::alloc_test_entries`.
     /// All entries start as `Entry::empty(SlotTag(0))`.
     fn test_table(capacity: u32) -> Table {
-        let entries = crate::frame::cap_ops::alloc_test_entries(capacity);
+        let entries = crate::frame::capabilities::alloc_test_entries(capacity);
 
-        crate::frame::cap_ops::init_freelist(entries, capacity, SLOT_USER_START);
+        crate::frame::capabilities::init_freelist(entries, capacity, SLOT_USER_START);
 
         Table {
             entries,

@@ -66,9 +66,9 @@ mod integration_tests {
     }
 
     fn test_table(capacity: u32) -> Table {
-        let entries = crate::frame::cap_ops::alloc_test_entries(capacity);
+        let entries = crate::frame::capabilities::alloc_test_entries(capacity);
 
-        crate::frame::cap_ops::init_freelist(entries, capacity, SLOT_USER_START);
+        crate::frame::capabilities::init_freelist(entries, capacity, SLOT_USER_START);
 
         Table {
             entries,
@@ -84,7 +84,7 @@ mod integration_tests {
 
     fn test_field(capacity: u32) -> Field {
         Field {
-            queue: crate::frame::field_ops::alloc_test_queue(capacity),
+            queue: crate::frame::fields::alloc_test_queue(capacity),
             queue_capacity: capacity,
             queue_length: 0,
             queue_head: 0,

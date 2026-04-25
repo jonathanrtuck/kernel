@@ -35,7 +35,7 @@ use core::ptr::NonNull;
 /// The caller never needs to lock per-core state for local access.
 #[cfg(target_os = "none")]
 pub fn current_core<S: Scheduler>() -> &'static CoreState<S> {
-    crate::frame::core_ops::read_core_state()
+    crate::frame::cores::read_core_state()
 }
 
 /// Mutable access to the current core's state.
@@ -46,7 +46,7 @@ pub fn current_core<S: Scheduler>() -> &'static CoreState<S> {
 /// be no aliasing.
 #[cfg(target_os = "none")]
 pub fn current_core_mut<S: Scheduler>() -> &'static mut CoreState<S> {
-    crate::frame::core_ops::read_core_state_mut()
+    crate::frame::cores::read_core_state_mut()
 }
 
 // ── Per-core state ─────────────────────────────────────────────────

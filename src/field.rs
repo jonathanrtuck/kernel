@@ -236,7 +236,7 @@ impl Field {
 
         let write_index = (self.queue_head + self.queue_length) % self.queue_capacity;
 
-        crate::frame::field_ops::queue_write(self.queue, self.queue_capacity, write_index, message);
+        crate::frame::fields::queue_write(self.queue, self.queue_capacity, write_index, message);
 
         self.queue_length += 1;
 
@@ -258,7 +258,7 @@ impl Field {
         }
 
         let message =
-            crate::frame::field_ops::queue_read(self.queue, self.queue_capacity, self.queue_head);
+            crate::frame::fields::queue_read(self.queue, self.queue_capacity, self.queue_head);
 
         self.queue_head = (self.queue_head + 1) % self.queue_capacity;
         self.queue_length -= 1;
@@ -287,7 +287,7 @@ impl Field {
     /// waiters = Observers blocked on Receive; pending = Observers
     /// whose fault message could not be delivered due to full queue.
     pub fn add_waiter(&mut self, entry: &mut crate::observer::WaitEntry) {
-        crate::frame::field_ops::waiter_push_back(
+        crate::frame::fields::waiter_push_back(
             &mut self.waiters_head,
             &mut self.waiters_tail,
             entry,
@@ -300,11 +300,7 @@ impl Field {
     /// the Observer is destroyed while waiting, or the Observer is
     /// suspended (D39) while blocked.
     pub fn remove_waiter(&mut self, entry: &mut crate::observer::WaitEntry) {
-        crate::frame::field_ops::waiter_remove(
-            &mut self.waiters_head,
-            &mut self.waiters_tail,
-            entry,
-        );
+        crate::frame::fields::waiter_remove(&mut self.waiters_head, &mut self.waiters_tail, entry);
     }
 
     /// Pop the front waiter for direct-switch or message delivery.
@@ -314,7 +310,7 @@ impl Field {
     /// the waiter's Observer pointer for the scheduler's
     /// `should_switch_to` check (D50 condition 5).
     pub fn pop_waiter(&mut self) -> Option<NonNull<crate::observer::WaitEntry>> {
-        crate::frame::field_ops::waiter_pop_front(&mut self.waiters_head, &mut self.waiters_tail)
+        crate::frame::fields::waiter_pop_front(&mut self.waiters_head, &mut self.waiters_tail)
     }
 
     /// Resolve badge-range routing for a message (D45, D54, D71).
@@ -333,7 +329,7 @@ impl Field {
     pub fn resolve_route(&self, badge: u64) -> Option<ObjectId> {
         let table_ptr = self.routing_table?;
 
-        crate::frame::field_ops::route_lookup(table_ptr, badge)
+        crate::frame::fields::route_lookup(table_ptr, badge)
     }
 
     /// Add a routing rule for field split (D45).
@@ -351,7 +347,7 @@ impl Field {
         destination: ObjectId,
         destination_generation: u64,
     ) -> Result<(), FieldError> {
-        crate::frame::field_ops::route_add(
+        crate::frame::fields::route_add(
             &mut self.routing_table,
             low,
             high,
@@ -448,7 +444,7 @@ mod tests {
     /// Construct a Field with a real queue allocation for test use.
     fn test_field(capacity: u32) -> Field {
         Field {
-            queue: crate::frame::field_ops::alloc_test_queue(capacity),
+            queue: crate::frame::fields::alloc_test_queue(capacity),
             queue_capacity: capacity,
             queue_length: 0,
             queue_head: 0,

@@ -79,7 +79,7 @@ pub fn send(field: &mut Field, message: Message) -> Result<SendOutcome, FieldErr
     // D13/D50: check for a waiting receiver BEFORE checking queue fullness.
     // A full queue with a waiter delivers directly (bypasses queue).
     if let Some(waiter_ptr) = field.pop_waiter() {
-        let observer = crate::frame::field_ops::waiter_observer(waiter_ptr);
+        let observer = crate::frame::fields::waiter_observer(waiter_ptr);
 
         return Ok(SendOutcome::WokeReceiver(observer));
     }
@@ -108,7 +108,7 @@ pub fn receive(field: &mut Field, receiver: &mut WaitEntry) -> ReceiveOutcome {
         // kernel-as-sender messages that were waiting for space.
         if let Some(pending_ptr) = field.pending_head {
             // Consume the pending entry: advance pending_head to the next entry.
-            let next = crate::frame::field_ops::waiter_next(pending_ptr);
+            let next = crate::frame::fields::waiter_next(pending_ptr);
 
             field.pending_head = next;
 
@@ -161,7 +161,7 @@ pub fn call(
     if message.user_cap.is_none()
         && let Some(waiter_ptr) = field.pop_waiter()
     {
-        let observer = crate::frame::field_ops::waiter_observer(waiter_ptr);
+        let observer = crate::frame::fields::waiter_observer(waiter_ptr);
 
         return Ok(CallOutcome::DirectSwitch(observer));
     }
@@ -238,7 +238,7 @@ mod tests {
     /// Mirrors the pattern in field.rs tests and the integration tests.
     fn test_field(capacity: u32) -> Field {
         Field {
-            queue: crate::frame::field_ops::alloc_test_queue(capacity),
+            queue: crate::frame::fields::alloc_test_queue(capacity),
             queue_capacity: capacity,
             queue_length: 0,
             queue_head: 0,

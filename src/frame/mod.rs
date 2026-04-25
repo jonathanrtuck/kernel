@@ -6,9 +6,9 @@
 
 #[cfg(any(target_os = "none", test))]
 pub mod arch;
-pub mod cap_ops;
-pub mod core_ops;
-pub mod field_ops;
+pub mod capabilities;
+pub mod cores;
+pub mod fields;
 pub mod firmware;
 pub mod lock;
 pub mod slab;
