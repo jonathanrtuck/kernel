@@ -544,6 +544,37 @@ pub fn write_test_ipc_registers(register_state: NonNull<u8>, regs: &IpcRegisters
     }
 }
 
+/// Write IPC register values through an Observer pointer (test-only).
+///
+/// Same as `write_test_ipc_registers` but takes `NonNull<Observer>` and
+/// resolves the register state internally. Avoids callers needing unsafe
+/// to extract the register state handle from an Observer.
+#[cfg(test)]
+pub fn write_test_ipc_registers_via_observer(observer_ptr: NonNull<Observer>, regs: &IpcRegisters) {
+    // SAFETY: observer_ptr points to a valid Observer allocated on the test stack.
+    let rs = unsafe { observer_ptr.as_ref().register_state.as_ptr() };
+
+    write_test_ipc_registers(rs, regs);
+}
+
+/// Read the IPC error state from an Observer's saved registers (test-only).
+///
+/// Returns `(carry_set, x0)` — the carry flag indicates IPC error (D49),
+/// x0 carries the error code when carry is set.
+#[cfg(test)]
+pub fn read_ipc_carry_and_x0(observer_ptr: NonNull<Observer>) -> (bool, u64) {
+    // SAFETY: observer_ptr points to a valid Observer. Same invariant as
+    // read_ipc_registers.
+    unsafe {
+        let observer = observer_ptr.as_ref();
+        let rs = &*(observer.register_state.as_ptr().as_ptr()
+            as *const crate::frame::arch::register_state::RegisterState);
+        let carry_set = (rs.pstate & (1u64 << 29)) != 0;
+
+        (carry_set, rs.gprs[0])
+    }
+}
+
 /// Write typed operation registers through an Observer pointer (test-only).
 ///
 /// Same as `write_test_typed_registers` but takes `NonNull<Observer>` and
@@ -554,20 +585,9 @@ pub fn write_test_typed_registers_via_observer(
     observer_ptr: NonNull<Observer>,
     regs: &TypedRegisters,
 ) {
-    // SAFETY: observer_ptr points to a valid Observer. Same invariant as
-    // read_typed_registers.
-    unsafe {
-        let observer = observer_ptr.as_ref();
-        let rs = &mut *(observer.register_state.as_ptr().as_ptr()
-            as *mut crate::frame::arch::register_state::RegisterState);
-
-        rs.gprs[0] = regs.args[0];
-        rs.gprs[1] = regs.args[1];
-        rs.gprs[2] = regs.args[2];
-        rs.gprs[3] = regs.args[3];
-        rs.gprs[4] = regs.op_code as u64;
-        rs.gprs[5] = regs.target_handle;
-    }
+    // SAFETY: observer_ptr points to a valid Observer allocated on the test stack.
+    let rs = unsafe { observer_ptr.as_ref().register_state.as_ptr() };
+    write_test_typed_registers(rs, regs);
 }
 
 /// Write typed operation register values into a test RegisterState (test-only).

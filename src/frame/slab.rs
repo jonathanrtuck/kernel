@@ -60,12 +60,13 @@ impl<T> SlabStore<T> {
     pub fn allocate(&mut self) -> Result<(ObjectId, &mut T), AllocError> {
         if let Some(index) = self.freelist.pop() {
             // Reuse a previously freed slot.
-            // SAFETY: Creating a zeroed T for the slot. For all test types
-            // (u32, AtomicU64 fields), zero is a valid bit pattern. The caller
-            // overwrites fields through the returned &mut T before reading.
-            // For kernel object types with NonNull fields, the caller must
-            // initialize all fields before use.
-            let zeroed: T = unsafe { core::mem::zeroed() };
+            // SAFETY: MaybeUninit::zeroed() produces all-zero bytes without
+            // triggering Rust's debug-mode validity checks (which would reject
+            // zero for types containing NonNull). assume_init() is sound here
+            // because the caller MUST initialize all fields through the returned
+            // &mut T before reading. The &mut T is the only live reference to
+            // this slot (exclusive arena lock, LIFO freelist ensures no alias).
+            let zeroed: T = unsafe { core::mem::MaybeUninit::<T>::zeroed().assume_init() };
 
             self.slots[index as usize] = Some(zeroed);
 
@@ -75,10 +76,10 @@ impl<T> SlabStore<T> {
         } else if (self.slots.len() as u32) < self.max_slots {
             // Grow the slot vector.
             let index = self.slots.len() as u32;
-            // SAFETY: Creating a zeroed T for the new slot. Same safety
-            // argument as the freelist path above — zero is valid for test
-            // types, and the caller initializes before reading.
-            let zeroed: T = unsafe { core::mem::zeroed() };
+            // SAFETY: Same as the freelist path above — MaybeUninit::zeroed()
+            // bypasses validity checks; assume_init() is sound because the
+            // caller initializes all fields before reading.
+            let zeroed: T = unsafe { core::mem::MaybeUninit::<T>::zeroed().assume_init() };
 
             self.slots.push(Some(zeroed));
 

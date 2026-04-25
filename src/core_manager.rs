@@ -2223,7 +2223,6 @@ mod tests {
     // ── D81: handle_irq with routing ────────────────────────────────
 
     #[test]
-    #[ignore] // Arena<Field> zero-initializes NonNull<Message>, which panics.
     // Field allocation requires a non-zero queue pointer at construction
     // time. The slab allocator zeroes slots. Fixing this requires either
     // an Arena::allocate_with(init_fn) pattern or making Field's queue
@@ -2298,7 +2297,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Same Arena<Field> zero-init issue as test_d81_handle_irq_delivers_to_routed_field.
     fn test_d81_handle_irq_generation_mismatch_skips() {
         let ks = make_kernel_state();
         let field_id = {
@@ -2347,7 +2345,6 @@ mod tests {
     // ── D81: handle_timer with deadlines ────────────────────────────
 
     #[test]
-    #[ignore] // Arena<Field>/Arena<Pulsar> zero-init panics on NonNull fields. Pre-existing D81 issue.
     fn test_d81_handle_timer_fires_expired_one_shot() {
         let ks = make_kernel_state();
         // Create a Pulsar in the arena (one-shot: period_ns = 0).
@@ -2410,7 +2407,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Arena<Field>/Arena<Pulsar> zero-init panics on NonNull fields. Pre-existing D81 issue.
     fn test_d81_handle_timer_rearms_repeating_pulsar() {
         let ks = make_kernel_state();
         let (pulsar_id, field_id) = {
@@ -2503,7 +2499,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Arena<Field>/Arena<Pulsar> zero-init panics on NonNull fields. Pre-existing D81 issue.
     fn test_d81_handle_timer_multiple_expired_fires_all() {
         let ks = make_kernel_state();
         // Create two one-shot pulsars with different fields.
@@ -3467,19 +3462,19 @@ mod tests {
         object_type: crate::capability::ObjectType,
         object_id: ObjectId,
         rights: crate::capability::Rights,
+        badge: Badge,
         generation: u64,
     ) -> (Observer, NonNull<crate::capability::Entry>) {
-        use crate::capability::{Badge, Entry, SlotTag};
+        use crate::capability::{Entry, SlotTag};
 
         let rs_ptr = crate::frame::cores::alloc_test_register_state();
         let entries = crate::frame::capabilities::alloc_test_entries(16);
-
-        // Install a cap at slot 0.
         let entry = crate::frame::capabilities::entry_mut(entries, 16, 0).unwrap();
+
         *entry = Entry {
             object: Some((object_type, object_id)),
             rights,
-            badge: Badge(0),
+            badge,
             slot_tag: SlotTag(0),
             send_once: false,
             stored_generation: generation,
@@ -3523,19 +3518,19 @@ mod tests {
     // Helper: read x0 (typed result) from an Observer's saved registers.
     fn read_typed_result(observer_ptr: NonNull<Observer>) -> u64 {
         let regs = crate::frame::cores::read_typed_registers(observer_ptr);
+
         regs.args[0]
     }
 
     /// dispatch_typed with valid Observer cap — ObserverSuspend succeeds.
     #[test]
-    #[ignore] // Arena<Observer> zero-initializes NonNull fields, which panics. Pre-existing D81 issue.
     fn test_dispatch_typed_observer_suspend_success() {
         let ks = make_kernel_state();
-
         // Create target Observer in arena.
         let target_id = {
             let mut observers = ks.observers.acquire();
             let (id, observer) = observers.allocate().expect("allocate observer");
+
             observer.register_state = crate::observer::RegisterStateHandle::new(
                 crate::frame::cores::alloc_test_register_state(),
             );
@@ -3550,33 +3545,35 @@ mod tests {
             observer.wait_state = crate::observer::WaitState::None;
             observer.refcount = 1;
             observer.generation = core::sync::atomic::AtomicU64::new(0);
+
             id
         };
-
         // Create sender with a cap to the target Observer.
         let (mut sender, _entries) = make_sender_with_cap(
             crate::capability::ObjectType::Observer,
             target_id,
             crate::capability::Rights::OBSERVER_ALL,
+            Badge(0),
             0, // generation matches
         );
         let sender_ptr = NonNull::from(&mut sender);
-
         // Set up typed registers: ObserverSuspend (code 4), handle = slot 0 encoded.
         let handle = crate::capability::Handle {
             index: 0,
             slot_tag: crate::capability::SlotTag(0),
         }
         .encode();
+
         setup_typed_regs(
             sender_ptr,
             TypedOperation::ObserverSuspend as u16,
             handle,
             [0; 4],
         );
-
         let mut core = make_core_state();
+
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
 
         let result = core.dispatch_typed(TypedOperation::ObserverSuspend, &ks);
@@ -3591,11 +3588,13 @@ mod tests {
 
         // Check result is 0 (success).
         let x0 = read_typed_result(sender_ptr);
+
         assert_eq!(x0, 0, "ObserverSuspend success must write 0 to x0");
 
         // Verify the target Observer is now suspended.
         let observers = ks.observers.acquire();
         let target = observers.get(target_id).expect("target must exist");
+
         assert!(target.suspended, "target Observer must be suspended");
     }
 
@@ -3609,13 +3608,13 @@ mod tests {
         sender.cap_table = entries;
         sender.cap_table_capacity = 16;
         let sender_ptr = NonNull::from(&mut sender);
-
         // Target handle points to empty slot 5 (not occupied).
         let handle = crate::capability::Handle {
             index: 5,
             slot_tag: crate::capability::SlotTag(0),
         }
         .encode();
+
         setup_typed_regs(
             sender_ptr,
             TypedOperation::ObserverResume as u16,
@@ -3624,7 +3623,9 @@ mod tests {
         );
 
         let mut core = make_core_state();
+
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
 
         let result = core.dispatch_typed(TypedOperation::ObserverResume, &ks);
@@ -3638,6 +3639,7 @@ mod tests {
 
         // x0 must be negative (error code).
         let x0 = read_typed_result(sender_ptr) as i64;
+
         assert!(x0 < 0, "invalid cap must produce negative x0 (got {x0})");
     }
 
@@ -3645,7 +3647,6 @@ mod tests {
     #[test]
     fn test_dispatch_typed_wrong_type_returns_error() {
         let ks = make_kernel_state();
-
         // Create a Space in the arena.
         let space_id = {
             let mut spaces = ks.spaces.acquire();
@@ -3656,21 +3657,21 @@ mod tests {
             space.generation = core::sync::atomic::AtomicU64::new(0);
             id
         };
-
         // Create sender with a Space cap — but try to use ObserverResume.
         let (mut sender, _entries) = make_sender_with_cap(
             crate::capability::ObjectType::Space,
             space_id,
             crate::capability::Rights::SPACE_ALL,
+            Badge(0),
             0,
         );
         let sender_ptr = NonNull::from(&mut sender);
-
         let handle = crate::capability::Handle {
             index: 0,
             slot_tag: crate::capability::SlotTag(0),
         }
         .encode();
+
         setup_typed_regs(
             sender_ptr,
             TypedOperation::ObserverResume as u16,
@@ -3679,7 +3680,9 @@ mod tests {
         );
 
         let mut core = make_core_state();
+
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
 
         let result = core.dispatch_typed(TypedOperation::ObserverResume, &ks);
@@ -3692,6 +3695,7 @@ mod tests {
         }
 
         let x0 = read_typed_result(sender_ptr) as i64;
+
         assert_eq!(
             x0,
             crate::syscall::SyscallError::WrongType.error_code() as i64,
@@ -3704,7 +3708,6 @@ mod tests {
     #[test]
     fn test_dispatch_typed_insufficient_rights_returns_error() {
         let ks = make_kernel_state();
-
         let space_id = {
             let mut spaces = ks.spaces.acquire();
             let (id, space) = spaces.allocate().expect("allocate space");
@@ -3714,21 +3717,21 @@ mod tests {
             space.generation = core::sync::atomic::AtomicU64::new(0);
             id
         };
-
         // Cap with DESTROY only — missing SPLIT required for SpaceSplit.
         let (mut sender, _entries) = make_sender_with_cap(
             crate::capability::ObjectType::Space,
             space_id,
             crate::capability::Rights::DESTROY,
+            Badge(0),
             0,
         );
         let sender_ptr = NonNull::from(&mut sender);
-
         let handle = crate::capability::Handle {
             index: 0,
             slot_tag: crate::capability::SlotTag(0),
         }
         .encode();
+
         setup_typed_regs(
             sender_ptr,
             TypedOperation::SpaceSplit as u16,
@@ -3737,7 +3740,9 @@ mod tests {
         );
 
         let mut core = make_core_state();
+
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
 
         let result = core.dispatch_typed(TypedOperation::SpaceSplit, &ks);
@@ -3750,6 +3755,7 @@ mod tests {
         }
 
         let x0 = read_typed_result(sender_ptr) as i64;
+
         assert_eq!(
             x0,
             crate::syscall::SyscallError::NoRight.error_code() as i64,
@@ -3762,36 +3768,39 @@ mod tests {
     #[test]
     fn test_dispatch_typed_stale_generation_returns_error() {
         let ks = make_kernel_state();
-
         let space_id = {
             let mut spaces = ks.spaces.acquire();
             let (id, space) = spaces.allocate().expect("allocate space");
+
             space.va_base = 0x1000;
             space.size = 0x4000;
             space.refcount = 1;
             // Live generation is 5.
             space.generation = core::sync::atomic::AtomicU64::new(5);
+
             id
         };
-
         // Cap stores generation 0 — stale (live is 5).
         let (mut sender, _entries) = make_sender_with_cap(
             crate::capability::ObjectType::Space,
             space_id,
             crate::capability::Rights::SPACE_ALL,
+            Badge(0),
             0, // stored generation 0, live is 5
         );
         let sender_ptr = NonNull::from(&mut sender);
-
         let handle = crate::capability::Handle {
             index: 0,
             slot_tag: crate::capability::SlotTag(0),
         }
         .encode();
+
         setup_typed_regs(sender_ptr, TypedOperation::Destroy as u16, handle, [0; 4]);
 
         let mut core = make_core_state();
+
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
 
         let result = core.dispatch_typed(TypedOperation::Destroy, &ks);
@@ -3804,6 +3813,7 @@ mod tests {
         }
 
         let x0 = read_typed_result(sender_ptr) as i64;
+
         assert_eq!(
             x0,
             crate::syscall::SyscallError::StaleCap.error_code() as i64,
@@ -3813,6 +3823,7 @@ mod tests {
         // Verify Space generation was NOT bumped (operation rejected).
         let spaces = ks.spaces.acquire();
         let space = spaces.get(space_id).expect("space must exist");
+
         assert_eq!(
             space.generation.load(Ordering::Acquire),
             5,
@@ -3822,13 +3833,12 @@ mod tests {
 
     /// dispatch_typed ObserverResume transitions Inert -> Runnable.
     #[test]
-    #[ignore] // Arena<Observer> zero-initializes NonNull fields, which panics. Pre-existing D81 issue.
     fn test_dispatch_typed_observer_resume_from_inert() {
         let ks = make_kernel_state();
-
         let target_id = {
             let mut observers = ks.observers.acquire();
             let (id, observer) = observers.allocate().expect("allocate observer");
+
             observer.register_state = crate::observer::RegisterStateHandle::new(
                 crate::frame::cores::alloc_test_register_state(),
             );
@@ -3843,22 +3853,23 @@ mod tests {
             observer.wait_state = crate::observer::WaitState::None;
             observer.refcount = 1;
             observer.generation = core::sync::atomic::AtomicU64::new(0);
+
             id
         };
-
         let (mut sender, _entries) = make_sender_with_cap(
             crate::capability::ObjectType::Observer,
             target_id,
             crate::capability::Rights::OBSERVER_ALL,
+            Badge(0),
             0,
         );
         let sender_ptr = NonNull::from(&mut sender);
-
         let handle = crate::capability::Handle {
             index: 0,
             slot_tag: crate::capability::SlotTag(0),
         }
         .encode();
+
         setup_typed_regs(
             sender_ptr,
             TypedOperation::ObserverResume as u16,
@@ -3867,7 +3878,9 @@ mod tests {
         );
 
         let mut core = make_core_state();
+
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
 
         let result = core.dispatch_typed(TypedOperation::ObserverResume, &ks);
@@ -3875,11 +3888,13 @@ mod tests {
         assert!(matches!(result, DispatchResult::Resume(_)), "must Resume");
 
         let x0 = read_typed_result(sender_ptr);
+
         assert_eq!(x0, 0, "resume success must write 0");
 
         // Verify target is now Runnable.
         let observers = ks.observers.acquire();
         let target = observers.get(target_id).expect("target must exist");
+
         assert!(
             matches!(target.state, crate::observer::PrimaryState::Runnable),
             "target must be Runnable after resume"
@@ -3888,13 +3903,12 @@ mod tests {
 
     /// dispatch_typed ObserverResume from Runnable returns InvalidState.
     #[test]
-    #[ignore] // Arena<Observer> zero-initializes NonNull fields, which panics. Pre-existing D81 issue.
     fn test_dispatch_typed_observer_resume_from_runnable_fails() {
         let ks = make_kernel_state();
-
         let target_id = {
             let mut observers = ks.observers.acquire();
             let (id, observer) = observers.allocate().expect("allocate observer");
+
             observer.register_state = crate::observer::RegisterStateHandle::new(
                 crate::frame::cores::alloc_test_register_state(),
             );
@@ -3909,22 +3923,23 @@ mod tests {
             observer.wait_state = crate::observer::WaitState::None;
             observer.refcount = 1;
             observer.generation = core::sync::atomic::AtomicU64::new(0);
+
             id
         };
-
         let (mut sender, _entries) = make_sender_with_cap(
             crate::capability::ObjectType::Observer,
             target_id,
             crate::capability::Rights::OBSERVER_ALL,
+            Badge(0),
             0,
         );
         let sender_ptr = NonNull::from(&mut sender);
-
         let handle = crate::capability::Handle {
             index: 0,
             slot_tag: crate::capability::SlotTag(0),
         }
         .encode();
+
         setup_typed_regs(
             sender_ptr,
             TypedOperation::ObserverResume as u16,
@@ -3933,12 +3948,14 @@ mod tests {
         );
 
         let mut core = make_core_state();
-        core.current = Some(sender_ptr);
-        core.scheduler.enqueue(sender_ptr);
 
+        core.current = Some(sender_ptr);
+
+        core.scheduler.enqueue(sender_ptr);
         core.dispatch_typed(TypedOperation::ObserverResume, &ks);
 
         let x0 = read_typed_result(sender_ptr) as i64;
+
         assert_eq!(
             x0,
             crate::syscall::SyscallError::InvalidState.error_code() as i64,
@@ -3948,13 +3965,12 @@ mod tests {
 
     /// dispatch_typed ObserverSetScheduling with valid profile.
     #[test]
-    #[ignore] // Arena<Observer> zero-initializes NonNull fields, which panics. Pre-existing D81 issue.
     fn test_dispatch_typed_observer_set_scheduling_success() {
         let ks = make_kernel_state();
-
         let target_id = {
             let mut observers = ks.observers.acquire();
             let (id, observer) = observers.allocate().expect("allocate observer");
+
             observer.register_state = crate::observer::RegisterStateHandle::new(
                 crate::frame::cores::alloc_test_register_state(),
             );
@@ -3969,22 +3985,23 @@ mod tests {
             observer.wait_state = crate::observer::WaitState::None;
             observer.refcount = 1;
             observer.generation = core::sync::atomic::AtomicU64::new(0);
+
             id
         };
-
         let (mut sender, _entries) = make_sender_with_cap(
             crate::capability::ObjectType::Observer,
             target_id,
             crate::capability::Rights::OBSERVER_ALL,
+            Badge(0),
             0,
         );
         let sender_ptr = NonNull::from(&mut sender);
-
         let handle = crate::capability::Handle {
             index: 0,
             slot_tag: crate::capability::SlotTag(0),
         }
         .encode();
+
         // args[0] = responsiveness (60), args[1] = throughput (40)
         setup_typed_regs(
             sender_ptr,
@@ -3994,29 +4011,31 @@ mod tests {
         );
 
         let mut core = make_core_state();
-        core.current = Some(sender_ptr);
-        core.scheduler.enqueue(sender_ptr);
 
+        core.current = Some(sender_ptr);
+
+        core.scheduler.enqueue(sender_ptr);
         core.dispatch_typed(TypedOperation::ObserverSetScheduling, &ks);
 
         let x0 = read_typed_result(sender_ptr);
+
         assert_eq!(x0, 0, "set_scheduling with valid profile must succeed");
 
         let observers = ks.observers.acquire();
         let target = observers.get(target_id).expect("target must exist");
+
         assert_eq!(target.responsiveness, 60, "responsiveness must be updated");
         assert_eq!(target.throughput, 40, "throughput must be updated");
     }
 
     /// dispatch_typed ObserverSetScheduling with invalid profile.
     #[test]
-    #[ignore] // Arena<Observer> zero-initializes NonNull fields, which panics. Pre-existing D81 issue.
     fn test_dispatch_typed_observer_set_scheduling_invalid_profile() {
         let ks = make_kernel_state();
-
         let target_id = {
             let mut observers = ks.observers.acquire();
             let (id, observer) = observers.allocate().expect("allocate observer");
+
             observer.register_state = crate::observer::RegisterStateHandle::new(
                 crate::frame::cores::alloc_test_register_state(),
             );
@@ -4031,22 +4050,23 @@ mod tests {
             observer.wait_state = crate::observer::WaitState::None;
             observer.refcount = 1;
             observer.generation = core::sync::atomic::AtomicU64::new(0);
+
             id
         };
-
         let (mut sender, _entries) = make_sender_with_cap(
             crate::capability::ObjectType::Observer,
             target_id,
             crate::capability::Rights::OBSERVER_ALL,
+            Badge(0),
             0,
         );
         let sender_ptr = NonNull::from(&mut sender);
-
         let handle = crate::capability::Handle {
             index: 0,
             slot_tag: crate::capability::SlotTag(0),
         }
         .encode();
+
         // args[0] = 100, args[1] = 100 => R+T = 200 > 128 budget
         setup_typed_regs(
             sender_ptr,
@@ -4056,12 +4076,14 @@ mod tests {
         );
 
         let mut core = make_core_state();
-        core.current = Some(sender_ptr);
-        core.scheduler.enqueue(sender_ptr);
 
+        core.current = Some(sender_ptr);
+
+        core.scheduler.enqueue(sender_ptr);
         core.dispatch_typed(TypedOperation::ObserverSetScheduling, &ks);
 
         let x0 = read_typed_result(sender_ptr) as i64;
+
         assert_eq!(
             x0,
             crate::syscall::SyscallError::InvalidProfile.error_code() as i64,
@@ -4073,45 +4095,49 @@ mod tests {
     #[test]
     fn test_dispatch_typed_destroy_bumps_generation() {
         let ks = make_kernel_state();
-
         let space_id = {
             let mut spaces = ks.spaces.acquire();
             let (id, space) = spaces.allocate().expect("allocate space");
+
             space.va_base = 0x1000;
             space.size = 0x4000;
             space.refcount = 1;
             space.generation = core::sync::atomic::AtomicU64::new(0);
+
             id
         };
-
         let (mut sender, _entries) = make_sender_with_cap(
             crate::capability::ObjectType::Space,
             space_id,
             crate::capability::Rights::SPACE_ALL,
+            Badge(0),
             0,
         );
         let sender_ptr = NonNull::from(&mut sender);
-
         let handle = crate::capability::Handle {
             index: 0,
             slot_tag: crate::capability::SlotTag(0),
         }
         .encode();
+
         setup_typed_regs(sender_ptr, TypedOperation::Destroy as u16, handle, [0; 4]);
 
         let mut core = make_core_state();
-        core.current = Some(sender_ptr);
-        core.scheduler.enqueue(sender_ptr);
 
+        core.current = Some(sender_ptr);
+
+        core.scheduler.enqueue(sender_ptr);
         core.dispatch_typed(TypedOperation::Destroy, &ks);
 
         let x0 = read_typed_result(sender_ptr);
+
         assert_eq!(x0, 0, "Destroy must succeed");
 
         // Verify generation was bumped.
         let spaces = ks.spaces.acquire();
         let space = spaces.get(space_id).expect("space must exist");
         let live_gen = space.generation.load(Ordering::Acquire);
+
         assert_eq!(live_gen, 1, "Destroy must bump generation from 0 to 1");
     }
 
@@ -4119,16 +4145,16 @@ mod tests {
     #[test]
     fn test_dispatch_typed_clone_time_forbidden() {
         let ks = make_kernel_state();
-
         let time_id = {
             let mut times = ks.times.acquire();
             let (id, time) = times.allocate().expect("allocate time");
+
             time.compute_units = 100;
             time.refcount = 1;
             time.generation = core::sync::atomic::AtomicU64::new(0);
+
             id
         };
-
         // Time caps have no CLONE right in TIME_ALL, but the Clone op
         // checks for CloneForbidden before rights. Let's give CLONE
         // right explicitly to test the type-level rejection.
@@ -4136,24 +4162,27 @@ mod tests {
             crate::capability::ObjectType::Time,
             time_id,
             crate::capability::Rights::CLONE.union(crate::capability::Rights::DESTROY),
+            Badge(0),
             0,
         );
         let sender_ptr = NonNull::from(&mut sender);
-
         let handle = crate::capability::Handle {
             index: 0,
             slot_tag: crate::capability::SlotTag(0),
         }
         .encode();
+
         setup_typed_regs(sender_ptr, TypedOperation::Clone as u16, handle, [0; 4]);
 
         let mut core = make_core_state();
-        core.current = Some(sender_ptr);
-        core.scheduler.enqueue(sender_ptr);
 
+        core.current = Some(sender_ptr);
+
+        core.scheduler.enqueue(sender_ptr);
         core.dispatch_typed(TypedOperation::Clone, &ks);
 
         let x0 = read_typed_result(sender_ptr) as i64;
+
         assert_eq!(
             x0,
             crate::syscall::SyscallError::CloneForbidden.error_code() as i64,
@@ -4167,29 +4196,649 @@ mod tests {
         let ks = make_kernel_state();
         let mut sender = make_observer_with_registers();
         let entries = crate::frame::capabilities::alloc_test_entries(4);
+
         sender.cap_table = entries;
         sender.cap_table_capacity = 4;
-        let sender_ptr = NonNull::from(&mut sender);
 
+        let sender_ptr = NonNull::from(&mut sender);
         // Handle index 100 is well beyond capacity 4.
         let handle = crate::capability::Handle {
             index: 100,
             slot_tag: crate::capability::SlotTag(0),
         }
         .encode();
+
         setup_typed_regs(sender_ptr, TypedOperation::Destroy as u16, handle, [0; 4]);
 
         let mut core = make_core_state();
-        core.current = Some(sender_ptr);
-        core.scheduler.enqueue(sender_ptr);
 
+        core.current = Some(sender_ptr);
+
+        core.scheduler.enqueue(sender_ptr);
         core.dispatch_typed(TypedOperation::Destroy, &ks);
 
         let x0 = read_typed_result(sender_ptr) as i64;
+
         assert_eq!(
             x0,
             crate::syscall::SyscallError::InvalidCap.error_code() as i64,
             "out-of-bounds handle must return InvalidCap"
+        );
+    }
+
+    // ── dispatch_ipc tests ──────────────────────────────────────────
+
+    // Helper: allocate a Field in the arena with a real queue, fully initialized.
+    fn make_field_in_arena(ks: &KernelState, capacity: u32) -> ObjectId {
+        let mut fields = ks.fields.acquire();
+        let (id, field) = fields.allocate().expect("allocate field");
+
+        field.queue = crate::frame::fields::alloc_test_queue(capacity);
+        field.queue_capacity = capacity;
+        field.queue_length = 0;
+        field.queue_head = 0;
+        field.generation = core::sync::atomic::AtomicU64::new(0);
+        field.waiters_head = None;
+        field.waiters_tail = None;
+        field.routing_table = None;
+        field.pending_head = None;
+        field.badge_tracking = false;
+        field.back_pointer_head = None;
+        field.refcount = 1;
+
+        id
+    }
+
+    // ── Test 1: Send with valid Field cap — message enqueued ────────
+
+    /// D79/D77: Send with a valid Field cap enqueues the message and
+    /// resumes the sender. The Field's queue must contain the message
+    /// with data from the IPC registers and badge from the cap entry.
+    #[test]
+    fn test_dispatch_ipc_send_valid_cap_enqueues_message() {
+        let ks = make_kernel_state();
+        // Allocate a Field in the arena with a real queue.
+        let field_id = make_field_in_arena(&ks, 8);
+        // Create a sender Observer with a SEND cap to the Field.
+        let (mut sender, _entries) = make_sender_with_cap(
+            crate::capability::ObjectType::Field,
+            field_id,
+            crate::capability::Rights::SEND,
+            Badge(0x5555),
+            0, // stored_generation matches live generation (0)
+        );
+        let sender_ptr = NonNull::from(&mut sender);
+        // Write IPC registers: data + handle pointing to slot 0.
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        crate::frame::cores::write_test_ipc_registers_via_observer(
+            sender_ptr,
+            &crate::syscall::IpcRegisters {
+                data: [0x1111, 0x2222, 0x3333, 0x4444],
+                label: 0xABCD,
+                handle_or_badge: handle,
+                user_cap: u64::MAX,
+                reply_info: 0,
+            },
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+
+        let result = core.dispatch_ipc(IpcOperation::Send, &ks);
+
+        // D79 Row 1: sender continues.
+        match result {
+            DispatchResult::Resume(resumed) => {
+                assert_eq!(
+                    resumed, sender_ptr,
+                    "D77/D79: Send valid cap must resume sender"
+                );
+            }
+            _ => panic!("D77/D79: Send valid cap must return Resume(sender)"),
+        }
+
+        // Carry must be clear (success).
+        let (carry, _) = crate::frame::cores::read_ipc_carry_and_x0(sender_ptr);
+
+        assert!(!carry, "D49: carry must be clear on successful Send");
+
+        // The Field must contain the message.
+        let mut fields = ks.fields.acquire();
+        let target = fields.get_mut(field_id).unwrap();
+
+        assert_eq!(
+            target.queue_length, 1,
+            "D13: message must be enqueued in Field"
+        );
+
+        let msg = target.dequeue().unwrap();
+
+        assert_eq!(
+            msg.data,
+            [0x1111, 0x2222, 0x3333, 0x4444],
+            "D28: data words must match"
+        );
+        assert_eq!(msg.label, 0xABCD, "D28: label must match");
+        assert_eq!(
+            msg.badge,
+            Badge(0x5555),
+            "D17: badge injected from cap entry"
+        );
+    }
+
+    // ── Test 2: Send with invalid handle → InvalidCap ──────────────
+
+    /// D77: Send with a bad handle (points to empty slot) returns
+    /// InvalidCap error to the sender via carry flag + x0.
+    #[test]
+    fn test_dispatch_ipc_send_invalid_handle_returns_invalid_cap() {
+        let ks = make_kernel_state();
+        // Sender with real registers and a real (but empty) cap table.
+        let mut sender = make_observer_with_registers();
+        let entries = crate::frame::capabilities::alloc_test_entries(16);
+
+        sender.cap_table = entries;
+        sender.cap_table_capacity = 16;
+
+        let sender_ptr = NonNull::from(&mut sender);
+        // Handle pointing to an empty slot (index 5 — never populated).
+        let handle = crate::capability::Handle {
+            index: 5,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        crate::frame::cores::write_test_ipc_registers_via_observer(
+            sender_ptr,
+            &crate::syscall::IpcRegisters {
+                data: [0; 4],
+                label: 0,
+                handle_or_badge: handle,
+                user_cap: u64::MAX,
+                reply_info: 0,
+            },
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+
+        let result = core.dispatch_ipc(IpcOperation::Send, &ks);
+
+        // Must resume sender (never blocks on error).
+        match result {
+            DispatchResult::Resume(resumed) => {
+                assert_eq!(resumed, sender_ptr, "error path must resume sender");
+            }
+            _ => panic!("error path must return Resume(sender)"),
+        }
+
+        // Carry set, x0 = InvalidCap error code.
+        let (carry, x0) = crate::frame::cores::read_ipc_carry_and_x0(sender_ptr);
+
+        assert!(carry, "D49: carry must be set on IPC error");
+        assert_eq!(
+            x0,
+            crate::syscall::SyscallError::InvalidCap as u64,
+            "D49: x0 must contain InvalidCap error code"
+        );
+    }
+
+    // ── Test 3: Send with wrong type cap → WrongType ────────────────
+
+    /// D77: Send with a cap pointing to an Observer (not Field) returns
+    /// WrongType error. IPC operations require a Field cap.
+    #[test]
+    fn test_dispatch_ipc_send_wrong_type_returns_wrong_type() {
+        let ks = make_kernel_state();
+        // Use a Space object — easy to create without Arena zero-init issues.
+        let space_id = {
+            let mut spaces = ks.spaces.acquire();
+            let (id, space) = spaces.allocate().expect("allocate space");
+            space.va_base = 0x1000;
+            space.size = 0x4000;
+            space.refcount = 1;
+            space.generation = core::sync::atomic::AtomicU64::new(0);
+            id
+        };
+        // Create sender with a Space cap (wrong type for IPC).
+        let (mut sender, _entries) = make_sender_with_cap(
+            crate::capability::ObjectType::Space,
+            space_id,
+            crate::capability::Rights::SEND.union(crate::capability::Rights::SPACE_ALL),
+            Badge(0),
+            0,
+        );
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        crate::frame::cores::write_test_ipc_registers_via_observer(
+            sender_ptr,
+            &crate::syscall::IpcRegisters {
+                data: [0; 4],
+                label: 0,
+                handle_or_badge: handle,
+                user_cap: u64::MAX,
+                reply_info: 0,
+            },
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+
+        let result = core.dispatch_ipc(IpcOperation::Send, &ks);
+
+        match result {
+            DispatchResult::Resume(resumed) => {
+                assert_eq!(resumed, sender_ptr, "wrong type error must resume sender");
+            }
+            _ => panic!("wrong type error must return Resume(sender)"),
+        }
+
+        let (carry, x0) = crate::frame::cores::read_ipc_carry_and_x0(sender_ptr);
+
+        assert!(carry, "D49: carry must be set on WrongType error");
+        assert_eq!(
+            x0,
+            crate::syscall::SyscallError::WrongType as u64,
+            "D49: x0 must contain WrongType error code"
+        );
+    }
+
+    // ── Test 4: Send with insufficient rights → NoRight ─────────────
+
+    /// D52: Send with a Field cap that has RECEIVE but not SEND returns
+    /// NoRight error.
+    #[test]
+    fn test_dispatch_ipc_send_insufficient_rights_returns_no_right() {
+        let ks = make_kernel_state();
+        // Allocate a Field in the arena.
+        let field_id = make_field_in_arena(&ks, 8);
+        // Cap with RECEIVE only — missing SEND required for Send operation.
+        let (mut sender, _entries) = make_sender_with_cap(
+            crate::capability::ObjectType::Field,
+            field_id,
+            crate::capability::Rights::RECEIVE, // no SEND
+            Badge(0x5555),
+            0,
+        );
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        crate::frame::cores::write_test_ipc_registers_via_observer(
+            sender_ptr,
+            &crate::syscall::IpcRegisters {
+                data: [0; 4],
+                label: 0,
+                handle_or_badge: handle,
+                user_cap: u64::MAX,
+                reply_info: 0,
+            },
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+
+        let result = core.dispatch_ipc(IpcOperation::Send, &ks);
+
+        match result {
+            DispatchResult::Resume(resumed) => {
+                assert_eq!(resumed, sender_ptr, "NoRight error must resume sender");
+            }
+            _ => panic!("NoRight error must return Resume(sender)"),
+        }
+
+        let (carry, x0) = crate::frame::cores::read_ipc_carry_and_x0(sender_ptr);
+
+        assert!(carry, "D49: carry must be set on NoRight error");
+        assert_eq!(
+            x0,
+            crate::syscall::SyscallError::NoRight as u64,
+            "D49: x0 must contain NoRight error code"
+        );
+    }
+
+    // ── Test 5: Send with stale generation → StaleCap ───────────────
+
+    /// D67: Send with a cap whose stored_generation doesn't match the
+    /// Field's live generation returns StaleCap error.
+    #[test]
+    fn test_dispatch_ipc_send_stale_generation_returns_stale_cap() {
+        let ks = make_kernel_state();
+        // Allocate a Field in the arena with live generation 0.
+        let field_id = make_field_in_arena(&ks, 8);
+        // Cap with stored_generation = 1 — stale (live is 0).
+        let (mut sender, _entries) = make_sender_with_cap(
+            crate::capability::ObjectType::Field,
+            field_id,
+            crate::capability::Rights::SEND,
+            Badge(0x5555),
+            1, // stored_generation 1, live is 0 → stale
+        );
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        crate::frame::cores::write_test_ipc_registers_via_observer(
+            sender_ptr,
+            &crate::syscall::IpcRegisters {
+                data: [0; 4],
+                label: 0,
+                handle_or_badge: handle,
+                user_cap: u64::MAX,
+                reply_info: 0,
+            },
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+
+        let result = core.dispatch_ipc(IpcOperation::Send, &ks);
+
+        match result {
+            DispatchResult::Resume(resumed) => {
+                assert_eq!(resumed, sender_ptr, "StaleCap error must resume sender");
+            }
+            _ => panic!("StaleCap error must return Resume(sender)"),
+        }
+
+        let (carry, x0) = crate::frame::cores::read_ipc_carry_and_x0(sender_ptr);
+
+        assert!(carry, "D49: carry must be set on StaleCap error");
+        assert_eq!(
+            x0,
+            crate::syscall::SyscallError::StaleCap as u64,
+            "D49: x0 must contain StaleCap error code"
+        );
+
+        // The Field must be unmodified (no message enqueued).
+        let fields = ks.fields.acquire();
+        let target = fields.get(field_id).unwrap();
+
+        assert_eq!(
+            target.queue_length, 0,
+            "D67: stale cap must not enqueue any message"
+        );
+    }
+
+    // ── Test 6: Receive with message available → Received ───────────
+
+    /// D79 Row 3 (via dispatch_ipc): Receive on a Field that has a queued
+    /// message delivers the message to the receiver's registers and resumes.
+    #[test]
+    fn test_dispatch_ipc_receive_with_message_delivers_and_resumes() {
+        let ks = make_kernel_state();
+        // Allocate a Field in the arena and pre-enqueue a message.
+        let field_id = make_field_in_arena(&ks, 8);
+        {
+            let mut fields = ks.fields.acquire();
+            let field = fields.get_mut(field_id).unwrap();
+
+            field
+                .enqueue(crate::field::Message {
+                    data: [0xAA, 0xBB, 0xCC, 0xDD],
+                    label: 0xFACE,
+                    badge: Badge(0xCAFE),
+                    user_cap: None,
+                    reply_cap: None,
+                })
+                .expect("pre-enqueue must succeed");
+        };
+
+        // Create receiver with RECEIVE cap.
+        let (mut receiver, _entries) = make_sender_with_cap(
+            crate::capability::ObjectType::Field,
+            field_id,
+            crate::capability::Rights::RECEIVE,
+            Badge(0x5555),
+            0,
+        );
+        let receiver_ptr = NonNull::from(&mut receiver);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        crate::frame::cores::write_test_ipc_registers_via_observer(
+            receiver_ptr,
+            &crate::syscall::IpcRegisters {
+                data: [0; 4],
+                label: 0,
+                handle_or_badge: handle,
+                user_cap: u64::MAX,
+                reply_info: 0,
+            },
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(receiver_ptr);
+
+        core.scheduler.enqueue(receiver_ptr);
+
+        let result = core.dispatch_ipc(IpcOperation::Receive, &ks);
+
+        // D79 Row 3: receiver continues.
+        match result {
+            DispatchResult::Resume(resumed) => {
+                assert_eq!(
+                    resumed, receiver_ptr,
+                    "D79 Row 3: Receive Received must resume the receiver"
+                );
+            }
+            _ => panic!("D79 Row 3: Receive Received must return Resume(receiver)"),
+        }
+
+        // Message data must appear in receiver's saved registers.
+        let regs = crate::frame::cores::read_ipc_registers(receiver_ptr);
+
+        assert_eq!(
+            regs.data,
+            [0xAA, 0xBB, 0xCC, 0xDD],
+            "D76: data words delivered"
+        );
+        assert_eq!(regs.label, 0xFACE, "D76: label delivered");
+        assert_eq!(regs.handle_or_badge, 0xCAFE, "D76: badge delivered");
+
+        // Carry must be clear (success).
+        let (carry, _) = crate::frame::cores::read_ipc_carry_and_x0(receiver_ptr);
+
+        assert!(!carry, "D49: carry must be clear on successful Receive");
+
+        // The Field must be empty now.
+        let mut fields = ks.fields.acquire();
+        let target = fields.get_mut(field_id).unwrap();
+
+        assert_eq!(target.queue_length, 0, "D13: message must be consumed");
+    }
+
+    // ── Test 7: Receive on empty Field → Blocked ────────────────────
+
+    /// D79 Row 4 (via dispatch_ipc): Receive on an empty Field blocks
+    /// the receiver — dequeued from scheduler, schedule_next picks next.
+    #[test]
+    fn test_dispatch_ipc_receive_empty_field_blocks_receiver() {
+        let ks = make_kernel_state();
+        // Allocate an empty Field.
+        let field_id = make_field_in_arena(&ks, 8);
+
+        // Create receiver with RECEIVE cap.
+        let (mut receiver, _entries) = make_sender_with_cap(
+            crate::capability::ObjectType::Field,
+            field_id,
+            crate::capability::Rights::RECEIVE,
+            Badge(0x5555),
+            0,
+        );
+        let receiver_ptr = NonNull::from(&mut receiver);
+        // Enqueue another Observer so schedule_next has something to return.
+        let mut next_obs = make_observer();
+        let next_ptr = NonNull::from(&mut next_obs);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        crate::frame::cores::write_test_ipc_registers_via_observer(
+            receiver_ptr,
+            &crate::syscall::IpcRegisters {
+                data: [0; 4],
+                label: 0,
+                handle_or_badge: handle,
+                user_cap: u64::MAX,
+                reply_info: 0,
+            },
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(receiver_ptr);
+
+        core.scheduler.enqueue(receiver_ptr);
+        core.scheduler.enqueue(next_ptr);
+
+        let result = core.dispatch_ipc(IpcOperation::Receive, &ks);
+
+        // D79 Row 4: receiver blocks, schedule_next returns next_ptr.
+        match result {
+            DispatchResult::Resume(resumed) => {
+                assert_eq!(
+                    resumed, next_ptr,
+                    "D79 Row 4: blocked receiver must yield to next Observer"
+                );
+            }
+            _ => panic!("D79 Row 4: blocked receiver must schedule next"),
+        }
+
+        // Receiver must be dequeued from the scheduler.
+        assert!(
+            !core.scheduler.contains(receiver_ptr),
+            "D79 Row 4: blocked receiver must be removed from run queue"
+        );
+    }
+
+    // ── Test 8: Call with waiter → DirectSwitch (fast path) ─────────
+
+    /// D50/D79 Row 6 (via dispatch_ipc): Call on a Field that has a
+    /// waiting receiver triggers the DirectSwitch fast path when the
+    /// scheduler approves. The sender blocks; the receiver is direct-
+    /// switched to via ResumeFastPath.
+    #[test]
+    fn test_dispatch_ipc_call_with_waiter_direct_switch() {
+        let ks = make_kernel_state();
+        // Allocate a Field in the arena.
+        let field_id = make_field_in_arena(&ks, 8);
+        // Create the sender with a SEND cap.
+        let (mut sender, _entries) = make_sender_with_cap(
+            crate::capability::ObjectType::Field,
+            field_id,
+            crate::capability::Rights::SEND,
+            Badge(0x5555),
+            0,
+        );
+        let sender_ptr = NonNull::from(&mut sender);
+        // Create a waiter Observer with a real RegisterState (needed for
+        // unblock which calls observer_unblock on the waiter).
+        let mut waiter = make_observer_with_registers();
+
+        // Install the waiter into the Field's waiters list so Call finds it.
+        // communication::call checks pop_waiter() — if it finds one, it
+        // returns DirectSwitch with that waiter's observer pointer.
+        //
+        // We must set up the WaitEntry in waiter.wait_state and link it.
+        // Use observer_prepare_wait to build a valid WaitEntry, then add it
+        // to the Field's waiters list.
+        {
+            let mut fields = ks.fields.acquire();
+            let target_field = fields.get_mut(field_id).unwrap();
+            let field_ptr = NonNull::from(&*target_field);
+            // Set waiter's wait_state (needed for WaitEntry validity).
+            let waiter_ptr = NonNull::from(&mut waiter);
+            let wait_entry = crate::frame::cores::observer_prepare_wait(waiter_ptr, field_ptr);
+
+            // Add the wait entry to the Field's waiters list.
+            target_field.add_waiter(wait_entry);
+        }
+
+        // Write IPC registers: 0-cap message (D50 fast-path condition).
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        crate::frame::cores::write_test_ipc_registers_via_observer(
+            sender_ptr,
+            &crate::syscall::IpcRegisters {
+                data: [0x10, 0x20, 0x30, 0x40],
+                label: 0x9999,
+                handle_or_badge: handle,
+                user_cap: u64::MAX, // 0-cap: fast-path eligible
+                reply_info: 0,
+            },
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+
+        let result = core.dispatch_ipc(IpcOperation::Call, &ks);
+        // D50: RoundRobin always approves should_switch_to, so DirectSwitch
+        // approved → ResumeFastPath(waiter_observer).
+        let waiter_ptr = NonNull::from(&waiter);
+
+        match result {
+            DispatchResult::ResumeFastPath(resumed) => {
+                assert_eq!(
+                    resumed, waiter_ptr,
+                    "D50: DirectSwitch approved must resume the waiting receiver"
+                );
+            }
+            DispatchResult::Resume(_) => {
+                // DirectSwitch denied — also acceptable. The receiver was
+                // enqueued and schedule_next picks it. Verify sender blocked.
+                assert!(
+                    !core.scheduler.contains(sender_ptr),
+                    "D50 denied path: sender must still be dequeued"
+                );
+            }
+            DispatchResult::Idle => {
+                panic!("D50: Call with a waiter must not return Idle");
+            }
+        }
+
+        // Sender must be dequeued (D16: Call always blocks the sender).
+        assert!(
+            !core.scheduler.contains(sender_ptr),
+            "D16: Call must always dequeue (block) the sender"
         );
     }
 }
