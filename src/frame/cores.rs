@@ -336,6 +336,33 @@ pub fn write_metadata_to_registers(
     }
 }
 
+/// Read an Observer's cap table pointer and capacity (D8, D77).
+///
+/// Returns (cap_table, cap_table_capacity) from the Observer. The dispatch
+/// path needs these for handle resolution — the Observer's flat cap table
+/// is indexed by the handle's low 32 bits with a bounds check against
+/// capacity.
+///
+/// # Safety (structural invariant)
+///
+/// observer_ptr was obtained from CoreState::current, which points to a
+/// live Observer in the arena. A4 non-reentrancy guarantees no aliasing
+/// on a single core. Same safety model as `read_ipc_registers`.
+#[cfg(any(target_os = "none", test))]
+pub fn observer_cap_table(
+    observer_ptr: NonNull<Observer>,
+) -> (NonNull<crate::capability::Entry>, u32) {
+    // SAFETY: observer_ptr points to a live Observer in the arena.
+    // cap_table and cap_table_capacity are plain fields that do not
+    // require mutable access to read. A4 non-reentrancy guarantees
+    // no concurrent mutation on a single core.
+    unsafe {
+        let observer = observer_ptr.as_ref();
+
+        (observer.cap_table, observer.cap_table_capacity)
+    }
+}
+
 /// Allocate a test RegisterState and return a handle to it (test-only).
 ///
 /// Returns a NonNull<u8> suitable for use as Observer::register_state.
@@ -375,6 +402,32 @@ pub fn write_test_ipc_registers(register_state: NonNull<u8>, regs: &IpcRegisters
         rs.gprs[5] = regs.handle_or_badge;
         rs.gprs[6] = regs.user_cap;
         rs.gprs[7] = regs.reply_info;
+    }
+}
+
+/// Write typed operation registers through an Observer pointer (test-only).
+///
+/// Same as `write_test_typed_registers` but takes `NonNull<Observer>` and
+/// resolves the register state internally. Avoids callers needing unsafe
+/// to extract the register state handle from an Observer.
+#[cfg(test)]
+pub fn write_test_typed_registers_via_observer(
+    observer_ptr: NonNull<Observer>,
+    regs: &TypedRegisters,
+) {
+    // SAFETY: observer_ptr points to a valid Observer. Same invariant as
+    // read_typed_registers.
+    unsafe {
+        let observer = observer_ptr.as_ref();
+        let rs = &mut *(observer.register_state.as_ptr().as_ptr()
+            as *mut crate::frame::arch::register_state::RegisterState);
+
+        rs.gprs[0] = regs.args[0];
+        rs.gprs[1] = regs.args[1];
+        rs.gprs[2] = regs.args[2];
+        rs.gprs[3] = regs.args[3];
+        rs.gprs[4] = regs.op_code as u64;
+        rs.gprs[5] = regs.target_handle;
     }
 }
 

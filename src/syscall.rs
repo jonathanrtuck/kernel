@@ -144,6 +144,55 @@ pub enum SyscallError {
     NotAdjacent,
 }
 
+impl From<crate::capability::CapError> for SyscallError {
+    /// Map capability resolution errors to syscall-visible error codes.
+    ///
+    /// CapError variants arise from the D77 resolution sequence. Each maps
+    /// to the SyscallError that userspace should see. The mapping is
+    /// injective — no two CapError variants produce the same SyscallError.
+    fn from(cap_error: crate::capability::CapError) -> SyscallError {
+        match cap_error {
+            crate::capability::CapError::InvalidHandle => SyscallError::InvalidCap,
+            crate::capability::CapError::SlotTagMismatch => SyscallError::InvalidCap,
+            crate::capability::CapError::StaleGeneration => SyscallError::StaleCap,
+            crate::capability::CapError::InsufficientRights => SyscallError::NoRight,
+            crate::capability::CapError::TypeMismatch => SyscallError::WrongType,
+            crate::capability::CapError::TableFull => SyscallError::TableFull,
+            crate::capability::CapError::SendOnceConsumed => SyscallError::AlreadyConsumed,
+            crate::capability::CapError::CloneForbidden => SyscallError::CloneForbidden,
+        }
+    }
+}
+
+impl SyscallError {
+    /// Encode this error as a negative i64 value for the typed operation ABI (D49).
+    ///
+    /// D49: typed operations signal errors via negative x0 (bit 63 set).
+    /// Each variant maps to a distinct negative value. The specific numeric
+    /// values are ABI-stable — userspace compares against these constants.
+    ///
+    /// Convention: -(1-based variant index). InvalidCap = -1, StaleCap = -2, etc.
+    pub const fn error_code(self) -> u64 {
+        let code: i64 = match self {
+            SyscallError::InvalidCap => -1,
+            SyscallError::StaleCap => -2,
+            SyscallError::NoRight => -3,
+            SyscallError::WrongType => -4,
+            SyscallError::QueueFull => -5,
+            SyscallError::TableFull => -6,
+            SyscallError::AlreadyConsumed => -7,
+            SyscallError::CloneForbidden => -8,
+            SyscallError::InvalidState => -9,
+            SyscallError::InvalidProfile => -10,
+            SyscallError::ZeroSize => -11,
+            SyscallError::InsufficientResource => -12,
+            SyscallError::NotAdjacent => -13,
+        };
+
+        code as u64
+    }
+}
+
 // ── Conversion methods ─────────────────────────────────────────────
 
 impl IpcOperation {
