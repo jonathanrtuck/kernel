@@ -7,7 +7,7 @@
 #![no_main]
 
 use core::panic::PanicInfo;
-use kernel::{arch, println};
+use kernel::{frame::arch, println};
 
 /// Kernel entry point, called from boot assembly after stack and BSS are set up.
 ///

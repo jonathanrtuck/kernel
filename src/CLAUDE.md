@@ -24,16 +24,15 @@ now and expensive to retrofit:
 
 ## Framekernel discipline (journal 023)
 
-Confine all `unsafe` to a minimal core boundary. Everything above that boundary
-is safe Rust. The core provides safe abstractions that structurally prevent
-misuse — not just wrappers around unsafe functions.
+All `unsafe` code lives inside `frame/`. The crate-level `#![deny(unsafe_code)]`
+with `#[allow(unsafe_code)]` on `mod frame` enforces this at compile time.
+Everything outside `frame/` is safe Rust built against the abstractions it
+exports.
 
-`arch/` is the hardware half of the core. A kernel-primitives layer (safe
-references to kernel objects, typed memory regions) may emerge as the other
-half. The boundary is the trait interface between them.
-
-Study Asterinas OSTD's API surface before committing to the core boundary
-design.
+`frame/arch/` is the hardware half (system registers, MMU, MMIO, exceptions).
+`frame/firmware/` parses boot-time data (DTB). Future unsafe additions — page
+allocator, arena internals, sync primitives — go in `frame/` as well. The
+`scripts/verify` gate checks this boundary.
 
 ## Module map
 
@@ -52,7 +51,9 @@ comments link to `design/spec.md`.
 | `scheduler.rs`  | Scheduler + placement traits     | D2, D50, D56, D59                                    |
 | `fault.rs`      | Fault types and delivery         | D12, D40, D61                                        |
 | `syscall.rs`    | Syscall ABI types                | D47, D48, D49                                        |
-| `arch/`         | Hardware abstraction (core half) | A2, D1, D5, D46, D47, D49, D56                       |
+| `frame/`        | Framekernel core (all unsafe)    | A1, A2, journal 023                                  |
+| `frame/arch/`   | Hardware abstraction             | D1, D5, D46, D47, D49, D56                           |
+| `frame/firmware/`| Boot-time data parsing          |                                                       |
 
 ## Spec drives code
 

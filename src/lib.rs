@@ -5,15 +5,16 @@
 //! (`cargo test --target aarch64-apple-darwin`).
 
 #![no_std]
+#![deny(unsafe_code)]
 
-#[cfg(any(target_os = "none", test))]
-pub mod arch;
+#[allow(unsafe_code)]
+pub mod frame;
+
 pub mod arena;
 pub mod capability;
 pub mod config;
 pub mod fault;
 pub mod field;
-pub mod firmware;
 pub mod observer;
 #[cfg(any(target_os = "none", test))]
 pub mod print;

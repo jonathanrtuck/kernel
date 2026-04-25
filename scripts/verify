@@ -5,8 +5,8 @@
 #   cargo clippy  -- warnings as errors (correctness, idiomatic Rust, clarity)
 #   cargo build   -- bare-metal build succeeds
 #   cargo test    -- all host tests pass
-#   unsafe count  -- inventory (informational, not gated)
-#   boundary      -- arch/ and firmware/ don't leak into core modules
+#   unsafe count  -- inventory, split by frame/ boundary
+#   framekernel   -- no unsafe outside frame/ (belt-and-suspenders with lint)
 #
 # Not automated (design judgment, enforced by CLAUDE.md guidelines):
 #   performance, FP style, Verus readiness
@@ -40,29 +40,17 @@ TEST_OUTPUT=$(cargo test --target aarch64-apple-darwin 2>&1)
 TEST_LINE=$(echo "$TEST_OUTPUT" | grep "^test result:" | head -1)
 pass "tests: $TEST_LINE"
 
-# f: Unsafe block inventory. Not a gate, just visibility.
-UNSAFE_COUNT=$(grep -r 'unsafe {' src/ --include='*.rs' | wc -l | tr -d ' ')
-info "unsafe blocks: $UNSAFE_COUNT"
+# f: Framekernel discipline — all unsafe confined to frame/.
+# The crate-level #![deny(unsafe_code)] with #[allow(unsafe_code)] on mod frame
+# enforces this at compile time. This check is belt-and-suspenders visibility.
+UNSAFE_IN_FRAME=$(grep -r 'unsafe {' src/frame/ --include='*.rs' 2>/dev/null | wc -l | tr -d ' ')
+UNSAFE_TOTAL=$(grep -r 'unsafe {' src/ --include='*.rs' 2>/dev/null | wc -l | tr -d ' ')
+UNSAFE_OUTSIDE=$((UNSAFE_TOTAL - UNSAFE_IN_FRAME))
+info "unsafe blocks: $UNSAFE_IN_FRAME in frame/, $UNSAFE_OUTSIDE outside"
 
-# Architecture boundary: core modules must not import from arch/ or firmware/.
-# Allowed to reference arch: main.rs (entry point), lib.rs (mod decl), print.rs (console).
-# Allowed to reference firmware: arch/ only (platform.rs uses firmware::dtb).
-ARCH_LEAKS=$(grep -rn 'crate::arch' src/ --include='*.rs' \
-    | grep -v 'src/arch/' \
-    | grep -v 'src/main\.rs' \
-    | grep -v 'src/lib\.rs' \
-    | grep -v 'src/print\.rs' \
-    || true)
-
-FIRMWARE_LEAKS=$(grep -rn 'crate::firmware' src/ --include='*.rs' \
-    | grep -v 'src/firmware/' \
-    | grep -v 'src/arch/' \
-    || true)
-
-if [ -n "$ARCH_LEAKS" ] || [ -n "$FIRMWARE_LEAKS" ]; then
+if [ "$UNSAFE_OUTSIDE" -gt 0 ]; then
     echo ""
-    [ -n "$ARCH_LEAKS" ] && echo "$ARCH_LEAKS"
-    [ -n "$FIRMWARE_LEAKS" ] && echo "$FIRMWARE_LEAKS"
-    fail "boundary violation: arch/ or firmware/ leaked into core modules"
+    grep -rn 'unsafe {' src/ --include='*.rs' | grep -v 'src/frame/' || true
+    fail "framekernel violation: unsafe block outside frame/"
 fi
-pass "module boundaries (arch/ and firmware/ contained)"
+pass "framekernel boundary (all unsafe in frame/)"

@@ -86,10 +86,10 @@ finishing a change to catch issues early:
 scripts/verify
 ```
 
-This gates on: clippy clean, bare-metal build, all tests pass, module boundary
-containment, and reports the unsafe block count. Not automated: performance
-(no benchmarks yet), FP style, and Verus readiness — these are design judgment
-enforced by the guidelines above, not scripts.
+This gates on: clippy clean, bare-metal build, all tests pass, framekernel
+boundary (no unsafe outside `frame/`), and reports the unsafe block count. Not
+automated: performance (no benchmarks yet), FP style, and Verus readiness —
+these are design judgment enforced by the guidelines above, not scripts.
 
 ### 6. Update reference docs at milestone boundaries
 
@@ -103,8 +103,9 @@ milestones. A quick scan before tagging catches stale references.
 src/
   lib.rs        — module root (shared by bin and test builds)
   main.rs       — kernel entry point (bare-metal only)
-  arch/         — architecture-specific code (aarch64)
-  firmware/     — firmware interfaces (DTB, future ACPI/UEFI)
+  frame/        — framekernel core: all unsafe lives here
+    arch/       — architecture-specific code (aarch64)
+    firmware/   — firmware interfaces (DTB, future ACPI/UEFI)
   config.rs     — kernel configuration constants
   print.rs      — println! macro
 design/
@@ -115,9 +116,9 @@ design/
   research/     — prior art studies (descriptive, reusable): smp, syscall-landscape
   landscape.md  — survey of 18+ real kernel designs by decision point
 scripts/
-  verify            — pre-commit gate (clippy + build + test + unsafe count)
+  verify        — pre-commit gate (clippy + build + test + framekernel boundary)
 .claude/
-  working-with-claude.md — meta-process synthesis for Claude collaboration on this project
+  working-with-claude.md           — meta-process synthesis for Claude collaboration on this project
   hooks/, commands/, settings.json — Claude Code integration
 ```
 
