@@ -21,6 +21,7 @@ use core::ptr::NonNull;
 /// The caller (Field::enqueue) has already computed the circular buffer
 /// index and verified the queue is not full. This function performs the
 /// raw pointer write.
+#[inline]
 pub fn queue_write(queue: NonNull<Message>, capacity: u32, index: u32, message: Message) {
     assert!(
         index < capacity,
@@ -41,6 +42,7 @@ pub fn queue_write(queue: NonNull<Message>, capacity: u32, index: u32, message: 
 ///
 /// The caller (Field::dequeue) has already verified the queue is non-empty
 /// and computed the head index.
+#[inline]
 pub fn queue_read(queue: NonNull<Message>, capacity: u32, index: u32) -> Option<Message> {
     assert!(
         index < capacity,
@@ -99,12 +101,42 @@ pub fn alloc_test_queue(capacity: u32) -> NonNull<Message> {
     unsafe { NonNull::new_unchecked(ptr) }
 }
 
+/// Extract the Observer pointer from a WaitEntry pointer.
+///
+/// Safe wrapper around the unsafe dereference of NonNull<WaitEntry>.
+/// Used by the IPC send/call paths (communication.rs) which live outside
+/// the framekernel boundary and cannot use unsafe directly.
+#[inline]
+pub fn waiter_observer(entry: NonNull<WaitEntry>) -> NonNull<crate::observer::Observer> {
+    // SAFETY: entry was returned by waiter_pop_front, which only returns
+    // pointers that were previously inserted via waiter_push_back from a
+    // valid &mut WaitEntry reference. The WaitEntry is still alive (the
+    // caller holds the &mut Field that owns the list, guaranteeing no
+    // concurrent mutation). We read the observer field without moving it.
+    unsafe { (*entry.as_ptr()).observer }
+}
+
+/// Read the next pointer from a WaitEntry pointer.
+///
+/// Safe wrapper for consuming pending list entries (D18). The pending
+/// list uses the same WaitEntry next-pointer linkage as the waiters list.
+#[inline]
+pub fn waiter_next(entry: NonNull<WaitEntry>) -> Option<NonNull<WaitEntry>> {
+    // SAFETY: entry is sourced from field.pending_head, which is set by the
+    // kernel-as-sender fault/interrupt path from a live WaitEntry reference.
+    // The caller holds &mut Field, preventing concurrent mutation. We read
+    // the next field without moving it — the pointer remains valid for the
+    // duration of the borrow.
+    unsafe { (*entry.as_ptr()).next }
+}
+
 // ── B. Intrusive linked list operations (WaitEntry) ───────────────────
 
 /// Insert entry at the tail of the list (FIFO).
 ///
 /// Updates entry.prev, entry.next, and the current tail's next pointer.
 /// If the list is empty, the entry becomes the sole element (head).
+#[inline]
 pub fn waiter_push_back(
     head: &mut Option<NonNull<WaitEntry>>,
     tail: &mut Option<NonNull<WaitEntry>>,
@@ -182,6 +214,7 @@ pub fn waiter_remove(
 ///
 /// Returns the NonNull to the popped entry, or None if the list is empty.
 /// The popped entry's prev/next are cleared.
+#[inline]
 pub fn waiter_pop_front(
     head: &mut Option<NonNull<WaitEntry>>,
     tail: &mut Option<NonNull<WaitEntry>>,
