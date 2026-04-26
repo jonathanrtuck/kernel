@@ -16,7 +16,6 @@
 //! instruction has no side effects and reads no memory. All other accesses
 //! omit `nomem` so LLVM cannot reorder them relative to memory operations.
 
-// TODO: remove
 #![allow(dead_code)]
 
 // ---------------------------------------------------------------------------

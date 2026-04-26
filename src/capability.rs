@@ -398,6 +398,15 @@ pub struct CascadeContinuation {
     pub levels: [Option<CascadeLevel>; MAX_CASCADE_DEPTH],
     /// Number of active levels (0 = cascade complete).
     pub depth: usize,
+    /// The Observer that issued the Destroy. Blocked while the cascade
+    /// runs (D98). Re-enqueued with the return Space cap when complete.
+    pub destroyer_ptr: Option<core::ptr::NonNull<crate::observer::Observer>>,
+    /// Backing VA of the destroyed Observer (for return Space cap).
+    pub backing_va: usize,
+    /// Backing size of the destroyed Observer (for return Space cap).
+    pub backing_size: usize,
+    /// ObjectId of the Observer being destroyed (for arena free on completion).
+    pub target_id: crate::arena::ObjectId,
 }
 
 impl Default for CascadeContinuation {
@@ -411,6 +420,10 @@ impl CascadeContinuation {
         CascadeContinuation {
             levels: [None; MAX_CASCADE_DEPTH],
             depth: 0,
+            destroyer_ptr: None,
+            backing_va: 0,
+            backing_size: 0,
+            target_id: crate::arena::ObjectId(0),
         }
     }
 

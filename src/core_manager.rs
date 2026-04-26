@@ -733,16 +733,18 @@ impl<S: Scheduler> CoreState<S> {
             crate::communication::SendOutcome::Enqueued => {
                 // Row 1: message in queue, sender continues.
                 crate::frame::cores::clear_ipc_carry(sender_ptr);
+
                 DispatchResult::Resume(sender_ptr)
             }
             crate::communication::SendOutcome::WokeReceiver(receiver_ptr, message) => {
                 // Row 2: deliver message to receiver's registers, enqueue receiver.
                 crate::frame::cores::clear_ipc_carry(sender_ptr);
                 Self::deliver_message(receiver_ptr, &message);
-                // TODO: call receiver.unblock() when we have mutable access
-                // to the Observer through the arena. For now, enqueue
-                // unconditionally (correct for non-suspended Observers).
+
+                let _ = crate::frame::cores::observer_unblock(receiver_ptr);
+
                 self.scheduler.enqueue(receiver_ptr);
+
                 // D50: Send is NOT fast-path eligible. Sender always continues.
                 DispatchResult::Resume(sender_ptr)
             }
@@ -763,13 +765,13 @@ impl<S: Scheduler> CoreState<S> {
             crate::communication::ReceiveOutcome::Received(message) => {
                 // Row 3: message available, deliver to receiver's registers.
                 Self::deliver_message(receiver_ptr, &message);
+
                 DispatchResult::Resume(receiver_ptr)
             }
             crate::communication::ReceiveOutcome::Blocked => {
                 // Row 4: queue empty, receiver blocks.
-                // D39: Runnable -> Blocked (already done by communication::receive
-                // which linked the Observer into the Field's waiters list).
-                // TODO: call receiver.block() when we have mutable arena access.
+                let _ = crate::frame::cores::observer_set_blocked(receiver_ptr);
+
                 self.scheduler.dequeue(receiver_ptr);
                 self.schedule_next()
             }
@@ -904,8 +906,9 @@ impl<S: Scheduler> CoreState<S> {
         // ── Reply phase: deliver reply to client if waiting ──────────
         if let Some(delivery) = outcome.reply_delivery {
             Self::deliver_message(delivery.client, &delivery.message);
-            // D39: client transitions Blocked -> Runnable.
-            // TODO: call client.unblock() via arena access.
+
+            let _ = crate::frame::cores::observer_unblock(delivery.client);
+
             self.scheduler.enqueue(delivery.client);
         }
 
@@ -914,12 +917,13 @@ impl<S: Scheduler> CoreState<S> {
             crate::communication::ReceiveOutcome::Received(message) => {
                 // Row 8: new message available, server continues.
                 Self::deliver_message(server_ptr, &message);
+
                 DispatchResult::Resume(server_ptr)
             }
             crate::communication::ReceiveOutcome::Blocked => {
                 // Row 9: recv_field empty, server blocks.
-                // D39: Runnable -> Blocked.
-                // TODO: call server.block() via arena access.
+                let _ = crate::frame::cores::observer_set_blocked(server_ptr);
+
                 self.scheduler.dequeue(server_ptr);
                 self.schedule_next()
             }
@@ -955,11 +959,13 @@ impl<S: Scheduler> CoreState<S> {
         // Typed operations never block (D49).
         let typed_error = |error: SyscallError| -> DispatchResult {
             crate::frame::cores::write_typed_result(sender_ptr, error.error_code());
+
             DispatchResult::Resume(sender_ptr)
         };
         // Helper: write a success result (0 for void, positive for values).
         let typed_ok = |value: u64| -> DispatchResult {
             crate::frame::cores::write_typed_result(sender_ptr, value);
+
             DispatchResult::Resume(sender_ptr)
         };
         // ── Step 1: Resolve the target cap entry (D77 steps 1-5) ────
@@ -1099,16 +1105,70 @@ impl<S: Scheduler> CoreState<S> {
                 }
             }
             TypedOperation::ObserverWriteRegisters => {
-                // D97: memory region designation is unsettled (see D97
-                // "Does NOT settle" section). The full batch write requires
-                // knowing which Space cap designates the buffer and how the
-                // kernel locates it in the caller's address space. Left as
-                // an error until the memory protocol is derived.
-                typed_error(SyscallError::InvalidState)
+                // D103: inline register transfer — PC, SP, x0, PSTATE.
+                let mut observers = kernel_state.observers.acquire();
+                let observer = match observers.get_mut(object_id) {
+                    Some(o) => o,
+                    None => return typed_error(SyscallError::InvalidCap),
+                };
+                let live_gen = observer.generation.load(Ordering::Acquire);
+
+                if !entry.check_generation(live_gen) {
+                    return typed_error(SyscallError::StaleCap);
+                }
+
+                let target_ptr = NonNull::from(&mut *observer);
+
+                drop(observers);
+
+                // ABI: x0=PC, x1=SP, x2=target's x0, x3=PSTATE (masked).
+                const PSTATE_USER_MASK: u64 = 0xF000_0000;
+                let pc = regs.args[0];
+                let sp = regs.args[1];
+                let x0 = regs.args[2];
+                let safe_pstate = regs.args[3] & PSTATE_USER_MASK;
+
+                if crate::frame::cores::observer_write_registers(
+                    target_ptr,
+                    pc,
+                    sp,
+                    x0,
+                    safe_pstate,
+                ) {
+                    typed_ok(0)
+                } else {
+                    typed_error(SyscallError::InvalidState)
+                }
             }
             TypedOperation::ObserverReadRegisters => {
-                // D97: same unsettled dependency as WriteRegisters.
-                typed_error(SyscallError::InvalidState)
+                // D103: inline register read — PC, SP, x0, PSTATE.
+                let mut observers = kernel_state.observers.acquire();
+                let observer = match observers.get_mut(object_id) {
+                    Some(o) => o,
+                    None => return typed_error(SyscallError::InvalidCap),
+                };
+                let live_gen = observer.generation.load(Ordering::Acquire);
+
+                if !entry.check_generation(live_gen) {
+                    return typed_error(SyscallError::StaleCap);
+                }
+
+                let target_ptr = NonNull::from(&mut *observer);
+
+                drop(observers);
+
+                match crate::frame::cores::observer_read_registers(target_ptr) {
+                    Some((pc, sp, x0, pstate)) => {
+                        // Write all four values to caller's registers.
+                        crate::frame::cores::write_typed_result(sender_ptr, pc);
+                        crate::frame::cores::write_read_registers_result(
+                            sender_ptr, sp, x0, pstate,
+                        );
+
+                        DispatchResult::Resume(sender_ptr)
+                    }
+                    None => typed_error(SyscallError::InvalidState),
+                }
             }
             TypedOperation::ObserverChangeHandler => {
                 // D97: replace the fault handler Field cap at SLOT_FAULT_HANDLER
@@ -1216,28 +1276,71 @@ impl<S: Scheduler> CoreState<S> {
                             }
                         }
 
-                        // D33/D98: cascade — close all caps in the target's table.
-                        let target_ptr =
-                            crate::frame::cores::observer_ptr_from_arena(kernel_state, object_id);
+                        // D98: preemptible cascade — initiate and block destroyer.
+                        if cap_capacity_target == 0 {
+                            // No caps to cascade — complete immediately.
+                            {
+                                let mut observers = kernel_state.observers.acquire();
 
-                        if let Some(ptr) = target_ptr {
-                            for slot in 0..cap_capacity_target {
-                                crate::frame::cores::observer_close_cap(ptr, slot);
+                                observers.free(object_id);
+                            }
+
+                            typed_ok(return_backing_space(
+                                kernel_state,
+                                sender_ptr,
+                                backing_va,
+                                backing_sz,
+                            ))
+                        } else {
+                            let mut cascade = crate::capability::CascadeContinuation::new();
+
+                            cascade.push(object_id);
+                            cascade.destroyer_ptr = Some(sender_ptr);
+                            cascade.backing_va = backing_va;
+                            cascade.backing_size = backing_sz;
+                            cascade.target_id = object_id;
+
+                            // Run first batch synchronously before blocking.
+                            let target_ptr = crate::frame::cores::observer_ptr_from_arena(
+                                kernel_state,
+                                object_id,
+                            );
+
+                            if let Some(ptr) = target_ptr {
+                                let done = crate::frame::cores::observer_cascade_step(
+                                    ptr,
+                                    &mut cascade,
+                                    16,
+                                );
+
+                                if done {
+                                    cascade.pop();
+                                }
+                            }
+
+                            if cascade.is_empty() {
+                                // Cascade completed in the first batch.
+                                {
+                                    let mut observers = kernel_state.observers.acquire();
+
+                                    observers.free(object_id);
+                                }
+
+                                typed_ok(return_backing_space(
+                                    kernel_state,
+                                    sender_ptr,
+                                    backing_va,
+                                    backing_sz,
+                                ))
+                            } else {
+                                // More work remains — block destroyer, defer to timer.
+                                let _ = crate::frame::cores::observer_set_blocked(sender_ptr);
+
+                                self.scheduler.dequeue(sender_ptr);
+                                self.cascade_continuation = Some(cascade);
+                                self.schedule_next()
                             }
                         }
-
-                        {
-                            let mut observers = kernel_state.observers.acquire();
-
-                            observers.free(object_id);
-                        }
-
-                        typed_ok(return_backing_space(
-                            kernel_state,
-                            sender_ptr,
-                            backing_va,
-                            backing_sz,
-                        ))
                     }
                     ObjectType::Field => {
                         let (live_gen, backing_va, backing_sz) = {
@@ -1489,15 +1592,59 @@ impl<S: Scheduler> CoreState<S> {
                 };
 
                 match space.split(split_size, page_size) {
-                    Ok((_new_va, _rounded_size)) => {
-                        // TODO: allocate arena slot for the new Space, construct
-                        // it, and install a cap in the sender's table. Currently
-                        // the split mutates the source but the new Space is not
-                        // created. Restore source on failure.
-                        // For now, undo the split and return InvalidState.
-                        space.size += _rounded_size;
+                    Ok((new_va, rounded_size)) => {
+                        drop(spaces);
 
-                        typed_error(SyscallError::InvalidState)
+                        let new_space_id = {
+                            let mut spaces = kernel_state.spaces.acquire();
+
+                            match spaces.allocate() {
+                                Ok((id, new_space)) => {
+                                    new_space.va_base = new_va;
+                                    new_space.size = rounded_size;
+                                    new_space.l3_table_pa = 0;
+                                    new_space.refcount = 1;
+                                    new_space.generation = core::sync::atomic::AtomicU64::new(0);
+
+                                    id
+                                }
+                                Err(_) => {
+                                    // Rollback: restore source Space size.
+                                    if let Some(s) = spaces.get_mut(object_id) {
+                                        s.size += rounded_size;
+                                    }
+
+                                    return typed_error(SyscallError::InsufficientResource);
+                                }
+                            }
+                        };
+                        let transferred = capability::TransferredCap {
+                            object_type: ObjectType::Space,
+                            object_id: new_space_id,
+                            rights: Rights::SPACE_ALL,
+                            badge: capability::Badge(0),
+                            send_once: false,
+                            stored_generation: 0,
+                        };
+
+                        match crate::frame::cores::observer_install_transferred_cap(
+                            sender_ptr,
+                            &transferred,
+                        ) {
+                            Ok(encoded_handle) => typed_ok(encoded_handle),
+                            Err(_) => {
+                                // Rollback: free new Space and restore source.
+                                let mut spaces = kernel_state.spaces.acquire();
+
+                                spaces.free(new_space_id);
+
+                                if let Some(s) = spaces.get_mut(object_id) {
+                                    s.size += rounded_size;
+                                }
+
+                                typed_error(SyscallError::TableFull)
+                            }
+                        }
                     }
                     Err(crate::space::SpaceError::ZeroSize) => typed_error(SyscallError::ZeroSize),
                     Err(crate::space::SpaceError::InsufficientSpace) => {
@@ -1767,14 +1914,55 @@ impl<S: Scheduler> CoreState<S> {
                 }
 
                 match time.split(amount) {
-                    Ok(_new_units) => {
-                        // TODO: allocate arena slot for new Time, construct it,
-                        // install cap in sender's table. Currently the split
-                        // mutates the source but the new Time is not created.
-                        // Restore source on failure.
-                        time.compute_units += amount;
+                    Ok(new_units) => {
+                        drop(times);
 
-                        typed_error(SyscallError::InvalidState)
+                        let new_time_id = {
+                            let mut times = kernel_state.times.acquire();
+
+                            match times.allocate() {
+                                Ok((id, new_time)) => {
+                                    new_time.compute_units = new_units;
+                                    new_time.refcount = 1;
+                                    new_time.generation = core::sync::atomic::AtomicU64::new(0);
+
+                                    id
+                                }
+                                Err(_) => {
+                                    if let Some(t) = times.get_mut(object_id) {
+                                        t.compute_units += amount;
+                                    }
+
+                                    return typed_error(SyscallError::InsufficientResource);
+                                }
+                            }
+                        };
+
+                        let transferred = capability::TransferredCap {
+                            object_type: ObjectType::Time,
+                            object_id: new_time_id,
+                            rights: Rights::TIME_ALL,
+                            badge: capability::Badge(0),
+                            send_once: false,
+                            stored_generation: 0,
+                        };
+                        match crate::frame::cores::observer_install_transferred_cap(
+                            sender_ptr,
+                            &transferred,
+                        ) {
+                            Ok(encoded_handle) => typed_ok(encoded_handle),
+                            Err(_) => {
+                                let mut times = kernel_state.times.acquire();
+
+                                times.free(new_time_id);
+
+                                if let Some(t) = times.get_mut(object_id) {
+                                    t.compute_units += amount;
+                                }
+
+                                typed_error(SyscallError::TableFull)
+                            }
+                        }
                     }
                     Err(crate::time::TimeError::ZeroAmount) => typed_error(SyscallError::ZeroSize),
                     Err(crate::time::TimeError::InsufficientUnits) => {
@@ -1813,13 +2001,13 @@ impl<S: Scheduler> CoreState<S> {
 
                 let counter_freq = crate::frame::cores::read_counter_freq();
                 let now_ticks = crate::frame::cores::read_counter_ticks();
-
                 let (pulsar_id, deadline_ticks) = {
                     let mut pulsars = kernel_state.pulsars.acquire();
                     let (id, pulsar) = match pulsars.allocate() {
                         Ok(pair) => pair,
                         Err(_) => return typed_error(SyscallError::InsufficientResource),
                     };
+
                     *pulsar = crate::pulsar::Pulsar::new(
                         delivery_field_id,
                         badge,
@@ -1830,6 +2018,7 @@ impl<S: Scheduler> CoreState<S> {
                     );
                     pulsar.backing_va_base = backing_va;
                     pulsar.backing_size = backing_size;
+
                     (id, pulsar.next_deadline_ticks)
                 };
 
@@ -1864,9 +2053,13 @@ impl<S: Scheduler> CoreState<S> {
                 typed_ok(0)
             }
             TypedOperation::ClockRead => {
-                // TODO: read the timer counter value. Requires frame/ helper
-                // to read CNTVCT_EL0 and Observer's clock_access check.
-                typed_error(SyscallError::InvalidState)
+                // D66: enable direct EL0 counter access on this Observer.
+                // CNTKCTL_EL1.EL0VCTEN will be set on the next context restore.
+                crate::frame::cores::observer_set_clock_access(sender_ptr);
+
+                let ticks = crate::frame::cores::read_counter_ticks();
+
+                typed_ok(ticks)
             }
 
             // ── Observer creation ───────────────────────────────────
@@ -2007,9 +2200,95 @@ impl<S: Scheduler> CoreState<S> {
 
             // ── Resource ────────────────────────────────────────────
             TypedOperation::ResourceRequest => {
-                // TODO: request physical memory from SpaceManager.
-                // Requires privilege check and SpaceManager interaction.
-                typed_error(SyscallError::InvalidState)
+                // D104: dual-path resource request.
+                // args[0] = resource type (0=Space, 1=Time), args[1] = quantity.
+                let resource = match regs.args[0] {
+                    0 => crate::fault::ResourceType::Space,
+                    1 => crate::fault::ResourceType::Time,
+                    _ => return typed_error(SyscallError::InvalidState),
+                };
+                let quantity = regs.args[1];
+                // Detect root vs non-root by checking handler cap at slot 0.
+                let handler_entry = crate::frame::cores::observer_read_full_cap_entry(
+                    sender_ptr,
+                    crate::capability::SLOT_FAULT_HANDLER,
+                );
+                let has_valid_handler = handler_entry.as_ref().is_some_and(|e| e.object.is_some());
+
+                if has_valid_handler {
+                    // Non-root: fault-route to handler Field (D31 pager chain).
+                    let fault = crate::fault::FaultType::ResourceRequest { resource, quantity };
+
+                    self.dispatch_fault(fault, kernel_state)
+                } else {
+                    // Root: kernel allocates directly from SpaceManager pool.
+                    if !matches!(resource, crate::fault::ResourceType::Space) {
+                        return typed_error(SyscallError::InvalidState);
+                    }
+
+                    let page_count = quantity as usize;
+
+                    if page_count == 0 {
+                        return typed_error(SyscallError::ZeroSize);
+                    }
+
+                    let (va_base, size, page_size) = {
+                        let mut sm = kernel_state.space_manager.acquire();
+                        let ps = sm.root_pool.page_size;
+                        let size = page_count * ps;
+
+                        match sm.allocate_pages(page_count) {
+                            Ok(_pa) => match sm.assign_va(size, ps) {
+                                Ok(va) => (va.va_base, size, ps),
+                                Err(_) => {
+                                    sm.return_pages(0, page_count);
+
+                                    return typed_error(SyscallError::InsufficientResource);
+                                }
+                            },
+                            Err(_) => return typed_error(SyscallError::InsufficientResource),
+                        }
+                    };
+
+                    let _ = page_size;
+                    let new_space_id = {
+                        let mut spaces = kernel_state.spaces.acquire();
+                        match spaces.allocate() {
+                            Ok((id, space)) => {
+                                space.va_base = va_base;
+                                space.size = size;
+                                space.l3_table_pa = 0;
+                                space.refcount = 1;
+                                space.generation = core::sync::atomic::AtomicU64::new(0);
+
+                                id
+                            }
+                            Err(_) => return typed_error(SyscallError::InsufficientResource),
+                        }
+                    };
+
+                    let transferred = capability::TransferredCap {
+                        object_type: ObjectType::Space,
+                        object_id: new_space_id,
+                        rights: Rights::SPACE_ALL,
+                        badge: capability::Badge(0),
+                        send_once: false,
+                        stored_generation: 0,
+                    };
+                    match crate::frame::cores::observer_install_transferred_cap(
+                        sender_ptr,
+                        &transferred,
+                    ) {
+                        Ok(encoded_handle) => typed_ok(encoded_handle),
+                        Err(_) => {
+                            let mut spaces = kernel_state.spaces.acquire();
+
+                            spaces.free(new_space_id);
+
+                            typed_error(SyscallError::TableFull)
+                        }
+                    }
+                }
             }
         }
     }
@@ -2134,9 +2413,66 @@ impl<S: Scheduler> CoreState<S> {
         drop(pulsars);
         drop(fields);
 
+        self.continue_cascade(kernel_state);
         self.scheduler.on_preempt();
         self.schedule_next()
     }
+
+    /// Continue a preemptible cascade if one is in progress (D98).
+    ///
+    /// Called from handle_timer after the Pulsar deadline scan and before
+    /// schedule_next(). Runs one batch of cap-close steps (16 slots).
+    /// When the cascade completes, frees the destroyed Observer, installs
+    /// the return Space cap in the destroyer's table, and unblocks the
+    /// destroyer.
+    #[cfg(any(target_os = "none", test))]
+    fn continue_cascade(&mut self, kernel_state: &KernelState) {
+        if let Some(ref mut cascade) = self.cascade_continuation {
+            let target_id = cascade.target_id;
+            let target_ptr = crate::frame::cores::observer_ptr_from_arena(kernel_state, target_id);
+
+            if let Some(ptr) = target_ptr {
+                let done = crate::frame::cores::observer_cascade_step(ptr, cascade, 16);
+
+                if done {
+                    cascade.pop();
+                }
+            }
+
+            if self
+                .cascade_continuation
+                .as_ref()
+                .is_some_and(|c| c.is_empty())
+            {
+                let cascade = self.cascade_continuation.take().unwrap();
+                let destroyer_ptr = cascade.destroyer_ptr;
+
+                {
+                    let mut observers = kernel_state.observers.acquire();
+
+                    observers.free(cascade.target_id);
+                }
+
+                if let Some(dptr) = destroyer_ptr {
+                    let return_handle = return_backing_space(
+                        kernel_state,
+                        dptr,
+                        cascade.backing_va,
+                        cascade.backing_size,
+                    );
+
+                    crate::frame::cores::write_typed_result(dptr, return_handle);
+
+                    let _ = crate::frame::cores::observer_unblock(dptr);
+
+                    self.scheduler.enqueue(dptr);
+                }
+            }
+        }
+    }
+
+    #[cfg(not(any(target_os = "none", test)))]
+    fn continue_cascade(&mut self, _kernel_state: &KernelState) {}
 
     /// Handle a device interrupt routed to this core (D22, D81).
     ///
@@ -8842,5 +9178,723 @@ mod tests {
         assert_eq!(msg.data[1], 0x4000, "D100: data[1] = byte offset");
         assert_eq!(msg.data[2], 2, "D100: data[2] = Execute");
         assert_eq!(msg.data[3], 0, "D100: data[3] = 0");
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // Phase 2: Multi-step integration tests
+    // ══════════════════════════════════════════════════════════════════
+
+    // ── Test scenario builder ─────────────────────────────────────────
+
+    struct TestScenario {
+        kernel_state: KernelState,
+        core: CoreState<RoundRobin>,
+    }
+
+    impl TestScenario {
+        fn new() -> Self {
+            TestScenario {
+                kernel_state: make_kernel_state(),
+                core: make_core_state(),
+            }
+        }
+
+        fn create_observer_with_send_cap(
+            &self,
+            field_id: ObjectId,
+            badge: u64,
+        ) -> (Observer, NonNull<crate::capability::Entry>) {
+            make_sender_with_cap(ObjectType::Field, field_id, Rights::SEND, Badge(badge), 0)
+        }
+
+        fn create_observer_with_recv_cap(
+            &self,
+            field_id: ObjectId,
+        ) -> (Observer, NonNull<crate::capability::Entry>) {
+            make_sender_with_cap(ObjectType::Field, field_id, Rights::RECEIVE, Badge(0), 0)
+        }
+
+        fn create_field(&self, capacity: u32) -> ObjectId {
+            make_field_in_arena(&self.kernel_state, capacity)
+        }
+
+        fn create_space(&self, va_base: usize, size: usize) -> ObjectId {
+            make_space_in_arena(&self.kernel_state, va_base, size)
+        }
+
+        fn create_observer_in_arena(&self) -> ObjectId {
+            let rs_ptr = crate::frame::cores::alloc_test_register_state();
+            let entries = crate::frame::capabilities::alloc_test_entries(16);
+
+            crate::frame::capabilities::init_freelist(
+                entries,
+                16,
+                crate::capability::SLOT_USER_START,
+            );
+
+            let mut observers = self.kernel_state.observers.acquire();
+            let (id, obs) = observers.allocate().expect("allocate observer");
+
+            obs.object_id = id;
+            obs.asid = 0;
+            obs.register_state = crate::observer::RegisterStateHandle::new(rs_ptr);
+            obs.page_table_root = 0;
+            obs.cap_table = entries;
+            obs.cap_table_capacity = 16;
+            obs.cap_table_free_head = Some(crate::capability::SLOT_USER_START);
+            obs.cap_table_count = 0;
+            obs.state = crate::observer::PrimaryState::Inert;
+            obs.suspended = false;
+            obs.compute_aggregate = 100;
+            obs.responsiveness = crate::observer::DEFAULT_RESPONSIVENESS;
+            obs.throughput = crate::observer::DEFAULT_THROUGHPUT;
+            obs.clock_access = false;
+            obs.wait_state = crate::observer::WaitState::None;
+            obs.backing_va_base = 0;
+            obs.backing_size = 0;
+            obs.refcount = 1;
+            obs.generation = core::sync::atomic::AtomicU64::new(0);
+
+            id
+        }
+
+        fn dispatch_typed(
+            &mut self,
+            sender_ptr: NonNull<Observer>,
+            op_code: u16,
+            target_handle: u64,
+            args: [u64; 4],
+        ) -> DispatchResult {
+            setup_typed_regs(sender_ptr, op_code, target_handle, args);
+
+            self.core.current = Some(sender_ptr);
+
+            let operation = crate::syscall::TypedOperation::from_code(op_code)
+                .expect("valid op_code in dispatch_typed");
+
+            self.core.dispatch_typed(operation, &self.kernel_state)
+        }
+    }
+
+    fn encode_handle(index: u32) -> u64 {
+        crate::capability::Handle {
+            index,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode()
+    }
+
+    // ── Scenario 1: Create Field + Send/Receive between two Observers ─
+
+    #[test]
+    fn integration_create_field_send_receive() {
+        let mut scenario = TestScenario::new();
+        let field_id = scenario.create_field(8);
+        // Sender with SEND cap.
+        let (mut sender, _) = scenario.create_observer_with_send_cap(field_id, 0xBEEF);
+        let sender_ptr = NonNull::from(&mut sender);
+        // Receiver with RECEIVE cap.
+        let (mut receiver, _) = scenario.create_observer_with_recv_cap(field_id);
+        let receiver_ptr = NonNull::from(&mut receiver);
+        // Send a message.
+        let handle = encode_handle(0);
+
+        crate::frame::cores::write_test_ipc_registers_via_observer(
+            sender_ptr,
+            &crate::syscall::IpcRegisters {
+                data: [0xA, 0xB, 0xC, 0xD],
+                label: 0x42,
+                handle_or_badge: handle,
+                user_cap: u64::MAX,
+                reply_info: 0,
+            },
+        );
+
+        scenario.core.current = Some(sender_ptr);
+
+        let result = scenario
+            .core
+            .dispatch_ipc(IpcOperation::Send, &scenario.kernel_state);
+
+        assert!(matches!(result, DispatchResult::Resume(_)));
+
+        // Receive the message.
+        crate::frame::cores::write_test_ipc_registers_via_observer(
+            receiver_ptr,
+            &crate::syscall::IpcRegisters {
+                data: [0; 4],
+                label: 0,
+                handle_or_badge: handle,
+                user_cap: u64::MAX,
+                reply_info: 0,
+            },
+        );
+
+        scenario.core.current = Some(receiver_ptr);
+
+        let result = scenario
+            .core
+            .dispatch_ipc(IpcOperation::Receive, &scenario.kernel_state);
+
+        assert!(matches!(result, DispatchResult::Resume(_)));
+
+        // Verify the receiver got the message.
+        let regs = crate::frame::cores::read_ipc_registers(receiver_ptr);
+
+        assert_eq!(regs.data[0], 0xA);
+        assert_eq!(regs.data[1], 0xB);
+        assert_eq!(regs.data[2], 0xC);
+        assert_eq!(regs.data[3], 0xD);
+    }
+
+    // ── Scenario 2: Fault delivery chain ──────────────────────────────
+
+    #[test]
+    fn integration_fault_delivery_to_handler() {
+        let mut scenario = TestScenario::new();
+        let handler_field_id = scenario.create_field(8);
+        // Create a sender Observer with handler cap at slot 0 + self-cap.
+        let rs_ptr = crate::frame::cores::alloc_test_register_state();
+        let entries = crate::frame::capabilities::alloc_test_entries(16);
+
+        crate::frame::capabilities::init_freelist(entries, 16, crate::capability::SLOT_USER_START);
+
+        // Install handler cap at slot 0.
+        let handler_entry = crate::frame::capabilities::entry_mut(entries, 16, 0).unwrap();
+
+        *handler_entry = crate::capability::Entry {
+            object: Some((ObjectType::Field, handler_field_id)),
+            rights: Rights::SEND,
+            badge: Badge(0xFA01),
+            slot_tag: crate::capability::SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+
+        let mut faulting = Observer {
+            object_id: ObjectId(99),
+            asid: 0,
+            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
+            page_table_root: 0,
+            cap_table: entries,
+            cap_table_capacity: 16,
+            cap_table_free_head: Some(crate::capability::SLOT_USER_START),
+            cap_table_count: 1,
+            state: crate::observer::PrimaryState::Runnable,
+            suspended: false,
+            compute_aggregate: 100,
+            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
+            throughput: crate::observer::DEFAULT_THROUGHPUT,
+            clock_access: false,
+            wait_state: crate::observer::WaitState::None,
+            backing_va_base: 0,
+            backing_size: 0,
+            refcount: 1,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let faulting_ptr = NonNull::from(&mut faulting);
+
+        scenario.core.current = Some(faulting_ptr);
+
+        // Dispatch a fault.
+        let fault = crate::fault::FaultType::HardwareException {
+            esr_el1: 0xDEAD,
+            elr_el1: 0xBEEF,
+            far_el1: 0xCAFE,
+        };
+        let result = scenario.core.dispatch_fault(fault, &scenario.kernel_state);
+
+        // Fault delivery: observer is faulted, not resumed. Scheduler picks next.
+        assert!(
+            matches!(result, DispatchResult::Idle),
+            "faulted Observer must not be resumed"
+        );
+        assert!(matches!(
+            faulting.state,
+            crate::observer::PrimaryState::Faulted
+        ));
+
+        // Verify fault message in handler Field.
+        let mut fields = scenario.kernel_state.fields.acquire();
+        let handler = fields.get_mut(handler_field_id).unwrap();
+        let msg = handler.dequeue().unwrap();
+
+        assert_eq!(msg.label, crate::field::LABEL_HARDWARE_EXCEPTION);
+        assert_eq!(msg.data[0], 0xDEAD, "ESR_EL1");
+        assert_eq!(msg.data[1], 0xBEEF, "ELR_EL1");
+        assert_eq!(msg.data[2], 0xCAFE, "FAR_EL1");
+    }
+
+    // ── Scenario 3: SpaceSplit + use new Space ────────────────────────
+
+    #[test]
+    fn integration_space_split_creates_usable_space() {
+        let mut scenario = TestScenario::new();
+        let space_id = scenario.create_space(0x10000, 8192);
+        let (mut sender, _entries) =
+            make_sender_with_cap(ObjectType::Space, space_id, Rights::SPLIT, Badge(0), 0);
+        let sender_ptr = NonNull::from(&mut sender);
+        // Split 4096 bytes from the Space.
+        let result = scenario.dispatch_typed(
+            sender_ptr,
+            TypedOperation::SpaceSplit as u16,
+            encode_handle(0),
+            [4096, 0, 0, 0],
+        );
+
+        assert!(matches!(result, DispatchResult::Resume(_)));
+
+        // Verify the result is a valid handle (non-negative = success).
+        let result_val = read_typed_result(sender_ptr);
+
+        assert!(
+            (result_val as i64) >= 0,
+            "SpaceSplit must return a valid handle, got {result_val:#x}"
+        );
+
+        // Verify original Space was shrunk.
+        let spaces = scenario.kernel_state.spaces.acquire();
+        let original = spaces.get(space_id).unwrap();
+
+        assert_eq!(
+            original.size, 4096,
+            "original Space must shrink by split amount"
+        );
+    }
+
+    // ── Scenario 4: TimeSplit + verify conservation ───────────────────
+
+    #[test]
+    fn integration_time_split_conserves_units() {
+        let mut scenario = TestScenario::new();
+        let time_id = {
+            let mut times = scenario.kernel_state.times.acquire();
+            let (id, time) = times.allocate().expect("allocate time");
+
+            time.compute_units = 100;
+            time.refcount = 1;
+            time.generation = core::sync::atomic::AtomicU64::new(0);
+
+            id
+        };
+        let (mut sender, _entries) =
+            make_sender_with_cap(ObjectType::Time, time_id, Rights::SPLIT, Badge(0), 0);
+        let sender_ptr = NonNull::from(&mut sender);
+        let result = scenario.dispatch_typed(
+            sender_ptr,
+            TypedOperation::TimeSplit as u16,
+            encode_handle(0),
+            [30, 0, 0, 0],
+        );
+
+        assert!(matches!(result, DispatchResult::Resume(_)));
+
+        let result_val = read_typed_result(sender_ptr);
+
+        assert!(
+            (result_val as i64) >= 0,
+            "TimeSplit must return valid handle"
+        );
+
+        let times = scenario.kernel_state.times.acquire();
+        let original = times.get(time_id).unwrap();
+
+        assert_eq!(
+            original.compute_units, 70,
+            "original Time must have 70 units remaining"
+        );
+    }
+
+    // ── Scenario 5: Timer + Pulsar lifecycle ──────────────────────────
+
+    #[test]
+    fn integration_pulsar_fire_and_rearm() {
+        let mut scenario = TestScenario::new();
+        let delivery_field_id = scenario.create_field(8);
+        let space_id = scenario.create_space(0x100000, 4096);
+        // Create sender with Space cap at slot 0, Field cap at slot 3.
+        let rs_ptr = crate::frame::cores::alloc_test_register_state();
+        let entries = crate::frame::capabilities::alloc_test_entries(16);
+
+        crate::frame::capabilities::init_freelist(entries, 16, crate::capability::SLOT_USER_START);
+
+        // Slot 0: Space cap for backing.
+        let e = crate::frame::capabilities::entry_mut(entries, 16, 0).unwrap();
+
+        *e = crate::capability::Entry {
+            object: Some((ObjectType::Space, space_id)),
+            rights: Rights::SPLIT,
+            badge: Badge(0),
+            slot_tag: crate::capability::SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+
+        // Slot 3: Field cap for delivery.
+        let e = crate::frame::capabilities::entry_mut(entries, 16, 3).unwrap();
+
+        *e = crate::capability::Entry {
+            object: Some((ObjectType::Field, delivery_field_id)),
+            rights: Rights::SEND,
+            badge: Badge(0),
+            slot_tag: crate::capability::SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+
+        let mut sender = Observer {
+            object_id: ObjectId(0),
+            asid: 0,
+            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
+            page_table_root: 0,
+            cap_table: entries,
+            cap_table_capacity: 16,
+            cap_table_free_head: Some(crate::capability::SLOT_USER_START),
+            cap_table_count: 2,
+            state: crate::observer::PrimaryState::Runnable,
+            suspended: false,
+            compute_aggregate: 100,
+            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
+            throughput: crate::observer::DEFAULT_THROUGHPUT,
+            clock_access: false,
+            wait_state: crate::observer::WaitState::None,
+            backing_va_base: 0,
+            backing_size: 0,
+            refcount: 1,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let sender_ptr = NonNull::from(&mut sender);
+        // CreatePulsar: Space at handle 0, Field handle at slot 3.
+        let field_handle = encode_handle(3);
+
+        // duration=1ms, period=1ms (repeating), badge=0x77.
+        setup_typed_regs(
+            sender_ptr,
+            TypedOperation::CreatePulsar as u16,
+            encode_handle(0),
+            [field_handle, 0x77, 1_000_000, 1_000_000],
+        );
+
+        scenario.core.current = Some(sender_ptr);
+
+        let result = scenario.core.dispatch_typed(
+            crate::syscall::TypedOperation::CreatePulsar,
+            &scenario.kernel_state,
+        );
+
+        assert!(matches!(result, DispatchResult::Resume(_)));
+        assert_eq!(
+            scenario.core.deadline_count, 1,
+            "Pulsar must register a deadline"
+        );
+
+        // Advance time past the deadline.
+        let deadline = scenario.core.deadlines[0].unwrap().deadline_ticks;
+
+        scenario
+            .core
+            .handle_timer(deadline + 1, &scenario.kernel_state, TEST_COUNTER_FREQ);
+
+        // Verify fire message in delivery Field.
+        let mut fields = scenario.kernel_state.fields.acquire();
+        let field = fields.get_mut(delivery_field_id).unwrap();
+        let msg = field.dequeue().unwrap();
+
+        assert_eq!(msg.badge.0, 0x77, "fire message must carry Pulsar badge");
+        // Repeating Pulsar should still have a deadline.
+        assert_eq!(
+            scenario.core.deadline_count, 1,
+            "repeating Pulsar must rearm"
+        );
+    }
+
+    // ── Scenario 6: ClockRead returns non-zero + sets clock_access ────
+
+    #[test]
+    fn integration_clock_read_sets_access_and_returns_ticks() {
+        let mut scenario = TestScenario::new();
+        let space_id = scenario.create_space(0x200000, 4096);
+        let (mut sender, _entries) =
+            make_sender_with_cap(ObjectType::Space, space_id, Rights::empty(), Badge(0), 0);
+        let sender_ptr = NonNull::from(&mut sender);
+
+        assert!(!sender.clock_access, "clock_access must start false");
+
+        let result = scenario.dispatch_typed(
+            sender_ptr,
+            TypedOperation::ClockRead as u16,
+            encode_handle(0),
+            [0; 4],
+        );
+
+        assert!(matches!(result, DispatchResult::Resume(_)));
+        assert!(sender.clock_access, "ClockRead must set clock_access");
+    }
+
+    // ── Scenario 7: WriteRegisters + ReadRegisters roundtrip ──────────
+
+    #[test]
+    fn integration_write_read_registers_roundtrip() {
+        let mut scenario = TestScenario::new();
+        let target_id = scenario.create_observer_in_arena();
+        let (mut sender, _entries) = make_sender_with_cap(
+            ObjectType::Observer,
+            target_id,
+            Rights::WRITE_REGISTERS.union(Rights::READ_REGISTERS),
+            Badge(0),
+            0,
+        );
+        let sender_ptr = NonNull::from(&mut sender);
+        // WriteRegisters: PC=0x4000, SP=0x8000, x0=42, PSTATE=0xF000_0000.
+        let result = scenario.dispatch_typed(
+            sender_ptr,
+            TypedOperation::ObserverWriteRegisters as u16,
+            encode_handle(0),
+            [0x4000, 0x8000, 42, 0xF000_0000],
+        );
+
+        assert!(matches!(result, DispatchResult::Resume(_)));
+
+        let result_val = read_typed_result(sender_ptr);
+
+        assert_eq!(result_val, 0, "WriteRegisters success returns 0");
+
+        // ReadRegisters on the same target.
+        let result = scenario.dispatch_typed(
+            sender_ptr,
+            TypedOperation::ObserverReadRegisters as u16,
+            encode_handle(0),
+            [0; 4],
+        );
+
+        assert!(matches!(result, DispatchResult::Resume(_)));
+
+        // x0 = PC, x1 = SP, x2 = target's x0, x3 = PSTATE.
+        let regs = crate::frame::cores::read_typed_registers(sender_ptr);
+
+        assert_eq!(regs.args[0], 0x4000, "PC must match written value");
+        assert_eq!(regs.args[1], 0x8000, "SP must match written value");
+        assert_eq!(regs.args[2], 42, "x0 must match written value");
+        assert_eq!(regs.args[3], 0xF000_0000, "PSTATE must match written NZCV");
+    }
+
+    // ── Scenario 7b: PSTATE masking security test ─────────────────────
+
+    #[test]
+    fn integration_write_registers_masks_pstate() {
+        let mut scenario = TestScenario::new();
+        let target_id = scenario.create_observer_in_arena();
+        let (mut sender, _entries) = make_sender_with_cap(
+            ObjectType::Observer,
+            target_id,
+            Rights::WRITE_REGISTERS.union(Rights::READ_REGISTERS),
+            Badge(0),
+            0,
+        );
+        let sender_ptr = NonNull::from(&mut sender);
+        // Write PSTATE with M bits set (would escalate to EL1).
+        let result = scenario.dispatch_typed(
+            sender_ptr,
+            TypedOperation::ObserverWriteRegisters as u16,
+            encode_handle(0),
+            [0x1000, 0x2000, 0, 0xF000_0005],
+        );
+
+        assert!(matches!(result, DispatchResult::Resume(_)));
+
+        // Read back — M bits must be stripped.
+        let result = scenario.dispatch_typed(
+            sender_ptr,
+            TypedOperation::ObserverReadRegisters as u16,
+            encode_handle(0),
+            [0; 4],
+        );
+
+        assert!(matches!(result, DispatchResult::Resume(_)));
+
+        let regs = crate::frame::cores::read_typed_registers(sender_ptr);
+
+        assert_eq!(
+            regs.args[3], 0xF000_0000,
+            "M bits must be masked — only NZCV preserved"
+        );
+    }
+
+    // ── Scenario 8: WriteRegisters rejected for Runnable target ───────
+
+    #[test]
+    fn integration_write_registers_rejects_runnable() {
+        let mut scenario = TestScenario::new();
+        let target_id = scenario.create_observer_in_arena();
+
+        // Make the target Runnable.
+        {
+            let mut observers = scenario.kernel_state.observers.acquire();
+
+            observers.get_mut(target_id).unwrap().state = crate::observer::PrimaryState::Runnable;
+        }
+
+        let (mut sender, _entries) = make_sender_with_cap(
+            ObjectType::Observer,
+            target_id,
+            Rights::WRITE_REGISTERS,
+            Badge(0),
+            0,
+        );
+        let sender_ptr = NonNull::from(&mut sender);
+        let result = scenario.dispatch_typed(
+            sender_ptr,
+            TypedOperation::ObserverWriteRegisters as u16,
+            encode_handle(0),
+            [0x4000, 0x8000, 0, 0],
+        );
+
+        assert!(matches!(result, DispatchResult::Resume(_)));
+
+        let result_val = read_typed_result(sender_ptr) as i64;
+
+        assert!(
+            result_val < 0,
+            "WriteRegisters on Runnable target must fail"
+        );
+    }
+
+    // ── Scenario 9: ResourceRequest non-root fault routes to handler ──
+
+    #[test]
+    fn integration_resource_request_non_root_delivers_fault() {
+        let mut scenario = TestScenario::new();
+        let handler_field_id = scenario.create_field(8);
+        let rs_ptr = crate::frame::cores::alloc_test_register_state();
+        let entries = crate::frame::capabilities::alloc_test_entries(16);
+
+        crate::frame::capabilities::init_freelist(entries, 16, crate::capability::SLOT_USER_START);
+
+        // Handler cap at slot 0.
+        let e = crate::frame::capabilities::entry_mut(entries, 16, 0).unwrap();
+
+        *e = crate::capability::Entry {
+            object: Some((ObjectType::Field, handler_field_id)),
+            rights: Rights::SEND,
+            badge: Badge(0xABCD),
+            slot_tag: crate::capability::SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+
+        // Self-cap at slot 2.
+        let e = crate::frame::capabilities::entry_mut(entries, 16, 2).unwrap();
+
+        *e = crate::capability::Entry {
+            object: Some((ObjectType::Observer, ObjectId(0))),
+            rights: Rights::OBSERVER_ALL,
+            badge: Badge(0),
+            slot_tag: crate::capability::SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+
+        let mut requester = Observer {
+            object_id: ObjectId(0),
+            asid: 0,
+            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
+            page_table_root: 0,
+            cap_table: entries,
+            cap_table_capacity: 16,
+            cap_table_free_head: Some(crate::capability::SLOT_USER_START),
+            cap_table_count: 2,
+            state: crate::observer::PrimaryState::Runnable,
+            suspended: false,
+            compute_aggregate: 100,
+            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
+            throughput: crate::observer::DEFAULT_THROUGHPUT,
+            clock_access: false,
+            wait_state: crate::observer::WaitState::None,
+            backing_va_base: 0,
+            backing_size: 0,
+            refcount: 1,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let requester_ptr = NonNull::from(&mut requester);
+
+        scenario.core.current = Some(requester_ptr);
+
+        // ResourceRequest: Space (0), quantity 4.
+        setup_typed_regs(
+            requester_ptr,
+            TypedOperation::ResourceRequest as u16,
+            encode_handle(2),
+            [0, 4, 0, 0],
+        );
+
+        let result = scenario
+            .core
+            .dispatch_typed(TypedOperation::ResourceRequest, &scenario.kernel_state);
+
+        // Non-root: fault-routed → Observer becomes Faulted.
+        assert!(
+            matches!(result, DispatchResult::Idle),
+            "non-root ResourceRequest should fault-route, not resume"
+        );
+        assert!(matches!(
+            requester.state,
+            crate::observer::PrimaryState::Faulted
+        ));
+
+        // Verify fault message in handler Field.
+        let mut fields = scenario.kernel_state.fields.acquire();
+        let handler = fields.get_mut(handler_field_id).unwrap();
+        let msg = handler.dequeue().unwrap();
+
+        assert_eq!(msg.label, crate::field::LABEL_RESOURCE_REQUEST);
+        assert_eq!(msg.data[0], 0, "resource type = Space");
+        assert_eq!(msg.data[1], 4, "quantity = 4");
+    }
+
+    // ── Scenario 10: Nested IPC — Call/Reply chain ────────────────────
+
+    #[test]
+    fn integration_call_blocks_caller() {
+        let mut scenario = TestScenario::new();
+        let field_id = scenario.create_field(8);
+        let (mut caller, _) = make_sender_with_cap(
+            ObjectType::Field,
+            field_id,
+            Rights::SEND.union(Rights::RECEIVE),
+            Badge(0x1234),
+            0,
+        );
+        let caller_ptr = NonNull::from(&mut caller);
+
+        scenario.core.scheduler.enqueue(caller_ptr);
+
+        let handle = encode_handle(0);
+
+        crate::frame::cores::write_test_ipc_registers_via_observer(
+            caller_ptr,
+            &crate::syscall::IpcRegisters {
+                data: [1, 2, 3, 4],
+                label: 0x99,
+                handle_or_badge: handle,
+                user_cap: u64::MAX,
+                reply_info: 0,
+            },
+        );
+
+        scenario.core.current = Some(caller_ptr);
+
+        let result = scenario
+            .core
+            .dispatch_ipc(IpcOperation::Call, &scenario.kernel_state);
+
+        // D16: Call always blocks the caller.
+        assert!(
+            matches!(result, DispatchResult::Idle),
+            "Call must block caller when no receiver waiting"
+        );
+        assert!(matches!(
+            caller.state,
+            crate::observer::PrimaryState::Blocked
+        ));
     }
 }

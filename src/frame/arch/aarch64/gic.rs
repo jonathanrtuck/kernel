@@ -28,7 +28,6 @@ pub const INTID_SPURIOUS: u32 = 1023;
 
 const GICD_CTLR: usize = 0x0000;
 const GICD_IGROUPR: usize = 0x0080; // + 4*n, 1 bit/interrupt
-// TODO: remove
 #[allow(dead_code)]
 const GICD_ISENABLER: usize = 0x0100; // + 4*n, 1 bit/interrupt
 const GICD_IPRIORITYR: usize = 0x0400; // + n, 1 byte/interrupt

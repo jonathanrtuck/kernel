@@ -419,3 +419,182 @@ impl<T> SlabStore<T> {
         self.free_head = index;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A small test payload to allocate in slab slots.
+    #[derive(Debug, PartialEq, Eq)]
+    struct TestObject {
+        value: u64,
+        tag: u32,
+    }
+
+    // ── Basic allocation ──────────────────────────────────────────
+
+    #[test]
+    fn allocate_returns_sequential_ids() {
+        let mut store: SlabStore<TestObject> = SlabStore::new();
+        let (id_0, obj_0) = store.allocate().unwrap();
+
+        obj_0.value = 100;
+        obj_0.tag = 1;
+
+        let (id_1, obj_1) = store.allocate().unwrap();
+
+        obj_1.value = 200;
+        obj_1.tag = 2;
+
+        assert_eq!(id_0, ObjectId(0));
+        assert_eq!(id_1, ObjectId(1));
+    }
+
+    #[test]
+    fn get_returns_allocated_object() {
+        let mut store: SlabStore<TestObject> = SlabStore::new();
+        let (id, obj) = store.allocate().unwrap();
+
+        obj.value = 42;
+        obj.tag = 7;
+
+        let retrieved = store.get(id).unwrap();
+
+        assert_eq!(retrieved.value, 42);
+        assert_eq!(retrieved.tag, 7);
+    }
+
+    #[test]
+    fn get_mut_allows_modification() {
+        let mut store: SlabStore<TestObject> = SlabStore::new();
+        let (id, obj) = store.allocate().unwrap();
+
+        obj.value = 10;
+
+        let obj_mut = store.get_mut(id).unwrap();
+
+        obj_mut.value = 99;
+
+        let retrieved = store.get(id).unwrap();
+
+        assert_eq!(retrieved.value, 99);
+    }
+
+    #[test]
+    fn get_out_of_bounds_returns_none() {
+        let store: SlabStore<TestObject> = SlabStore::new();
+
+        assert!(store.get(ObjectId(999)).is_none());
+    }
+
+    // ── Free and reuse ────────────────────────────────────────────
+
+    #[test]
+    fn free_makes_slot_unavailable() {
+        let mut store: SlabStore<TestObject> = SlabStore::new();
+        let (id, obj) = store.allocate().unwrap();
+
+        obj.value = 1;
+
+        store.free(id);
+
+        assert!(store.get(id).is_none(), "freed slot must not be accessible");
+    }
+
+    #[test]
+    fn free_slot_is_reused_on_next_allocate() {
+        let mut store: SlabStore<TestObject> = SlabStore::new();
+        let (id_0, obj_0) = store.allocate().unwrap();
+
+        obj_0.value = 1;
+
+        let (id_1, obj_1) = store.allocate().unwrap();
+
+        obj_1.value = 2;
+
+        store.free(id_0);
+
+        let (reused_id, reused_obj) = store.allocate().unwrap();
+
+        reused_obj.value = 3;
+
+        // LIFO freelist: freed slot 0 should be reused.
+        assert_eq!(reused_id, id_0, "freed slot should be reused");
+        assert_eq!(
+            store.get(reused_id).unwrap().value,
+            3,
+            "reused slot should hold new value"
+        );
+        // Slot 1 should be unaffected.
+        assert_eq!(store.get(id_1).unwrap().value, 2);
+    }
+
+    #[test]
+    fn double_free_is_silently_ignored() {
+        let mut store: SlabStore<TestObject> = SlabStore::new();
+        let (id, obj) = store.allocate().unwrap();
+
+        obj.value = 1;
+
+        store.free(id);
+        store.free(id); // Should not corrupt the freelist.
+
+        // Allocate once — should get the slot back exactly once.
+        let (reused, _) = store.allocate().unwrap();
+
+        assert_eq!(reused, id);
+
+        // Next allocate should yield a new slot, not id again.
+        let (next, _) = store.allocate().unwrap();
+
+        assert_ne!(next, id, "double-free must not produce duplicate reuse");
+    }
+
+    #[test]
+    fn free_out_of_bounds_is_silently_ignored() {
+        let mut store: SlabStore<TestObject> = SlabStore::new();
+
+        // Free on an empty store with an out-of-bounds id should not panic.
+        store.free(ObjectId(999));
+    }
+
+    // ── Capacity exhaustion ───────────────────────────────────────
+
+    #[test]
+    fn allocate_up_to_max_slots() {
+        let mut store: SlabStore<TestObject> = SlabStore::new();
+        let max = 256u32; // DEFAULT_MAX_SLOTS
+
+        for i in 0..max {
+            let (id, obj) = store.allocate().unwrap();
+
+            obj.value = i as u64;
+
+            assert_eq!(id, ObjectId(i));
+        }
+
+        // The next allocation should fail.
+        assert_eq!(store.allocate().unwrap_err(), AllocError::OutOfMemory);
+    }
+
+    #[test]
+    fn allocate_after_exhaust_and_free_succeeds() {
+        let mut store: SlabStore<TestObject> = SlabStore::new();
+        let max = 256u32;
+
+        for i in 0..max {
+            let (_, obj) = store.allocate().unwrap();
+
+            obj.value = i as u64;
+        }
+
+        assert!(store.allocate().is_err());
+
+        // Free one slot and try again.
+        store.free(ObjectId(100));
+
+        let (id, _) = store.allocate().unwrap();
+
+        assert_eq!(id, ObjectId(100));
+    }
+}

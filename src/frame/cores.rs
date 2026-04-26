@@ -289,6 +289,24 @@ pub fn write_typed_result(observer_ptr: NonNull<Observer>, value: u64) {
     }
 }
 
+/// Write ReadRegisters result values to x1–x3 of the caller (D103).
+///
+/// x0 is already written by `write_typed_result` (PC). This writes
+/// the remaining three inline register values: SP, x0, PSTATE.
+#[cfg(any(target_os = "none", test))]
+pub fn write_read_registers_result(observer_ptr: NonNull<Observer>, sp: u64, x0: u64, pstate: u64) {
+    // SAFETY: same invariant as write_typed_result.
+    unsafe {
+        let observer = observer_ptr.as_ref();
+        let rs = &mut *(observer.register_state.as_ptr().as_ptr()
+            as *mut crate::frame::arch::register_state::RegisterState);
+
+        rs.gprs[1] = sp;
+        rs.gprs[2] = x0;
+        rs.gprs[3] = pstate;
+    }
+}
+
 /// Write IPC receive registers to a receiver's saved register state (D76).
 ///
 /// Slow-path receive: writes all x0–x7. Used when the receiver is not
@@ -590,6 +608,33 @@ pub fn observer_ptr_from_arena(
     Some(NonNull::from(&mut *observer))
 }
 
+/// Run one batch of cascade steps on an Observer's cap table (D98).
+///
+/// Closes up to `batch_size` cap slots starting from the cascade's
+/// current cursor. Returns true if the cascade level is complete
+/// (cursor reached cap_capacity), false if more work remains.
+#[cfg(any(target_os = "none", test))]
+pub fn observer_cascade_step(
+    observer_ptr: NonNull<Observer>,
+    cascade: &mut crate::capability::CascadeContinuation,
+    batch_size: u32,
+) -> bool {
+    let level = match cascade.current_mut() {
+        Some(l) => l,
+        None => return true,
+    };
+    // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy.
+    let cap_capacity = unsafe { (*observer_ptr.as_ptr()).cap_table_capacity };
+    let end = (level.slot_cursor + batch_size).min(cap_capacity);
+
+    for slot in level.slot_cursor..end {
+        observer_close_cap(observer_ptr, slot);
+    }
+
+    level.slot_cursor = end;
+    end >= cap_capacity
+}
+
 // ── Cap table self-mutation helpers (D97) ─────────────────────────
 //
 // Unsafe pointer wrappers for D97 cap-table-mutating typed operations.
@@ -697,6 +742,77 @@ pub fn observer_read_pc(observer_ptr: NonNull<Observer>) -> u64 {
 pub fn observer_has_free_slot(observer_ptr: NonNull<Observer>) -> bool {
     // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy.
     unsafe { (*observer_ptr.as_ptr()).cap_table_free_head.is_some() }
+}
+
+/// Write inline registers to a target Observer (D103).
+///
+/// Sets PC (ELR_EL1), SP (SP_EL0), x0 (gprs[0]), and PSTATE (SPSR_EL1)
+/// in the target's RegisterState. The target must be in a stopped state
+/// (Inert or Faulted). Returns false if the target is not stopped.
+///
+/// SECURITY: `pstate` MUST be pre-masked to NZCV only (0xF000_0000)
+/// by the caller. This function does not re-mask.
+#[cfg(any(target_os = "none", test))]
+pub fn observer_write_registers(
+    target_ptr: NonNull<Observer>,
+    pc: u64,
+    sp: u64,
+    x0: u64,
+    pstate: u64,
+) -> bool {
+    // SAFETY: target_ptr points to a live Observer. A4 non-reentrancy.
+    unsafe {
+        let observer = &*target_ptr.as_ptr();
+
+        if !observer.state.is_stopped() {
+            return false;
+        }
+
+        let rs = &mut *(observer.register_state.as_ptr().as_ptr()
+            as *mut crate::frame::arch::register_state::RegisterState);
+
+        rs.pc = pc;
+        rs.sp = sp;
+        rs.gprs[0] = x0;
+        rs.pstate = pstate;
+
+        true
+    }
+}
+
+/// Read inline registers from a target Observer (D103).
+///
+/// Returns (PC, SP, x0, PSTATE) from the target's RegisterState.
+/// The target must be in a stopped state (Inert or Faulted).
+/// Returns None if the target is not stopped.
+#[cfg(any(target_os = "none", test))]
+pub fn observer_read_registers(target_ptr: NonNull<Observer>) -> Option<(u64, u64, u64, u64)> {
+    // SAFETY: target_ptr points to a live Observer. A4 non-reentrancy.
+    unsafe {
+        let observer = &*target_ptr.as_ptr();
+
+        if !observer.state.is_stopped() {
+            return None;
+        }
+
+        let rs = &*(observer.register_state.as_ptr().as_ptr()
+            as *const crate::frame::arch::register_state::RegisterState);
+
+        Some((rs.pc, rs.sp, rs.gprs[0], rs.pstate))
+    }
+}
+
+/// Enable direct EL0 timer counter access on an Observer (D66).
+///
+/// Sets `clock_access = true` so the next context restore writes
+/// CNTKCTL_EL1.EL0VCTEN=1, allowing the Observer to read CNTVCT_EL0
+/// directly without trapping.
+#[cfg(any(target_os = "none", test))]
+pub fn observer_set_clock_access(observer_ptr: NonNull<Observer>) {
+    // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy.
+    unsafe {
+        (*observer_ptr.as_ptr()).clock_access = true;
+    }
 }
 
 // ── Observer restore helpers for EL0 exception exit ─────────────

@@ -561,3 +561,346 @@ pub fn allocate_field_queue(capacity: u32) -> Option<NonNull<Message>> {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capability::Badge;
+
+    // ── Circular queue operations ─────────────────────────────────
+
+    #[test]
+    fn queue_write_and_read_roundtrip() {
+        let capacity = 4u32;
+        let queue = alloc_test_queue(capacity);
+        let msg = Message {
+            data: [0x1111, 0x2222, 0x3333, 0x4444],
+            label: 0xABCD,
+            badge: Badge(42),
+            user_cap: None,
+            reply_cap: None,
+        };
+
+        queue_write(queue, capacity, 0, msg);
+
+        let read_back = queue_read(queue, capacity, 0).unwrap();
+
+        assert_eq!(read_back.data, [0x1111, 0x2222, 0x3333, 0x4444]);
+        assert_eq!(read_back.label, 0xABCD);
+        assert_eq!(read_back.badge, Badge(42));
+    }
+
+    #[test]
+    fn queue_write_all_slots() {
+        let capacity = 4u32;
+        let queue = alloc_test_queue(capacity);
+
+        for i in 0..capacity {
+            let msg = Message {
+                data: [i as u64, 0, 0, 0],
+                label: i as u64 * 10,
+                badge: Badge(i as u64),
+                user_cap: None,
+                reply_cap: None,
+            };
+
+            queue_write(queue, capacity, i, msg);
+        }
+
+        for i in 0..capacity {
+            let read_back = queue_read(queue, capacity, i).unwrap();
+
+            assert_eq!(read_back.data[0], i as u64);
+            assert_eq!(read_back.label, i as u64 * 10);
+            assert_eq!(read_back.badge, Badge(i as u64));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "queue_write: index (4) must be < capacity (4)")]
+    fn queue_write_out_of_bounds_panics() {
+        let capacity = 4u32;
+        let queue = alloc_test_queue(capacity);
+        let msg = Message {
+            data: [0; 4],
+            label: 0,
+            badge: Badge(0),
+            user_cap: None,
+            reply_cap: None,
+        };
+
+        queue_write(queue, capacity, 4, msg);
+    }
+
+    #[test]
+    #[should_panic(expected = "queue_read: index (4) must be < capacity (4)")]
+    fn queue_read_out_of_bounds_panics() {
+        let capacity = 4u32;
+        let queue = alloc_test_queue(capacity);
+
+        queue_read(queue, capacity, 4);
+    }
+
+    // ── Intrusive linked list operations ──────────────────────────
+
+    #[test]
+    fn waiter_push_back_single_element() {
+        let mut head: Option<NonNull<WaitEntry>> = None;
+        let mut tail: Option<NonNull<WaitEntry>> = None;
+        let mut entry = WaitEntry {
+            observer: NonNull::dangling(),
+            field: NonNull::dangling(),
+            prev: None,
+            next: None,
+        };
+
+        waiter_push_back(&mut head, &mut tail, &mut entry);
+
+        assert!(head.is_some());
+        assert!(tail.is_some());
+        assert_eq!(head, tail, "single element: head == tail");
+    }
+
+    #[test]
+    fn waiter_push_back_two_elements_fifo_order() {
+        let mut head: Option<NonNull<WaitEntry>> = None;
+        let mut tail: Option<NonNull<WaitEntry>> = None;
+        let mut entry_a = WaitEntry {
+            observer: NonNull::dangling(),
+            field: NonNull::dangling(),
+            prev: None,
+            next: None,
+        };
+        let mut entry_b = WaitEntry {
+            observer: NonNull::dangling(),
+            field: NonNull::dangling(),
+            prev: None,
+            next: None,
+        };
+
+        waiter_push_back(&mut head, &mut tail, &mut entry_a);
+        waiter_push_back(&mut head, &mut tail, &mut entry_b);
+
+        // Head should be entry_a, tail should be entry_b.
+        assert_eq!(head, Some(NonNull::from(&entry_a)));
+        assert_eq!(tail, Some(NonNull::from(&entry_b)));
+    }
+
+    #[test]
+    fn waiter_pop_front_returns_fifo() {
+        let mut head: Option<NonNull<WaitEntry>> = None;
+        let mut tail: Option<NonNull<WaitEntry>> = None;
+        let mut entry_a = WaitEntry {
+            observer: NonNull::dangling(),
+            field: NonNull::dangling(),
+            prev: None,
+            next: None,
+        };
+        let mut entry_b = WaitEntry {
+            observer: NonNull::dangling(),
+            field: NonNull::dangling(),
+            prev: None,
+            next: None,
+        };
+
+        waiter_push_back(&mut head, &mut tail, &mut entry_a);
+        waiter_push_back(&mut head, &mut tail, &mut entry_b);
+
+        let popped = waiter_pop_front(&mut head, &mut tail);
+
+        assert_eq!(popped, Some(NonNull::from(&entry_a)));
+        assert_eq!(head, Some(NonNull::from(&entry_b)));
+    }
+
+    #[test]
+    fn waiter_pop_front_empty_returns_none() {
+        let mut head: Option<NonNull<WaitEntry>> = None;
+        let mut tail: Option<NonNull<WaitEntry>> = None;
+
+        assert!(waiter_pop_front(&mut head, &mut tail).is_none());
+    }
+
+    #[test]
+    fn waiter_pop_front_last_element_clears_tail() {
+        let mut head: Option<NonNull<WaitEntry>> = None;
+        let mut tail: Option<NonNull<WaitEntry>> = None;
+        let mut entry = WaitEntry {
+            observer: NonNull::dangling(),
+            field: NonNull::dangling(),
+            prev: None,
+            next: None,
+        };
+
+        waiter_push_back(&mut head, &mut tail, &mut entry);
+
+        let popped = waiter_pop_front(&mut head, &mut tail);
+
+        assert!(popped.is_some());
+        assert!(head.is_none(), "head must be None after popping last");
+        assert!(tail.is_none(), "tail must be None after popping last");
+    }
+
+    #[test]
+    fn waiter_remove_middle_element() {
+        let mut head: Option<NonNull<WaitEntry>> = None;
+        let mut tail: Option<NonNull<WaitEntry>> = None;
+        let mut entry_a = WaitEntry {
+            observer: NonNull::dangling(),
+            field: NonNull::dangling(),
+            prev: None,
+            next: None,
+        };
+        let mut entry_b = WaitEntry {
+            observer: NonNull::dangling(),
+            field: NonNull::dangling(),
+            prev: None,
+            next: None,
+        };
+        let mut entry_c = WaitEntry {
+            observer: NonNull::dangling(),
+            field: NonNull::dangling(),
+            prev: None,
+            next: None,
+        };
+
+        waiter_push_back(&mut head, &mut tail, &mut entry_a);
+        waiter_push_back(&mut head, &mut tail, &mut entry_b);
+        waiter_push_back(&mut head, &mut tail, &mut entry_c);
+        waiter_remove(&mut head, &mut tail, &mut entry_b);
+
+        assert_eq!(head, Some(NonNull::from(&entry_a)));
+        assert_eq!(tail, Some(NonNull::from(&entry_c)));
+        // Verify linkage: a.next should be c, c.prev should be a.
+        assert_eq!(entry_a.next, Some(NonNull::from(&entry_c)));
+        assert_eq!(entry_c.prev, Some(NonNull::from(&entry_a)));
+    }
+
+    #[test]
+    fn waiter_remove_not_in_list_is_noop() {
+        let mut head: Option<NonNull<WaitEntry>> = None;
+        let mut tail: Option<NonNull<WaitEntry>> = None;
+        let mut stray = WaitEntry {
+            observer: NonNull::dangling(),
+            field: NonNull::dangling(),
+            prev: None,
+            next: None,
+        };
+
+        // Removing an element that was never inserted should not panic.
+        waiter_remove(&mut head, &mut tail, &mut stray);
+
+        assert!(head.is_none());
+        assert!(tail.is_none());
+    }
+
+    // ── Routing table operations ─────────────────────────────────
+
+    #[test]
+    fn route_add_creates_table_on_first_insert() {
+        let mut table_ptr: Option<NonNull<RoutingTable>> = None;
+        let dest = ObjectId(7);
+        let result = route_add(&mut table_ptr, 100, 200, dest, 1);
+
+        assert!(result.is_ok());
+        assert!(table_ptr.is_some());
+    }
+
+    #[test]
+    fn route_lookup_finds_exact_badge() {
+        let mut table_ptr: Option<NonNull<RoutingTable>> = None;
+        let dest = ObjectId(7);
+
+        route_add(&mut table_ptr, 100, 200, dest, 1).unwrap();
+
+        let found = route_lookup(table_ptr.unwrap(), 150);
+
+        assert_eq!(found, Some(dest));
+    }
+
+    #[test]
+    fn route_lookup_boundary_values() {
+        let mut table_ptr: Option<NonNull<RoutingTable>> = None;
+        let dest = ObjectId(3);
+
+        route_add(&mut table_ptr, 10, 20, dest, 1).unwrap();
+
+        // Exact low boundary.
+        assert_eq!(route_lookup(table_ptr.unwrap(), 10), Some(dest));
+        // Exact high boundary.
+        assert_eq!(route_lookup(table_ptr.unwrap(), 20), Some(dest));
+        // Just below low.
+        assert_eq!(route_lookup(table_ptr.unwrap(), 9), None);
+        // Just above high.
+        assert_eq!(route_lookup(table_ptr.unwrap(), 21), None);
+    }
+
+    #[test]
+    fn route_lookup_empty_table_returns_none() {
+        let mut table_ptr: Option<NonNull<RoutingTable>> = None;
+
+        route_add(&mut table_ptr, 100, 200, ObjectId(1), 1).unwrap();
+
+        // Badge outside any range.
+        assert_eq!(route_lookup(table_ptr.unwrap(), 50), None);
+        assert_eq!(route_lookup(table_ptr.unwrap(), 300), None);
+    }
+
+    #[test]
+    fn route_add_maintains_sorted_order() {
+        let mut table_ptr: Option<NonNull<RoutingTable>> = None;
+
+        // Insert out of order.
+        route_add(&mut table_ptr, 300, 400, ObjectId(3), 1).unwrap();
+        route_add(&mut table_ptr, 100, 200, ObjectId(1), 1).unwrap();
+        route_add(&mut table_ptr, 500, 600, ObjectId(5), 1).unwrap();
+
+        // Each range should resolve to the correct destination.
+        assert_eq!(route_lookup(table_ptr.unwrap(), 150), Some(ObjectId(1)));
+        assert_eq!(route_lookup(table_ptr.unwrap(), 350), Some(ObjectId(3)));
+        assert_eq!(route_lookup(table_ptr.unwrap(), 550), Some(ObjectId(5)));
+    }
+
+    #[test]
+    fn route_add_triggers_growth() {
+        let mut table_ptr: Option<NonNull<RoutingTable>> = None;
+
+        // Initial capacity is 4 (INITIAL_CAPACITY). Insert 5 to force growth.
+        for i in 0..5u64 {
+            let low = i * 100;
+            let high = low + 50;
+
+            route_add(&mut table_ptr, low, high, ObjectId(i as u32), 1).unwrap();
+        }
+        // Verify all routes are findable after growth.
+        for i in 0..5u64 {
+            let badge = i * 100 + 25;
+
+            assert_eq!(
+                route_lookup(table_ptr.unwrap(), badge),
+                Some(ObjectId(i as u32)),
+            );
+        }
+    }
+
+    // ── Queue allocation ─────────────────────────────────────────
+
+    #[test]
+    fn allocate_field_queue_zero_capacity_returns_none() {
+        assert!(allocate_field_queue(0).is_none());
+    }
+
+    #[test]
+    fn allocate_field_queue_nonzero_returns_some() {
+        let result = allocate_field_queue(8);
+
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn alloc_test_queue_zero_capacity_returns_dangling() {
+        let ptr = alloc_test_queue(0);
+
+        // NonNull::dangling() is valid but should not be dereferenced.
+        assert_eq!(ptr, NonNull::dangling());
+    }
+}

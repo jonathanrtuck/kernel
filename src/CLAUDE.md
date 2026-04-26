@@ -90,9 +90,10 @@ interface exists and why it has that particular shape.
 These are implementation-level concerns that do not yet have settled interfaces.
 Documented here rather than guessed at in code:
 
-- **Destroy cascade driver.** `Table::begin_cascade` and `cascade_step` define
-  the interface; the preemption-point driver that calls cascade_step between
-  timer interrupts is frame/ territory.
+- ~~**Destroy cascade driver.**~~ Settled: preemptible cascade via
+  `CascadeContinuation` in `CoreState`, driven by `continue_cascade()` in
+  `handle_timer`. Destroyer is blocked while cascade runs; unblocked with return
+  Space cap on completion.
 - **Boot/init sequence.** Root Observer creation, initial Space/Time pool setup,
   per-core scheduler initialization. Partially unsettled (D31, D46).
 - **Badge tracking map.** D17 opt-in per-badge refcount tracking on Fields. The
@@ -104,9 +105,8 @@ Documented here rather than guessed at in code:
 - ~~**CoreState arena references.**~~ Settled by D75: arenas live in a global
   `KernelState` struct (not in CoreState). Lock<T> refactored to own data
   (UnsafeCell). Cold-path dispatch accesses arenas through the global.
-- **Observer cap table capacity.** `Observer::cap_table` is a `NonNull<Entry>`
-  but the table capacity is not stored on the Observer. The dispatch path needs
-  capacity for bounds-checking handle resolution. Surfaced by Wave 3.
+- ~~**Observer cap table capacity.**~~ Settled: `Observer::cap_table_capacity`
+  field added. Dispatch path uses it for bounds-checking handle resolution.
 - ~~**IRQ-to-Field routing.**~~ Settled by D81: `IrqRoute` and `IrqRoutingTable`
   in `kernel_state.rs`, `irq_routes: Lock<IrqRoutingTable>` in KernelState.
   Direct-indexed by INTID, max 1024. `handle_irq` looks up route, checks
@@ -114,6 +114,10 @@ Documented here rather than guessed at in code:
 - ~~**Pulsar deadline queue.**~~ Settled by D83: `DeadlineEntry` array
   (32-element hard cap) and `deadline_count` added to `CoreState<S>`. Per-core,
   no lock needed.
+- ~~**WriteRegisters/ReadRegisters.**~~ Settled by D103: inline in syscall args
+  (PC, SP, x0, PSTATE masked to NZCV). Full buffer transfer deferred.
+- ~~**ResourceRequest.**~~ Settled by D104: dual-path dispatch. Non-root
+  fault-routes to handler Field. Root allocates from SpaceManager pool.
 
 ## Spec drives code
 

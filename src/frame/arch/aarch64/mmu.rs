@@ -470,7 +470,12 @@ fn configure_and_enable() {
         | (0b11    << 12)  // SH0: Inner Shareable
         | (0b10    << 14)  // TG0: 16 KiB granule
         | (28      << 16)  // T1SZ = 28
-        | (1       << 23)  // EPD1: disable TTBR1 walks
+        // EPD1=1: disable TTBR1 walks. Correct for the current TTBR0-only
+        // identity map where all kernel and user pages live in the lower VA
+        // range. build_tcr_split() uses EPD1=0 because it configures the
+        // future TTBR0 (user) / TTBR1 (kernel) split where both halves
+        // must be walkable.
+        | (1       << 23)
         | (0b01    << 24)  // IRGN1: Inner Write-Back Write-Allocate
         | (0b01    << 26)  // ORGN1: Outer Write-Back Write-Allocate
         | (0b11    << 28)  // SH1: Inner Shareable

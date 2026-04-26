@@ -169,3 +169,182 @@ pub fn init_freelist(entries: NonNull<Entry>, capacity: u32, start: u32) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::arena::ObjectId;
+    use crate::capability::{Badge, ObjectType, Rights};
+
+    // ── entry_ref and entry_mut ───────────────────────────────────
+
+    #[test]
+    fn entry_ref_returns_empty_entry_at_valid_index() {
+        let capacity = 8u32;
+        let entries = alloc_test_entries(capacity);
+        let entry = entry_ref(entries, capacity, 0).unwrap();
+
+        assert!(
+            !entry.is_occupied(),
+            "freshly allocated entry must be empty"
+        );
+    }
+
+    #[test]
+    fn entry_ref_out_of_bounds_returns_none() {
+        let capacity = 8u32;
+        let entries = alloc_test_entries(capacity);
+
+        assert!(entry_ref(entries, capacity, 8).is_none());
+        assert!(entry_ref(entries, capacity, 100).is_none());
+    }
+
+    #[test]
+    fn entry_mut_allows_writing_and_reading_back() {
+        let capacity = 8u32;
+        let entries = alloc_test_entries(capacity);
+        let entry = entry_mut(entries, capacity, 3).unwrap();
+
+        entry.object = Some((ObjectType::Field, ObjectId(42)));
+        entry.rights = Rights::FIELD_ALL;
+        entry.badge = Badge(0xDEAD);
+        entry.stored_generation = 5;
+
+        let read_back = entry_ref(entries, capacity, 3).unwrap();
+
+        assert!(read_back.is_occupied());
+        assert_eq!(read_back.badge, Badge(0xDEAD));
+        assert!(read_back.check_rights(Rights::SEND));
+        assert!(read_back.check_generation(5));
+        assert!(read_back.check_type(ObjectType::Field));
+    }
+
+    #[test]
+    fn entry_mut_out_of_bounds_returns_none() {
+        let capacity = 4u32;
+        let entries = alloc_test_entries(capacity);
+
+        assert!(entry_mut(entries, capacity, 4).is_none());
+    }
+
+    // ── write_entry ──────────────────────────────────────────────
+
+    #[test]
+    fn write_entry_overwrites_slot() {
+        let capacity = 8u32;
+        let entries = alloc_test_entries(capacity);
+        let new_entry = Entry {
+            object: Some((ObjectType::Observer, ObjectId(10))),
+            rights: Rights::OBSERVER_ALL,
+            badge: Badge(99),
+            slot_tag: SlotTag(1),
+            send_once: false,
+            stored_generation: 7,
+        };
+        let ok = write_entry(entries, capacity, 2, new_entry);
+
+        assert!(ok);
+
+        let read_back = entry_ref(entries, capacity, 2).unwrap();
+
+        assert!(read_back.is_occupied());
+        assert!(read_back.check_type(ObjectType::Observer));
+        assert_eq!(read_back.badge, Badge(99));
+        assert_eq!(read_back.stored_generation, 7);
+    }
+
+    #[test]
+    fn write_entry_out_of_bounds_returns_false() {
+        let capacity = 4u32;
+        let entries = alloc_test_entries(capacity);
+        let entry = Entry::empty(SlotTag(0));
+
+        assert!(!write_entry(entries, capacity, 4, entry));
+        assert!(!write_entry(entries, capacity, 100, entry));
+    }
+
+    #[test]
+    fn write_entry_can_clear_occupied_slot() {
+        let capacity = 4u32;
+        let entries = alloc_test_entries(capacity);
+        // First, occupy the slot.
+        let occupied = Entry {
+            object: Some((ObjectType::Space, ObjectId(1))),
+            rights: Rights::SPACE_ALL,
+            badge: Badge(0),
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: 1,
+        };
+
+        write_entry(entries, capacity, 0, occupied);
+
+        assert!(entry_ref(entries, capacity, 0).unwrap().is_occupied());
+
+        // Now clear it.
+        write_entry(entries, capacity, 0, Entry::empty(SlotTag(1)));
+
+        let cleared = entry_ref(entries, capacity, 0).unwrap();
+
+        assert!(!cleared.is_occupied());
+        assert_eq!(cleared.slot_tag, SlotTag(1));
+    }
+
+    // ── allocate_cap_table ───────────────────────────────────────
+
+    #[test]
+    fn allocate_cap_table_zero_returns_none() {
+        assert!(allocate_cap_table(0).is_none());
+    }
+
+    #[test]
+    fn allocate_cap_table_returns_valid_entries() {
+        let capacity = 16u32;
+        let entries_ptr = allocate_cap_table(capacity).unwrap();
+
+        // All entries should be readable without panic.
+        for i in 0..capacity {
+            let entry = entry_ref(entries_ptr, capacity, i).unwrap();
+
+            assert!(!entry.is_occupied());
+        }
+    }
+
+    #[test]
+    fn allocate_cap_table_freelist_initialized() {
+        let capacity = 8u32;
+        let entries_ptr = allocate_cap_table(capacity).unwrap();
+        // init_freelist links slots from SLOT_USER_START to capacity-1.
+        // Each empty entry's stored_generation stores the next-free index;
+        // the last stores u64::MAX.
+        let start = crate::capability::SLOT_USER_START;
+
+        for i in start..capacity {
+            let entry = entry_ref(entries_ptr, capacity, i).unwrap();
+
+            if i + 1 < capacity {
+                assert_eq!(
+                    entry.stored_generation,
+                    (i + 1) as u64,
+                    "slot {i} should point to next free slot {}",
+                    i + 1,
+                );
+            } else {
+                assert_eq!(
+                    entry.stored_generation,
+                    u64::MAX,
+                    "last slot must have sentinel value"
+                );
+            }
+        }
+    }
+
+    // ── alloc_test_entries ───────────────────────────────────────
+
+    #[test]
+    fn alloc_test_entries_zero_capacity_returns_dangling() {
+        let ptr = alloc_test_entries(0);
+
+        assert_eq!(ptr, NonNull::dangling());
+    }
+}
