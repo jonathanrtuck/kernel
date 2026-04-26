@@ -64,6 +64,13 @@ pub struct PerCoreData {
     /// The generic parameter is erased because assembly and this
     /// `#[repr(C)]` struct cannot name the concrete scheduler type.
     pub core_state_ptr: *mut u8,
+
+    /// Offset 16: top of the kernel stack for this core.
+    /// EL0 exception entry resets SP to this value before calling the
+    /// Rust handler (noreturn pattern — the handler calls
+    /// `__restore_observer` or `__enter_idle` instead of returning).
+    /// Set once during boot, stable afterward.
+    pub kernel_stack_top: *mut u8,
 }
 
 /// Byte offset of `register_state_ptr` within `PerCoreData`.
@@ -76,10 +83,15 @@ pub const PER_CORE_DATA_REGISTER_STATE_OFFSET: usize = 0;
 #[cfg(any(target_os = "none", test))]
 pub const PER_CORE_DATA_CORE_STATE_OFFSET: usize = 8;
 
+/// Byte offset of `kernel_stack_top` within `PerCoreData`.
+/// EL0 exception entry assembly reads this to reset SP.
+#[cfg(any(target_os = "none", test))]
+pub const PER_CORE_DATA_KERNEL_STACK_TOP_OFFSET: usize = 16;
+
 // Compile-time layout assertions — these MUST match the assembly offsets.
 #[cfg(any(target_os = "none", test))]
 const _: () = {
-    assert!(core::mem::size_of::<PerCoreData>() == 16);
+    assert!(core::mem::size_of::<PerCoreData>() == 24);
     assert!(core::mem::align_of::<PerCoreData>() == 8);
 };
 
@@ -92,6 +104,10 @@ const _: () = {
             == PER_CORE_DATA_REGISTER_STATE_OFFSET
     );
     assert!(core::mem::offset_of!(PerCoreData, core_state_ptr) == PER_CORE_DATA_CORE_STATE_OFFSET);
+    assert!(
+        core::mem::offset_of!(PerCoreData, kernel_stack_top)
+            == PER_CORE_DATA_KERNEL_STACK_TOP_OFFSET
+    );
 };
 
 /// Read the current core's PerCoreData from TPIDR_EL1 (D83).
@@ -502,6 +518,56 @@ pub fn observer_unblock(
     }
 }
 
+// ── Observer restore helpers for EL0 exception exit ─────────────
+
+/// Extract the restore parameters for an Observer (D74, D76).
+///
+/// Returns `(register_state_ptr, page_table_root, clock_access)` — the
+/// three values the assembly `__restore_observer` entry point needs to
+/// resume an Observer in EL0.
+///
+/// `clock_access` is encoded as `1u64` (enable CNTVCT_EL0 access) or
+/// `0u64` (disable). Assembly writes CNTKCTL_EL1.EL0VCTEN accordingly.
+#[cfg(any(target_os = "none", test))]
+pub fn observer_restore_info(observer_ptr: NonNull<Observer>) -> (*mut RegisterState, u64, u64) {
+    // SAFETY: observer_ptr was obtained from CoreState::current or from
+    // DispatchResult, which points to a live Observer in the arena. The
+    // Observer's register_state.as_ptr() points to a valid RegisterState
+    // in structural backing. A4 non-reentrancy guarantees no aliasing
+    // on a single core.
+    unsafe {
+        let observer = observer_ptr.as_ref();
+        let rs_ptr = observer.register_state.as_ptr().as_ptr() as *mut RegisterState;
+        let pt_root = observer.page_table_root;
+        let clock_access = if observer.clock_access { 1u64 } else { 0u64 };
+
+        (rs_ptr, pt_root, clock_access)
+    }
+}
+
+/// Update PerCoreData.register_state_ptr for the next EL0 exception
+/// entry (D74, D83).
+///
+/// Called before `__restore_observer` so that the NEXT EL0 exception
+/// entry saves registers into the correct Observer's save area. The
+/// assembly reads `register_state_ptr` at PerCoreData offset 0.
+///
+/// Accepts the already-resolved `*mut RegisterState` — callers already
+/// have this from `observer_restore_info`, avoiding a redundant Observer
+/// dereference on every exception exit.
+#[cfg(target_os = "none")]
+pub fn update_register_state_ptr(rs_ptr: *mut RegisterState) {
+    // SAFETY: TPIDR_EL1 points to a valid PerCoreData set during boot
+    // (D83). Per-core writable state — no nomem. A4 non-reentrancy
+    // guarantees no aliasing on a single core. rs_ptr was obtained from
+    // observer_restore_info, which validates the Observer pointer.
+    unsafe {
+        let per_core_ptr = crate::frame::arch::tpidr_el1() as *mut PerCoreData;
+
+        (*per_core_ptr).register_state_ptr = rs_ptr;
+    }
+}
+
 /// Allocate a test RegisterState and return a handle to it (test-only).
 ///
 /// Returns a NonNull<u8> suitable for use as Observer::register_state.
@@ -896,8 +962,8 @@ mod tests {
     fn test_d83_per_core_data_size() {
         assert_eq!(
             core::mem::size_of::<PerCoreData>(),
-            16,
-            "D83: PerCoreData must be exactly 16 bytes (two pointers)"
+            24,
+            "D83: PerCoreData must be exactly 24 bytes (three pointers)"
         );
     }
 
@@ -948,6 +1014,7 @@ mod tests {
             register_state_ptr: rs_ptr.as_ptr()
                 as *mut crate::frame::arch::register_state::RegisterState,
             core_state_ptr: core::ptr::null_mut(),
+            kernel_stack_top: core::ptr::null_mut(),
         };
 
         // Write a sentinel via the register_state_ptr.
@@ -986,6 +1053,7 @@ mod tests {
             register_state_ptr: rs_ptr.as_ptr()
                 as *mut crate::frame::arch::register_state::RegisterState,
             core_state_ptr: &sentinel_core_state as *const u64 as *mut u8,
+            kernel_stack_top: core::ptr::null_mut(),
         };
         let base = &per_core as *const PerCoreData as *const u8;
         // Read register_state_ptr at offset 0 as a raw u64.
@@ -1003,6 +1071,56 @@ mod tests {
         assert_eq!(
             cs_from_offset, &sentinel_core_state as *const u64 as u64,
             "D83: raw byte offset 8 must yield core_state_ptr value"
+        );
+
+        // Read kernel_stack_top at offset 16 as a raw u64.
+        let kst_from_offset = unsafe { *(base.add(16) as *const u64) };
+
+        assert_eq!(
+            kst_from_offset, 0,
+            "D83: raw byte offset 16 must yield kernel_stack_top value (null)"
+        );
+    }
+
+    #[test]
+    fn test_d83_kernel_stack_top_at_offset_sixteen() {
+        assert_eq!(
+            PER_CORE_DATA_KERNEL_STACK_TOP_OFFSET, 16,
+            "D83: kernel_stack_top must be at offset 16"
+        );
+        assert_eq!(
+            core::mem::offset_of!(PerCoreData, kernel_stack_top),
+            16,
+            "D83: kernel_stack_top actual offset must be 16"
+        );
+    }
+
+    #[test]
+    fn test_d83_kernel_stack_top_roundtrip() {
+        // Verify kernel_stack_top can be written and read back correctly
+        // through both field access and raw byte access.
+        let rs_ptr = alloc_test_register_state();
+        let stack_sentinel: u64 = 0xFFFF_0000_DEAD_CAFE;
+        let mut per_core = PerCoreData {
+            register_state_ptr: rs_ptr.as_ptr()
+                as *mut crate::frame::arch::register_state::RegisterState,
+            core_state_ptr: core::ptr::null_mut(),
+            kernel_stack_top: stack_sentinel as *mut u8,
+        };
+
+        // Field access.
+        assert_eq!(
+            per_core.kernel_stack_top as u64, stack_sentinel,
+            "D83: kernel_stack_top field access must roundtrip"
+        );
+
+        // Raw byte access at offset 16 (what assembly does).
+        let base = &per_core as *const PerCoreData as *const u8;
+        let raw = unsafe { *(base.add(16) as *const u64) };
+
+        assert_eq!(
+            raw, stack_sentinel,
+            "D83: kernel_stack_top raw byte offset 16 must match"
         );
     }
 }

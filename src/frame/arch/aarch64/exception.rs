@@ -13,6 +13,49 @@ core::arch::global_asm!(include_str!("exception.S"));
 
 use super::sysreg;
 
+// ── Assembly entry points for EL0 context switch (Phase C) ───────
+//
+// These functions are defined in exception.S and called from the Rust
+// el0_exception_handler (noreturn). They perform the final context switch:
+// either restoring an Observer's register state and eret-ing to EL0, or
+// entering the idle loop waiting for interrupts.
+
+#[cfg(target_os = "none")]
+unsafe extern "C" {
+    /// Restore an Observer's full register context and eret to EL0.
+    ///
+    /// # Parameters
+    /// - `register_state_ptr`: pointer to the Observer's RegisterState
+    /// - `page_table_root`: TTBR0_EL1 value for the Observer's address space
+    /// - `clock_access`: 0 or 1 — whether to allow EL0 access to the
+    ///   virtual counter (CNTKCTL_EL1 bit 1)
+    ///
+    /// # Safety
+    /// - `register_state_ptr` must point to a valid, fully-populated
+    ///   RegisterState. The assembly loads all fields unconditionally.
+    /// - `page_table_root` must be a valid, complete TTBR0_EL1 value
+    ///   (physical address with ASID). Invalid values cause translation
+    ///   faults after eret.
+    /// - The caller must be in EL1 with IRQs masked (DAIF.I set).
+    ///   The Observer's SPSR will restore the EL0 interrupt state.
+    pub fn __restore_observer(
+        register_state_ptr: *mut super::register_state::RegisterState,
+        page_table_root: u64,
+        clock_access: u64,
+    ) -> !;
+
+    /// Enter the idle loop: unmask IRQs and execute WFI in a loop.
+    ///
+    /// Called when no Observer is runnable. IRQs arrive through the EL1h
+    /// vector (source 5), are handled by the existing TrapFrame-based
+    /// irq_handler, and return via eret back into the WFI loop.
+    ///
+    /// # Safety
+    /// - Must be called from EL1 with a valid kernel stack.
+    /// - The caller must not hold any locks (IRQs will be unmasked).
+    pub fn __enter_idle() -> !;
+}
+
 // ---------------------------------------------------------------------------
 // TrapFrame — must match the assembly layout in exception.S exactly.
 // ---------------------------------------------------------------------------
@@ -113,6 +156,171 @@ extern "C" fn exception_handler(frame: &mut TrapFrame, source: u64) {
 }
 
 // ---------------------------------------------------------------------------
+// EL0 exception handler entry point (called from assembly, D74)
+// ---------------------------------------------------------------------------
+
+/// EL0 exception dispatch, called from the EL0 assembly common handler (D86).
+///
+/// Unlike `exception_handler` (which returns and lets assembly eret), this
+/// function is divergent — it calls `__restore_observer` to resume an
+/// Observer or `__enter_idle` if no Observer is runnable.
+///
+/// The assembly saves the full register context to RegisterState before
+/// calling, resets SP to the kernel stack top, and passes exception info
+/// as parameters rather than through RegisterState.
+///
+/// D86: source 8 = Sync (SVC, faults), 9 = IRQ, 10 = FIQ, 11 = SError.
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
+extern "C" fn el0_exception_handler(source: u64, esr: u64, far: u64) -> ! {
+    use crate::time_manager::round_robin::RoundRobin;
+
+    let result = match source {
+        8 => handle_el0_sync::<RoundRobin>(source, esr, far),
+        9 => handle_el0_irq::<RoundRobin>(),
+        _ => fatal_exception_el0(source, esr, far),
+    };
+
+    restore_or_idle(result)
+}
+
+/// Decode and dispatch an EL0 synchronous exception (D86).
+///
+/// EC 0x15 = SVC: route to dispatch_ipc or dispatch_typed.
+/// EC 0x20/0x24 = Instruction/Data abort: fault delivery.
+/// All others: fault delivery.
+#[cfg(target_os = "none")]
+fn handle_el0_sync<S: crate::time_manager::Scheduler + 'static>(
+    source: u64,
+    esr: u64,
+    far: u64,
+) -> crate::core_manager::DispatchResult {
+    use crate::core_manager::{self, DispatchResult};
+    use crate::syscall::{IpcOperation, TypedOperation};
+
+    let ec = esr_ec(esr);
+
+    match ec {
+        0x15 => {
+            let imm = esr_svc_imm(esr);
+            let core = core_manager::current_core_mut::<S>();
+            let ks = crate::frame::kernel_state();
+            let observer = core.current.unwrap();
+
+            if imm == 0 {
+                let regs = crate::frame::cores::read_typed_registers(observer);
+
+                match TypedOperation::from_code(regs.op_code) {
+                    Some(op) => core.dispatch_typed(op, ks),
+                    None => {
+                        crate::frame::cores::write_typed_result(observer, (-1i64) as u64);
+                        DispatchResult::Resume(observer)
+                    }
+                }
+            } else {
+                match IpcOperation::from_svc(imm) {
+                    Some(op) => core.dispatch_ipc(op, ks),
+                    None => {
+                        crate::frame::cores::write_ipc_error(
+                            observer,
+                            crate::syscall::SyscallError::InvalidCap,
+                        );
+                        DispatchResult::Resume(observer)
+                    }
+                }
+            }
+        }
+        _ => {
+            // Proper fault delivery (D80) requires page table infrastructure (Phase D).
+            fatal_exception_el0(source, esr, far)
+        }
+    }
+}
+
+/// Handle an IRQ that arrived while in EL0 (D81, D86).
+#[cfg(target_os = "none")]
+fn handle_el0_irq<S: crate::time_manager::Scheduler + 'static>()
+-> crate::core_manager::DispatchResult {
+    use crate::core_manager::{self, DispatchResult};
+
+    let intid = super::gic::acknowledge();
+    let core = core_manager::current_core_mut::<S>();
+
+    if intid == super::gic::INTID_SPURIOUS {
+        return DispatchResult::Resume(core.current.unwrap());
+    }
+
+    let ks = crate::frame::kernel_state();
+    let result = match intid {
+        super::gic::INTID_VTIMER => {
+            super::timer::tick();
+
+            let current_ticks = sysreg::cntvct_el0();
+            let counter_freq = sysreg::cntfrq_el0();
+
+            core.handle_timer(current_ticks, ks, counter_freq)
+        }
+        _ => core.handle_irq(intid, ks),
+    };
+
+    super::gic::end_of_interrupt(intid);
+
+    result
+}
+
+/// Convert a DispatchResult into an assembly restore call (D76, D85).
+#[cfg(target_os = "none")]
+fn restore_or_idle(result: crate::core_manager::DispatchResult) -> ! {
+    use crate::core_manager::DispatchResult;
+
+    match result {
+        DispatchResult::Resume(observer_ptr) | DispatchResult::ResumeFastPath(observer_ptr) => {
+            let (rs_ptr, pt_root, clock_access) =
+                crate::frame::cores::observer_restore_info(observer_ptr);
+
+            crate::frame::cores::update_register_state_ptr(rs_ptr);
+
+            // SAFETY: rs_ptr points to a valid RegisterState (extracted from
+            // a live Observer). pt_root is the Observer's page_table_root.
+            // clock_access is 0 or 1. IRQs are masked (hardware masks on
+            // exception entry, and we have not unmasked). The assembly loads
+            // the full RegisterState and erets to EL0.
+            unsafe { __restore_observer(rs_ptr, pt_root, clock_access) }
+        }
+        DispatchResult::Idle => {
+            // SAFETY: kernel stack is valid, no locks held. The assembly
+            // unmasks IRQs and enters a WFI loop. IRQs arrive through the
+            // EL1h vector and are handled by the existing TrapFrame path.
+            unsafe { __enter_idle() }
+        }
+    }
+}
+
+/// Fatal EL0 exception — dump state and halt.
+#[cfg(target_os = "none")]
+fn fatal_exception_el0(source: u64, esr: u64, far: u64) -> ! {
+    let ec = esr_ec(esr);
+
+    sysreg::disable_irqs();
+
+    crate::println!();
+    crate::println!(
+        "EL0 EXCEPTION: {} — {} (EC 0x{ec:02x})",
+        source_name(source),
+        ec_name(ec),
+    );
+    crate::println!("  ESR:  0x{esr:016x}");
+    crate::println!("  FAR:  0x{far:016x}");
+    crate::println!();
+
+    super::signal_panic();
+
+    loop {
+        crate::frame::arch::halt();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // IRQ handler
 // ---------------------------------------------------------------------------
 
@@ -147,7 +355,7 @@ fn fatal_exception(frame: &TrapFrame, source: u64) -> ! {
     // Mask IRQs to prevent timer ticks from interleaving diagnostic output.
     sysreg::disable_irqs();
 
-    let ec = (frame.esr >> 26) & 0x3F;
+    let ec = esr_ec(frame.esr);
 
     crate::println!();
     crate::println!(
@@ -183,6 +391,22 @@ fn fatal_exception(frame: &TrapFrame, source: u64) -> ! {
     loop {
         crate::frame::arch::halt();
     }
+}
+
+// ---------------------------------------------------------------------------
+// ESR field extraction
+// ---------------------------------------------------------------------------
+
+/// Extract the Exception Class from ESR_EL1 (bits [31:26]).
+#[inline(always)]
+fn esr_ec(esr: u64) -> u64 {
+    (esr >> 26) & 0x3F
+}
+
+/// Extract the SVC immediate from ESR_EL1 (bits [15:0], valid when EC = 0x15).
+#[inline(always)]
+fn esr_svc_imm(esr: u64) -> u16 {
+    (esr & 0xFFFF) as u16
 }
 
 // ---------------------------------------------------------------------------

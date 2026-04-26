@@ -31,8 +31,43 @@ pub struct RegisterState {
     pub fpsr: u64,
 }
 
+// ── Byte offsets for assembly access ─────────────────────────────
+//
+// EL0 exception entry (exception.S) and context restore (__restore_observer)
+// use these offsets to save/load RegisterState fields at known positions.
+// The `offset_of!` assertions below guarantee they match the actual layout.
+
+/// Byte offset of `gprs` within `RegisterState`.
+pub const RS_GPRS: usize = 0;
+/// Byte offset of `sp` within `RegisterState`.
+pub const RS_SP: usize = 248;
+/// Byte offset of `pc` within `RegisterState`.
+pub const RS_PC: usize = 256;
+/// Byte offset of `pstate` within `RegisterState`.
+pub const RS_PSTATE: usize = 264;
+/// Byte offset of `tpidr` within `RegisterState`.
+pub const RS_TPIDR: usize = 272;
+/// Byte offset of `fp_regs` within `RegisterState`.
+pub const RS_FP_REGS: usize = 288;
+/// Byte offset of `fpcr` within `RegisterState`.
+pub const RS_FPCR: usize = 800;
+/// Byte offset of `fpsr` within `RegisterState`.
+pub const RS_FPSR: usize = 808;
+
+// Compile-time layout and offset assertions — these MUST match the assembly
+// immediates in exception.S. If any field is reordered or padded differently,
+// the assertion fires at compile time rather than producing silent context
+// corruption at runtime.
 const _: () = {
     assert!(core::mem::size_of::<RegisterState>() == 816);
+    assert!(core::mem::offset_of!(RegisterState, gprs) == RS_GPRS);
+    assert!(core::mem::offset_of!(RegisterState, sp) == RS_SP);
+    assert!(core::mem::offset_of!(RegisterState, pc) == RS_PC);
+    assert!(core::mem::offset_of!(RegisterState, pstate) == RS_PSTATE);
+    assert!(core::mem::offset_of!(RegisterState, tpidr) == RS_TPIDR);
+    assert!(core::mem::offset_of!(RegisterState, fp_regs) == RS_FP_REGS);
+    assert!(core::mem::offset_of!(RegisterState, fpcr) == RS_FPCR);
+    assert!(core::mem::offset_of!(RegisterState, fpsr) == RS_FPSR);
 };
 
 #[cfg(test)]
@@ -40,7 +75,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn register_state_size() {
-        assert_eq!(core::mem::size_of::<RegisterState>(), 816);
+    fn register_state_gpr_stride() {
+        // Assembly uses immediate offsets for individual GPRs (e.g., x19 at
+        // offset 152 = 19 * 8). Verify the array element stride is 8 bytes.
+        assert_eq!(
+            core::mem::size_of::<u64>(),
+            8,
+            "GPR stride must be 8 bytes for assembly offset calculations"
+        );
+        // Verify specific GPR offsets used in the trampoline (x19 at 152).
+        assert_eq!(RS_GPRS + 19 * 8, 152, "x19 must be at offset 152");
+    }
+
+    #[test]
+    fn register_state_fp_reg_stride() {
+        // Assembly uses stp/ldp q-register pairs at 32-byte stride.
+        assert_eq!(
+            core::mem::size_of::<u128>(),
+            16,
+            "FP register stride must be 16 bytes"
+        );
+        // Verify q0 at offset 288, q31 at 288 + 31*16 = 784.
+        assert_eq!(RS_FP_REGS + 31 * 16, 784, "q31 must be at offset 784");
     }
 }
