@@ -35,11 +35,21 @@ pub const UART_BASE: usize = 0x0900_0000;
 // memory ordering barrier — the hypervisor ensures each secondary core's view
 // is coherent with the BSP's stores at the point of CPU_ON.
 static CORE_COUNT: AtomicUsize = AtomicUsize::new(1);
+static MODULE_SIZE_VAL: AtomicUsize = AtomicUsize::new(0);
+static MODULE_START_VAL: AtomicUsize = AtomicUsize::new(0);
 static RAM_BASE_VAL: AtomicUsize = AtomicUsize::new(0x4000_0000);
 static RAM_SIZE_VAL: AtomicUsize = AtomicUsize::new(256 * 1024 * 1024);
 
 pub fn core_count() -> usize {
     CORE_COUNT.load(Ordering::Relaxed)
+}
+
+pub fn module_size() -> usize {
+    MODULE_SIZE_VAL.load(Ordering::Relaxed)
+}
+
+pub fn module_start() -> usize {
+    MODULE_START_VAL.load(Ordering::Relaxed)
 }
 
 pub fn ram_base() -> usize {
@@ -75,11 +85,18 @@ pub fn init(dtb_ptr: usize) {
                     );
                 }
             }
+
             if info.ram_size != 0 {
                 RAM_SIZE_VAL.store(info.ram_size, Ordering::Relaxed);
             }
+
             if info.core_count != 0 {
                 CORE_COUNT.store(info.core_count, Ordering::Relaxed);
+            }
+
+            if info.module_start != 0 && info.module_size != 0 {
+                MODULE_START_VAL.store(info.module_start, Ordering::Relaxed);
+                MODULE_SIZE_VAL.store(info.module_size, Ordering::Relaxed);
             }
 
             crate::println!(
@@ -88,6 +105,14 @@ pub fn init(dtb_ptr: usize) {
                 info.ram_size,
                 info.core_count,
             );
+
+            if info.module_start != 0 && info.module_size != 0 {
+                crate::println!(
+                    "dtb: module {:#x}+{:#x}",
+                    info.module_start,
+                    info.module_size,
+                );
+            }
         }
         None => {
             crate::println!("dtb: not found, using defaults");

@@ -54,16 +54,20 @@ const USER_STACK_VA: usize = 2 * PAGE_SIZE;
 #[cfg(target_os = "none")]
 const USER_STACK_TOP: usize = USER_STACK_VA + PAGE_SIZE;
 
-// ── Test binary (D94, D102) ──────────────────────────────────────
+// ── Fallback test binary (D94) ──────────────────────────────────
 //
-// Minimal EL0 program that:
+// Minimal EL0 program used when no DTB module is present.
+// D102 settles: test binaries are flat binaries loaded by the hypervisor
+// (--module flag). This embedded fallback preserves backward compatibility
+// for runs without --module.
+//
 // 1. Loads a marker into x0 (proves register state is live)
 // 2. Executes SVC #5 (Yield — proves syscall round-trip)
 // 3. After return from Yield, executes BRK #0x42
 //    (debug exception → fault handler → kernel prints pass → exit)
 
 #[cfg(target_os = "none")]
-const TEST_BINARY: &[u8] = &{
+const FALLBACK_BINARY: &[u8] = &{
     // ARM64 instructions are 4 bytes, little-endian.
     let mut buf = [0u8; 16];
 
@@ -135,13 +139,33 @@ fn setup_user_pages(ks: &KernelState, code_pa: usize, stack_pa: usize) -> Result
     Ok(())
 }
 
-/// Copy the test binary to the code page.
+/// Copy a DTB-discovered module binary to the code page (D102).
+///
+/// The hypervisor loaded the flat binary into guest RAM at `module_pa`.
+/// We copy `module_size` bytes to `code_pa`. The caller must ensure
+/// `module_size <= PAGE_SIZE`.
 #[cfg(target_os = "none")]
-fn install_test_binary(code_pa: usize) {
-    // SAFETY: code_pa points to a zeroed page exclusively owned by us.
-    // TEST_BINARY.len() < PAGE_SIZE. Identity mapping: PA = VA.
+fn install_module_binary(code_pa: usize, module_pa: usize, module_size: usize) {
+    // SAFETY: module_pa is the physical address from the DTB module-start
+    // property — the hypervisor placed the binary there. code_pa points to
+    // a zeroed page exclusively owned by us. module_size was validated by
+    // the caller. Identity mapping: PA = VA for both addresses.
     unsafe {
-        core::ptr::copy_nonoverlapping(TEST_BINARY.as_ptr(), code_pa as *mut u8, TEST_BINARY.len());
+        core::ptr::copy_nonoverlapping(module_pa as *const u8, code_pa as *mut u8, module_size);
+    }
+}
+
+/// Copy the embedded fallback binary to the code page (D94).
+#[cfg(target_os = "none")]
+fn install_fallback_binary(code_pa: usize) {
+    // SAFETY: code_pa points to a zeroed page exclusively owned by us.
+    // FALLBACK_BINARY.len() < PAGE_SIZE. Identity mapping: PA = VA.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            FALLBACK_BINARY.as_ptr(),
+            code_pa as *mut u8,
+            FALLBACK_BINARY.len(),
+        );
     }
 }
 
@@ -295,18 +319,39 @@ fn set_current_observer(observer_ptr: NonNull<Observer>) {
 
 // ── Public boot entry point ──────────────────────────────────────
 
-/// Boot the kernel into EL0 with a test Observer (D94).
+/// Boot the kernel into EL0 with a test Observer (D94, D102).
+///
+/// When a DTB `/chosen` module node is present (loaded by the hypervisor
+/// via `--module`), uses that binary; otherwise falls back to the embedded
+/// `FALLBACK_BINARY`.
 ///
 /// Allocates physical pages, builds user mappings, creates the root
 /// Observer, initializes per-core data, and context switches to EL0.
 /// This function does not return.
 #[cfg(target_os = "none")]
 pub fn enter_first_observer(ks: &KernelState) -> ! {
+    use crate::frame::arch::platform;
+
     crate::println!("boot: allocating root observer resources");
 
     let code_pa = alloc_zeroed_pages(ks, 1).expect("allocate code page");
+    let module_start = platform::module_start();
+    let module_size = platform::module_size();
 
-    install_test_binary(code_pa);
+    if module_start != 0 && module_size != 0 {
+        assert!(
+            module_size <= PAGE_SIZE,
+            "boot: module too large ({module_size} > {PAGE_SIZE})"
+        );
+
+        install_module_binary(code_pa, module_start, module_size);
+
+        crate::println!("boot: loaded DTB module ({} bytes)", module_size);
+    } else {
+        install_fallback_binary(code_pa);
+
+        crate::println!("boot: using embedded fallback binary");
+    }
 
     let stack_pa = alloc_zeroed_pages(ks, 1).expect("allocate stack page");
 

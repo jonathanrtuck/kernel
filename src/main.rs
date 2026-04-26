@@ -64,10 +64,11 @@ extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
 
     kernel::frame::init_kernel_state(kernel_state);
 
-    // ── Phase 3: Root Observer and EL0 entry (D94) ─────────────────
+    // ── Phase 3: Root Observer and EL0 entry (D94, D102) ────────────
     //
-    // Create the root Observer with a test binary, initialize per-core
-    // data, and context switch to EL0. This function does not return.
+    // Create the root Observer, initialize per-core data, and context
+    // switch to EL0. Uses the DTB module binary when present, otherwise
+    // falls back to the embedded binary. This function does not return.
     let ks = kernel::frame::kernel_state();
 
     kernel::frame::boot::enter_first_observer(ks);

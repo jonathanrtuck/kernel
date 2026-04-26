@@ -19,7 +19,10 @@ const HEADER_SIZE: usize = 40;
 // FDT node and property names used during scanning.
 const NODE_CPUS: &[u8] = b"cpus";
 const NODE_CPU_PREFIX: &[u8] = b"cpu@";
+const NODE_CHOSEN: &[u8] = b"chosen";
 const PROP_DEVICE_TYPE: &str = "device_type";
+const PROP_MODULE_END: &str = "module-end";
+const PROP_MODULE_START: &str = "module-start";
 const PROP_REG: &str = "reg";
 const DEVICE_TYPE_MEMORY: &str = "memory";
 
@@ -31,6 +34,12 @@ pub struct BootInfo {
     pub ram_size: usize,
     /// Number of CPU cores.
     pub core_count: usize,
+    /// Physical address of a flat binary module loaded by the hypervisor (D102).
+    /// Zero if no module was described in the DTB `/chosen` node.
+    pub module_start: usize,
+    /// Size in bytes of the flat binary module (D102).
+    /// Zero if no module was described in the DTB.
+    pub module_size: usize,
 }
 
 /// Scan the FDT blob at `dtb_ptr` and extract boot-critical hardware info.
@@ -107,6 +116,8 @@ pub fn scan_blob(blob: &[u8]) -> Option<BootInfo> {
         ram_base: 0,
         ram_size: 0,
         core_count: 0,
+        module_start: 0,
+        module_size: 0,
     };
     // Per-node state (reset at each depth-2 BEGIN_NODE, committed at END_NODE).
     let mut is_memory = false;
@@ -116,6 +127,10 @@ pub fn scan_blob(blob: &[u8]) -> Option<BootInfo> {
     // /cpus tracking.
     let mut in_cpus = false;
     let mut cpus_depth: usize = 0;
+    // /chosen tracking (D102: module discovery).
+    let mut in_chosen = false;
+    let mut module_start_val: u64 = 0;
+    let mut module_end_val: u64 = 0;
     let mut depth: usize = 0;
     let mut offset: usize = 0;
     let mut seen_end = false;
@@ -152,6 +167,9 @@ pub fn scan_blob(blob: &[u8]) -> Option<BootInfo> {
                     is_memory = false;
                     has_reg = false;
                     in_cpus = name == NODE_CPUS;
+                    in_chosen = name == NODE_CHOSEN;
+                    module_start_val = 0;
+                    module_end_val = 0;
 
                     if in_cpus {
                         cpus_depth = depth;
@@ -167,9 +185,16 @@ pub fn scan_blob(blob: &[u8]) -> Option<BootInfo> {
                         info.ram_size = reg_size as usize;
                     }
 
+                    if in_chosen && module_end_val > module_start_val {
+                        info.module_start = module_start_val as usize;
+                        info.module_size = (module_end_val - module_start_val) as usize;
+                    }
+
                     if depth == cpus_depth {
                         in_cpus = false;
                     }
+
+                    in_chosen = false;
                 }
                 depth = depth.saturating_sub(1);
             }
@@ -195,7 +220,13 @@ pub fn scan_blob(blob: &[u8]) -> Option<BootInfo> {
                     let data = &structs[offset..offset + len];
                     let name = read_cstr(strings, nameoff);
 
-                    if name == PROP_DEVICE_TYPE && data_eq_str(data, DEVICE_TYPE_MEMORY) {
+                    if in_chosen {
+                        if name == PROP_MODULE_START && data.len() >= 8 {
+                            module_start_val = read_be_u64(data, 0);
+                        } else if name == PROP_MODULE_END && data.len() >= 8 {
+                            module_end_val = read_be_u64(data, 0);
+                        }
+                    } else if name == PROP_DEVICE_TYPE && data_eq_str(data, DEVICE_TYPE_MEMORY) {
                         is_memory = true;
                     } else if name == PROP_REG && data.len() >= 16 {
                         // #address-cells=2, #size-cells=2: first entry is 16 bytes.
@@ -353,6 +384,15 @@ mod tests {
             self.push_be_u32(nameoff);
             self.structs.extend_from_slice(&bytes);
             self.pad4();
+        }
+
+        fn prop_u64(&mut self, name: &'static str, val: u64) {
+            let nameoff = self.intern(name);
+
+            self.push_token(FDT_PROP);
+            self.push_be_u32(8);
+            self.push_be_u32(nameoff);
+            self.push_be_u64(val);
         }
 
         fn prop_reg(&mut self, addr: u64, size: u64) {
@@ -634,5 +674,210 @@ mod tests {
 
         assert_eq!(info.ram_base, 0x8000_0000);
         assert_eq!(info.ram_size, 1024 * 1024 * 1024);
+    }
+
+    // -----------------------------------------------------------------------
+    // D102 — DTB module discovery helpers
+    // -----------------------------------------------------------------------
+
+    fn build_dtb_with_module(
+        ram_base: u64,
+        ram_size: u64,
+        cpu_count: usize,
+        module_start: u64,
+        module_end: u64,
+    ) -> Vec<u8> {
+        let mut b = FdtBuilder::new();
+
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 2);
+        b.begin_node(&format!("memory@{ram_base:x}"));
+        b.prop_string("device_type", "memory");
+        b.prop_reg(ram_base, ram_size);
+        b.end_node();
+        b.begin_node("chosen");
+        b.prop_string("stdout-path", "/pl011@9000000");
+        b.prop_u64("module-start", module_start);
+        b.prop_u64("module-end", module_end);
+        b.end_node();
+        b.begin_node("cpus");
+        b.prop_u32("#address-cells", 1);
+        b.prop_u32("#size-cells", 0);
+
+        for i in 0..cpu_count {
+            b.begin_node(&format!("cpu@{i}"));
+            b.prop_string("device_type", "cpu");
+            b.prop_u32("reg", i as u32);
+            b.end_node();
+        }
+
+        b.end_node();
+        b.end_node();
+        b.finish()
+    }
+
+    // -----------------------------------------------------------------------
+    // D102 — Module discovery tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn d102_module_discovered_from_chosen() {
+        let module_start = 0x4FF0_0000u64;
+        let module_end = 0x4FF0_1000u64;
+        let blob =
+            build_dtb_with_module(0x4000_0000, 256 * 1024 * 1024, 4, module_start, module_end);
+        let info = scan_blob(&blob).expect("scan should succeed");
+
+        assert_eq!(info.module_start, module_start as usize);
+        assert_eq!(info.module_size, 0x1000);
+    }
+
+    #[test]
+    fn d102_module_absent_when_no_chosen() {
+        let blob = build_test_dtb(0x4000_0000, 256 * 1024 * 1024, 4);
+        let info = scan_blob(&blob).expect("scan should succeed");
+
+        assert_eq!(info.module_start, 0);
+        assert_eq!(info.module_size, 0);
+    }
+
+    #[test]
+    fn d102_module_absent_when_chosen_has_no_module_props() {
+        let mut b = FdtBuilder::new();
+
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 2);
+        b.begin_node("memory@40000000");
+        b.prop_string("device_type", "memory");
+        b.prop_reg(0x4000_0000, 0x1000_0000);
+        b.end_node();
+        b.begin_node("chosen");
+        b.prop_string("stdout-path", "/pl011@9000000");
+        b.end_node();
+        b.end_node();
+
+        let blob = b.finish();
+        let info = scan_blob(&blob).expect("scan should succeed");
+
+        assert_eq!(
+            info.module_start, 0,
+            "module_start should be 0 when no module properties present"
+        );
+        assert_eq!(
+            info.module_size, 0,
+            "module_size should be 0 when no module properties present"
+        );
+    }
+
+    #[test]
+    fn d102_module_size_computed_from_start_end() {
+        let blob =
+            build_dtb_with_module(0x4000_0000, 256 * 1024 * 1024, 2, 0x4F00_0000, 0x4F00_4000);
+        let info = scan_blob(&blob).expect("scan should succeed");
+
+        assert_eq!(
+            info.module_size, 0x4000,
+            "module_size should equal end - start"
+        );
+    }
+
+    #[test]
+    fn d102_module_does_not_affect_ram_or_cpu_discovery() {
+        let blob =
+            build_dtb_with_module(0x4000_0000, 512 * 1024 * 1024, 8, 0x5000_0000, 0x5000_2000);
+        let info = scan_blob(&blob).expect("scan should succeed");
+
+        assert_eq!(info.ram_base, 0x4000_0000);
+        assert_eq!(info.ram_size, 512 * 1024 * 1024);
+        assert_eq!(info.core_count, 8);
+        assert_eq!(info.module_start, 0x5000_0000);
+        assert_eq!(info.module_size, 0x2000);
+    }
+
+    #[test]
+    fn d102_module_invalid_when_end_equals_start() {
+        let blob =
+            build_dtb_with_module(0x4000_0000, 256 * 1024 * 1024, 4, 0x5000_0000, 0x5000_0000);
+        let info = scan_blob(&blob).expect("scan should succeed");
+
+        assert_eq!(info.module_start, 0, "end == start should yield no module");
+        assert_eq!(info.module_size, 0);
+    }
+
+    #[test]
+    fn d102_module_invalid_when_end_before_start() {
+        let blob =
+            build_dtb_with_module(0x4000_0000, 256 * 1024 * 1024, 4, 0x5000_1000, 0x5000_0000);
+        let info = scan_blob(&blob).expect("scan should succeed");
+
+        assert_eq!(info.module_start, 0, "end < start should yield no module");
+        assert_eq!(info.module_size, 0);
+    }
+
+    #[test]
+    fn d102_module_only_start_property_means_no_module() {
+        let mut b = FdtBuilder::new();
+
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 2);
+        b.begin_node("memory@40000000");
+        b.prop_string("device_type", "memory");
+        b.prop_reg(0x4000_0000, 0x1000_0000);
+        b.end_node();
+        b.begin_node("chosen");
+        b.prop_u64("module-start", 0x5000_0000);
+        b.end_node();
+        b.end_node();
+
+        let blob = b.finish();
+        let info = scan_blob(&blob).expect("scan should succeed");
+
+        assert_eq!(
+            info.module_start, 0,
+            "module-start without module-end should yield no module"
+        );
+        assert_eq!(info.module_size, 0);
+    }
+
+    #[test]
+    fn d102_module_large_binary() {
+        let start = 0x4800_0000u64;
+        let end = 0x4900_0000u64;
+        let blob = build_dtb_with_module(0x4000_0000, 256 * 1024 * 1024, 4, start, end);
+        let info = scan_blob(&blob).expect("scan should succeed");
+
+        assert_eq!(info.module_start, start as usize);
+        assert_eq!(info.module_size, 16 * 1024 * 1024, "expected 16 MiB module");
+    }
+
+    #[test]
+    fn d102_chosen_before_memory_still_works() {
+        let mut b = FdtBuilder::new();
+
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 2);
+        b.begin_node("chosen");
+        b.prop_u64("module-start", 0x5000_0000);
+        b.prop_u64("module-end", 0x5000_1000);
+        b.end_node();
+        b.begin_node("memory@40000000");
+        b.prop_string("device_type", "memory");
+        b.prop_reg(0x4000_0000, 0x1000_0000);
+        b.end_node();
+        b.end_node();
+
+        let blob = b.finish();
+        let info = scan_blob(&blob).expect("scan should succeed");
+
+        assert_eq!(info.module_start, 0x5000_0000);
+        assert_eq!(info.module_size, 0x1000);
+        assert_eq!(
+            info.ram_base, 0x4000_0000,
+            "memory node after chosen should still be discovered"
+        );
     }
 }
