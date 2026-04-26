@@ -250,6 +250,35 @@ impl Message {
 // ── Field methods ──────────────────────────────────────────────────
 
 impl Field {
+    /// Construct a new Field with an allocated queue (D13, D32).
+    ///
+    /// All dynamic state starts empty: zero-length queue, no waiters,
+    /// no routing table, no pending list. Badge tracking off.
+    /// Used by CreateField and FieldSplit.
+    pub fn new(
+        queue: NonNull<Message>,
+        queue_capacity: u32,
+        backing_va_base: usize,
+        backing_size: usize,
+    ) -> Field {
+        Field {
+            queue,
+            queue_capacity,
+            queue_length: 0,
+            queue_head: 0,
+            waiters_head: None,
+            waiters_tail: None,
+            routing_table: None,
+            pending_head: None,
+            badge_tracking: false,
+            back_pointer_head: None,
+            backing_va_base,
+            backing_size,
+            refcount: 1,
+            generation: AtomicU64::new(0),
+        }
+    }
+
     /// Enqueue a message into the bounded queue.
     ///
     /// D13: queued fields. D18: returns error on full queue (error-to-
@@ -474,22 +503,12 @@ mod tests {
 
     /// Construct a Field with a real queue allocation for test use.
     fn test_field(capacity: u32) -> Field {
-        Field {
-            queue: crate::frame::fields::alloc_test_queue(capacity),
-            queue_capacity: capacity,
-            queue_length: 0,
-            queue_head: 0,
-            waiters_head: None,
-            waiters_tail: None,
-            routing_table: None,
-            pending_head: None,
-            badge_tracking: false,
-            back_pointer_head: None,
-            refcount: 1,
-            generation: AtomicU64::new(0),
-            backing_va_base: 0,
-            backing_size: 0,
-        }
+        Field::new(
+            crate::frame::fields::alloc_test_queue(capacity),
+            capacity,
+            0,
+            0,
+        )
     }
 
     // ── D13: Queued fields, FIFO ordering ──────────────────────────

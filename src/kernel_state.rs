@@ -136,6 +136,75 @@ impl IrqRoutingTable {
 
         self.routes[index].take()
     }
+
+    /// Batch-populate routes for device INTIDs (D99 boot-time population).
+    ///
+    /// Each INTID in `[start_intid, end_intid)` gets a route to the same
+    /// target Field with `badge = INTID`. This is the initial state at
+    /// boot: every device interrupt routes to the root interrupt Field,
+    /// and the badge distinguishes which device fired.
+    ///
+    /// INTIDs outside `[0, MAX_IRQS)` are silently skipped.
+    /// Returns the number of routes installed.
+    pub fn populate_device_routes(
+        &mut self,
+        field_id: ObjectId,
+        generation: u64,
+        start_intid: u32,
+        end_intid: u32,
+    ) -> u32 {
+        let mut count = 0;
+
+        for intid in start_intid..end_intid {
+            let index = intid as usize;
+
+            if index >= MAX_IRQS {
+                continue;
+            }
+
+            self.routes[index] = Some(IrqRoute {
+                field_id,
+                badge: Badge(intid as u64),
+                generation,
+            });
+
+            count += 1;
+        }
+
+        count
+    }
+
+    /// Repoint routes whose badge falls within `[badge_low, badge_high]`
+    /// to a new destination Field (D99 FieldSplit IRQ routing table update).
+    ///
+    /// When FieldSplit creates a sub-Field for a badge range, the IRQ
+    /// routing table entries whose badge falls in that range must be
+    /// updated to point to the new sub-Field. This is the kernel-internal
+    /// materialization of the Field-based authority model — parallel to
+    /// how page tables materialize capability-based memory state (D24).
+    ///
+    /// Returns the number of routes updated.
+    pub fn update_routes_for_split(
+        &mut self,
+        badge_low: u64,
+        badge_high: u64,
+        new_field_id: ObjectId,
+        new_generation: u64,
+    ) -> u32 {
+        let mut count = 0;
+
+        for route in self.routes.iter_mut().flatten() {
+            let badge_val = route.badge.0;
+
+            if badge_val >= badge_low && badge_val <= badge_high {
+                route.field_id = new_field_id;
+                route.generation = new_generation;
+                count += 1;
+            }
+        }
+
+        count
+    }
 }
 
 /// Kernel-wide shared cold-path state (D75, D82).
@@ -655,5 +724,186 @@ mod tests {
         // Acquire irq_routes then fields — valid because irq_routes is unordered.
         let _routes = state.irq_routes.acquire();
         let _fields = state.fields.acquire();
+    }
+
+    // ── D99 — Boot-time IRQ route population ──────────────────────────
+
+    /// D99: populate_device_routes installs routes for a range of INTIDs.
+    #[test]
+    fn test_d99_populate_device_routes_basic() {
+        let mut table = IrqRoutingTable::new();
+        let field_id = ObjectId(7);
+        let count = table.populate_device_routes(field_id, 0, 32, 64);
+
+        assert_eq!(count, 32, "D99: must install 32 routes for INTIDs 32..64");
+
+        for intid in 32..64u32 {
+            let route = table
+                .lookup(intid)
+                .expect("D99: route must exist for populated INTID");
+
+            assert_eq!(route.field_id, field_id);
+            assert_eq!(route.generation, 0);
+        }
+
+        assert!(
+            table.lookup(31).is_none(),
+            "D99: INTIDs before range must be unrouted"
+        );
+        assert!(
+            table.lookup(64).is_none(),
+            "D99: INTIDs at/after range end must be unrouted"
+        );
+    }
+
+    /// D99: badge equals INTID — each device distinguished by badge value.
+    #[test]
+    fn test_d99_populate_device_routes_badge_equals_intid() {
+        let mut table = IrqRoutingTable::new();
+
+        table.populate_device_routes(ObjectId(1), 0, 100, 105);
+
+        for intid in 100..105u32 {
+            let route = table.lookup(intid).unwrap();
+
+            assert_eq!(
+                route.badge,
+                Badge(intid as u64),
+                "D99: badge must equal INTID for device route"
+            );
+        }
+    }
+
+    /// D99: empty range installs zero routes.
+    #[test]
+    fn test_d99_populate_device_routes_empty_range() {
+        let mut table = IrqRoutingTable::new();
+        let count = table.populate_device_routes(ObjectId(1), 0, 50, 50);
+
+        assert_eq!(count, 0, "D99: empty range must install zero routes");
+    }
+
+    /// D99: populate overwrites existing routes.
+    #[test]
+    fn test_d99_populate_device_routes_overwrites_existing() {
+        let mut table = IrqRoutingTable::new();
+
+        table.install(
+            42,
+            IrqRoute {
+                field_id: ObjectId(99),
+                badge: Badge(42),
+                generation: 5,
+            },
+        );
+        table.populate_device_routes(ObjectId(1), 0, 40, 45);
+
+        let route = table.lookup(42).unwrap();
+
+        assert_eq!(
+            route.field_id,
+            ObjectId(1),
+            "D99: populate must overwrite existing route"
+        );
+        assert_eq!(route.generation, 0, "D99: populate must set new generation");
+    }
+
+    /// D99: populate full SPI range (32–1019).
+    #[test]
+    fn test_d99_populate_device_routes_full_spi_range() {
+        let mut table = IrqRoutingTable::new();
+        let count = table.populate_device_routes(ObjectId(1), 0, 32, 1020);
+
+        assert_eq!(count, 988, "D99: full SPI range (32..1020) = 988 routes");
+    }
+
+    /// D99: INTIDs at MAX_IRQS boundary are handled correctly.
+    #[test]
+    fn test_d99_populate_device_routes_boundary() {
+        let mut table = IrqRoutingTable::new();
+        let count = table.populate_device_routes(ObjectId(1), 0, 1020, 1030);
+
+        assert_eq!(count, 4, "D99: only INTIDs < 1024 should be installed");
+        assert!(table.lookup(1023).is_some());
+        assert!(table.lookup(1024).is_none());
+    }
+
+    // ── D99 — FieldSplit IRQ routing table update ─────────────────────
+
+    /// D99: update_routes_for_split repoints matching routes.
+    #[test]
+    fn test_d99_update_routes_for_split_basic() {
+        let mut table = IrqRoutingTable::new();
+        let old_field = ObjectId(1);
+        let new_field = ObjectId(2);
+
+        table.populate_device_routes(old_field, 0, 32, 48);
+
+        let updated = table.update_routes_for_split(40, 47, new_field, 1);
+
+        assert_eq!(updated, 8, "D99: 8 routes in badge range [40,47]");
+
+        for intid in 40..48u32 {
+            let route = table.lookup(intid).unwrap();
+
+            assert_eq!(
+                route.field_id, new_field,
+                "D99: route must point to new Field"
+            );
+            assert_eq!(route.generation, 1, "D99: route must have new generation");
+        }
+    }
+
+    /// D99: routes outside the split range are not affected.
+    #[test]
+    fn test_d99_update_routes_for_split_preserves_unaffected() {
+        let mut table = IrqRoutingTable::new();
+        let old_field = ObjectId(1);
+
+        table.populate_device_routes(old_field, 0, 32, 64);
+        table.update_routes_for_split(40, 50, ObjectId(2), 1);
+
+        for intid in 32..40u32 {
+            let route = table.lookup(intid).unwrap();
+
+            assert_eq!(
+                route.field_id, old_field,
+                "D99: route outside split range must be unchanged"
+            );
+            assert_eq!(route.generation, 0);
+        }
+        for intid in 51..64u32 {
+            let route = table.lookup(intid).unwrap();
+
+            assert_eq!(route.field_id, old_field);
+            assert_eq!(route.generation, 0);
+        }
+    }
+
+    /// D99: update with no matching routes returns 0.
+    #[test]
+    fn test_d99_update_routes_for_split_no_matching_routes() {
+        let mut table = IrqRoutingTable::new();
+
+        table.populate_device_routes(ObjectId(1), 0, 32, 48);
+
+        let updated = table.update_routes_for_split(100, 200, ObjectId(2), 1);
+
+        assert_eq!(updated, 0, "D99: no routes in badge range → 0 updated");
+    }
+
+    /// D99: update works on partially populated table.
+    #[test]
+    fn test_d99_update_routes_for_split_partial_overlap() {
+        let mut table = IrqRoutingTable::new();
+
+        table.populate_device_routes(ObjectId(1), 0, 40, 50);
+
+        let updated = table.update_routes_for_split(45, 55, ObjectId(2), 1);
+
+        assert_eq!(
+            updated, 5,
+            "D99: only routes 45-49 exist in [45,55] → 5 updated"
+        );
     }
 }

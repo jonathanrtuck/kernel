@@ -1608,8 +1608,6 @@ impl<S: Scheduler> CoreState<S> {
                         None => return typed_error(SyscallError::InsufficientResource),
                     };
 
-                consume_space(kernel_state, object_id);
-
                 let field_id = {
                     let mut fields = kernel_state.fields.acquire();
                     let (id, new_field) = match fields.allocate() {
@@ -1617,26 +1615,20 @@ impl<S: Scheduler> CoreState<S> {
                         Err(_) => return typed_error(SyscallError::InsufficientResource),
                     };
 
-                    new_field.queue = queue_ptr;
-                    new_field.queue_capacity = queue_capacity as u32;
-                    new_field.queue_length = 0;
-                    new_field.queue_head = 0;
-                    new_field.waiters_head = None;
-                    new_field.waiters_tail = None;
-                    new_field.routing_table = None;
-                    new_field.pending_head = None;
-                    new_field.badge_tracking = false;
-                    new_field.back_pointer_head = None;
-                    new_field.backing_va_base = backing_va;
-                    new_field.backing_size = space_size;
-                    new_field.refcount = 1;
-                    new_field.generation = core::sync::atomic::AtomicU64::new(0);
+                    *new_field = crate::field::Field::new(
+                        queue_ptr,
+                        queue_capacity as u32,
+                        backing_va,
+                        space_size,
+                    );
 
                     id
                 };
-                let handle = capability::Handle::decode(regs.target_handle);
 
-                debug_assert!(crate::frame::capabilities::write_entry(
+                consume_space(kernel_state, object_id);
+
+                let handle = capability::Handle::decode(regs.target_handle);
+                let wrote = crate::frame::capabilities::write_entry(
                     cap_entries,
                     cap_capacity,
                     handle.index,
@@ -1648,13 +1640,113 @@ impl<S: Scheduler> CoreState<S> {
                         send_once: false,
                         stored_generation: 0,
                     },
-                ));
+                );
+
+                debug_assert!(wrote);
 
                 typed_ok(0)
             }
             TypedOperation::FieldSplit => {
-                // TODO: split a Field's queue via badge-range routing (D45).
-                typed_error(SyscallError::InvalidState)
+                // D99/D45: split a Field by badge range.
+                //
+                // target_handle = source Field cap (SPLIT right, already checked).
+                // args[0] = Space cap handle (consumed for new sub-Field).
+                // args[1] = badge_low (inclusive).
+                // args[2] = badge_high (inclusive).
+                //
+                // Creates a new sub-Field backed by the consumed Space. Adds a
+                // routing rule to the source Field. Updates IrqRoutingTable
+                // entries whose badge falls in the split range. Installs the
+                // new Field's cap in the Space cap's former slot.
+
+                let source_field_id = object_id;
+                let badge_low = regs.args[1];
+                let badge_high = regs.args[2];
+
+                if badge_low > badge_high {
+                    return typed_error(SyscallError::InvalidState);
+                }
+
+                let (space_id, backing_va, space_size) = match resolve_space_argument(
+                    regs.args[0],
+                    cap_entries,
+                    cap_capacity,
+                    kernel_state,
+                ) {
+                    Ok(tuple) => tuple,
+                    Err(e) => return typed_error(e),
+                };
+                let queue_capacity = space_size / core::mem::size_of::<crate::field::Message>();
+
+                if queue_capacity == 0 {
+                    return typed_error(SyscallError::InsufficientResource);
+                }
+
+                let queue_ptr =
+                    match crate::frame::fields::allocate_field_queue(queue_capacity as u32) {
+                        Some(ptr) => ptr,
+                        None => return typed_error(SyscallError::InsufficientResource),
+                    };
+
+                let mut fields = kernel_state.fields.acquire();
+                let new_field_id = {
+                    let (id, new_field) = match fields.allocate() {
+                        Ok(pair) => pair,
+                        Err(_) => return typed_error(SyscallError::InsufficientResource),
+                    };
+
+                    *new_field = crate::field::Field::new(
+                        queue_ptr,
+                        queue_capacity as u32,
+                        backing_va,
+                        space_size,
+                    );
+
+                    id
+                };
+
+                if let Some(source_field) = fields.get_mut(source_field_id) {
+                    if source_field
+                        .add_route(badge_low, badge_high, new_field_id, 0)
+                        .is_err()
+                    {
+                        fields.free(new_field_id);
+
+                        return typed_error(SyscallError::InsufficientResource);
+                    }
+                } else {
+                    fields.free(new_field_id);
+
+                    return typed_error(SyscallError::InvalidCap);
+                }
+
+                drop(fields);
+
+                consume_space(kernel_state, space_id);
+
+                {
+                    let mut irq_routes = kernel_state.irq_routes.acquire();
+
+                    irq_routes.update_routes_for_split(badge_low, badge_high, new_field_id, 0);
+                }
+
+                let space_handle = crate::capability::Handle::decode(regs.args[0]);
+                let wrote = crate::frame::capabilities::write_entry(
+                    cap_entries,
+                    cap_capacity,
+                    space_handle.index,
+                    capability::Entry {
+                        object: Some((ObjectType::Field, new_field_id)),
+                        rights: Rights::FIELD_ALL,
+                        badge: capability::Badge(0),
+                        slot_tag: capability::SlotTag(space_handle.slot_tag.0),
+                        send_once: false,
+                        stored_generation: 0,
+                    },
+                );
+                debug_assert!(wrote);
+
+                typed_ok(0)
             }
 
             // ── Time operations ─────────────────────────────────────
@@ -1719,8 +1811,6 @@ impl<S: Scheduler> CoreState<S> {
                 let counter_freq = crate::frame::cores::read_counter_freq();
                 let now_ticks = crate::frame::cores::read_counter_ticks();
 
-                consume_space(kernel_state, object_id);
-
                 let (pulsar_id, deadline_ticks) = {
                     let mut pulsars = kernel_state.pulsars.acquire();
                     let (id, pulsar) = match pulsars.allocate() {
@@ -1739,6 +1829,9 @@ impl<S: Scheduler> CoreState<S> {
                     pulsar.backing_size = backing_size;
                     (id, pulsar.next_deadline_ticks)
                 };
+
+                consume_space(kernel_state, object_id);
+
                 let idx = self.deadline_count;
 
                 self.deadlines[idx] = Some(DeadlineEntry {
@@ -1749,8 +1842,7 @@ impl<S: Scheduler> CoreState<S> {
                 self.deadline_count += 1;
 
                 let handle = capability::Handle::decode(regs.target_handle);
-
-                debug_assert!(crate::frame::capabilities::write_entry(
+                let wrote = crate::frame::capabilities::write_entry(
                     cap_entries,
                     cap_capacity,
                     handle.index,
@@ -1762,7 +1854,9 @@ impl<S: Scheduler> CoreState<S> {
                         send_once: false,
                         stored_generation: 0,
                     },
-                ));
+                );
+
+                debug_assert!(wrote);
 
                 typed_ok(0)
             }
@@ -1822,8 +1916,6 @@ impl<S: Scheduler> CoreState<S> {
                         None => return typed_error(SyscallError::InsufficientResource),
                     };
 
-                consume_space(kernel_state, object_id);
-
                 let observer_id = {
                     let mut observers = kernel_state.observers.acquire();
                     let (id, obs) = match observers.allocate() {
@@ -1852,8 +1944,10 @@ impl<S: Scheduler> CoreState<S> {
                     id
                 };
 
+                consume_space(kernel_state, object_id);
+
                 // D57/D95: populate reserved cap table slots.
-                debug_assert!(crate::frame::capabilities::write_entry(
+                let wrote = crate::frame::capabilities::write_entry(
                     cap_entries_new,
                     cap_capacity_new,
                     capability::SLOT_FAULT_HANDLER,
@@ -1865,8 +1959,11 @@ impl<S: Scheduler> CoreState<S> {
                         send_once: false,
                         stored_generation: handler_stored_gen,
                     },
-                ));
-                debug_assert!(crate::frame::capabilities::write_entry(
+                );
+
+                debug_assert!(wrote);
+
+                let wrote = crate::frame::capabilities::write_entry(
                     cap_entries_new,
                     cap_capacity_new,
                     capability::SLOT_SELF,
@@ -1878,11 +1975,12 @@ impl<S: Scheduler> CoreState<S> {
                         send_once: false,
                         stored_generation: 0,
                     },
-                ));
+                );
+
+                debug_assert!(wrote);
 
                 let handle = capability::Handle::decode(regs.target_handle);
-
-                debug_assert!(crate::frame::capabilities::write_entry(
+                let wrote = crate::frame::capabilities::write_entry(
                     cap_entries,
                     cap_capacity,
                     handle.index,
@@ -1894,7 +1992,9 @@ impl<S: Scheduler> CoreState<S> {
                         send_once: false,
                         stored_generation: 0,
                     },
-                ));
+                );
+
+                debug_assert!(wrote);
 
                 typed_ok(0)
             }
@@ -2178,7 +2278,6 @@ fn return_backing_space(
             Err(_) => return 0,
         }
     };
-
     let tcap = crate::capability::TransferredCap {
         object_type: crate::capability::ObjectType::Space,
         object_id: return_space_id,
@@ -2187,6 +2286,7 @@ fn return_backing_space(
         send_once: false,
         stored_generation: 0,
     };
+
     crate::frame::cores::observer_install_transferred_cap(sender_ptr, &tcap).unwrap_or_default()
 }
 
@@ -2223,6 +2323,43 @@ fn resolve_field_argument(
     }
 
     Ok((field_id, entry.stored_generation))
+}
+
+/// Resolve a secondary Space cap argument for FieldSplit (D99).
+///
+/// Verifies the cap entry is a Space with SPLIT right, checks generation,
+/// and returns the Space's backing address and size in a single lock
+/// acquisition. The Space is being consumed for the new sub-Field.
+#[cfg(any(target_os = "none", test))]
+fn resolve_space_argument(
+    handle: u64,
+    cap_entries: NonNull<crate::capability::Entry>,
+    cap_capacity: u32,
+    kernel_state: &KernelState,
+) -> Result<(ObjectId, usize, usize), crate::syscall::SyscallError> {
+    use crate::capability::{self, ObjectType, Rights};
+    use crate::syscall::SyscallError;
+
+    let entry = capability::resolve_cap_entry(handle, cap_entries, cap_capacity)
+        .map_err(SyscallError::from)?;
+    let (obj_type, space_id) = entry.object.ok_or(SyscallError::InvalidCap)?;
+
+    if obj_type != ObjectType::Space {
+        return Err(SyscallError::WrongType);
+    }
+    if !entry.check_rights(Rights::SPLIT) {
+        return Err(SyscallError::NoRight);
+    }
+
+    let spaces = kernel_state.spaces.acquire();
+    let space = spaces.get(space_id).ok_or(SyscallError::InvalidCap)?;
+    let live_gen = space.generation.load(Ordering::Acquire);
+
+    if !entry.check_generation(live_gen) {
+        return Err(SyscallError::StaleCap);
+    }
+
+    Ok((space_id, space.va_base, space.size))
 }
 
 #[cfg(test)]
@@ -5339,18 +5476,12 @@ mod tests {
         let mut fields = ks.fields.acquire();
         let (id, field) = fields.allocate().expect("allocate field");
 
-        field.queue = crate::frame::fields::alloc_test_queue(capacity);
-        field.queue_capacity = capacity;
-        field.queue_length = 0;
-        field.queue_head = 0;
-        field.generation = core::sync::atomic::AtomicU64::new(0);
-        field.waiters_head = None;
-        field.waiters_tail = None;
-        field.routing_table = None;
-        field.pending_head = None;
-        field.badge_tracking = false;
-        field.back_pointer_head = None;
-        field.refcount = 1;
+        *field = crate::field::Field::new(
+            crate::frame::fields::alloc_test_queue(capacity),
+            capacity,
+            0,
+            0,
+        );
 
         id
     }
@@ -8114,5 +8245,425 @@ mod tests {
             !table.has_cap_to_object(ObjectType::Space, ObjectId(99), u32::MAX),
             "must not match wrong id"
         );
+    }
+
+    // ── D99 — FieldSplit dispatch tests ──────────────────────────────
+
+    /// D99: FieldSplit creates sub-Field, adds route, updates IRQ routing.
+    #[test]
+    fn test_d99_field_split_success() {
+        let ks = make_kernel_state();
+        let source_field_id = make_field_in_arena(&ks, 16);
+        let space_id = make_space_in_arena(&ks, 0x3000, 4 * 4096);
+        // Sender has: slot 0 = source Field cap, slot 1 = Space cap.
+        let (mut sender, entries) = make_sender_with_cap(
+            ObjectType::Field,
+            source_field_id,
+            Rights::FIELD_ALL,
+            Badge(0),
+            0,
+        );
+        let space_entry = crate::frame::capabilities::entry_mut(entries, 16, 1).unwrap();
+
+        *space_entry = crate::capability::Entry {
+            object: Some((ObjectType::Space, space_id)),
+            rights: Rights::SPACE_ALL,
+            badge: Badge(0),
+            slot_tag: crate::capability::SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+
+        let sender_ptr = NonNull::from(&mut sender);
+        let field_handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+        let space_handle = crate::capability::Handle {
+            index: 1,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        setup_typed_regs(
+            sender_ptr,
+            TypedOperation::FieldSplit as u16,
+            field_handle,
+            [space_handle, 100, 200, 0],
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+
+        core.scheduler.enqueue(sender_ptr);
+
+        let result = core.dispatch_typed(TypedOperation::FieldSplit, &ks);
+
+        match result {
+            DispatchResult::Resume(resumed) => assert_eq!(resumed, sender_ptr),
+            _ => panic!("FieldSplit must return Resume(sender)"),
+        }
+
+        let x0 = read_typed_result(sender_ptr);
+
+        assert_eq!(x0, 0, "D99: FieldSplit success must return 0");
+
+        // Space cap slot must now contain a Field cap.
+        let slot1 = crate::frame::capabilities::entry_ref(entries, 16, 1).unwrap();
+        let (obj_type, new_field_id) = slot1.object.expect("slot 1 must be occupied");
+
+        assert_eq!(obj_type, ObjectType::Field, "D99: new cap must be Field");
+        assert_ne!(
+            new_field_id, source_field_id,
+            "D99: new Field must be distinct from source"
+        );
+
+        // New Field must exist in arena with correct queue capacity.
+        let fields = ks.fields.acquire();
+        let new_field = fields.get(new_field_id).expect("new Field must exist");
+        let expected_capacity = (4 * 4096) / core::mem::size_of::<crate::field::Message>();
+
+        assert_eq!(new_field.queue_capacity, expected_capacity as u32);
+        assert_eq!(new_field.queue_length, 0);
+
+        // Source Field must have a routing rule.
+        let source_field = fields
+            .get(source_field_id)
+            .expect("source Field must exist");
+
+        assert_eq!(
+            source_field.resolve_route(150),
+            Some(new_field_id),
+            "D99: source Field must route badge 150 to new sub-Field"
+        );
+        assert!(
+            source_field.resolve_route(50).is_none(),
+            "D99: badge outside split range must not route"
+        );
+
+        // Space must be consumed.
+        drop(fields);
+
+        let spaces = ks.spaces.acquire();
+
+        assert!(
+            spaces.get(space_id).is_none(),
+            "D99: Space must be freed after type conversion"
+        );
+    }
+
+    /// D99: FieldSplit updates IrqRoutingTable for affected routes.
+    #[test]
+    fn test_d99_field_split_updates_irq_routing() {
+        let ks = make_kernel_state();
+        let source_field_id = make_field_in_arena(&ks, 16);
+        let space_id = make_space_in_arena(&ks, 0x3000, 4 * 4096);
+
+        // Pre-populate IRQ routing table with routes pointing to source Field.
+        {
+            let mut irq_routes = ks.irq_routes.acquire();
+
+            irq_routes.populate_device_routes(source_field_id, 0, 32, 48);
+        }
+
+        let (mut sender, entries) = make_sender_with_cap(
+            ObjectType::Field,
+            source_field_id,
+            Rights::FIELD_ALL,
+            Badge(0),
+            0,
+        );
+        let space_entry = crate::frame::capabilities::entry_mut(entries, 16, 1).unwrap();
+
+        *space_entry = crate::capability::Entry {
+            object: Some((ObjectType::Space, space_id)),
+            rights: Rights::SPACE_ALL,
+            badge: Badge(0),
+            slot_tag: crate::capability::SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+
+        let sender_ptr = NonNull::from(&mut sender);
+        let field_handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+        let space_handle = crate::capability::Handle {
+            index: 1,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        // Split badge range [40, 45] — overlaps with populated INTIDs 40-45.
+        setup_typed_regs(
+            sender_ptr,
+            TypedOperation::FieldSplit as u16,
+            field_handle,
+            [space_handle, 40, 45, 0],
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::FieldSplit, &ks);
+
+        let x0 = read_typed_result(sender_ptr);
+
+        assert_eq!(x0, 0, "FieldSplit must succeed");
+
+        // Get the new Field id from the cap table.
+        let slot1 = crate::frame::capabilities::entry_ref(entries, 16, 1).unwrap();
+        let (_, new_field_id) = slot1.object.unwrap();
+        // IRQ routes in [40,45] must now point to the new Field.
+        let irq_routes = ks.irq_routes.acquire();
+
+        for intid in 40..=45u32 {
+            let route = irq_routes.lookup(intid).unwrap();
+
+            assert_eq!(
+                route.field_id, new_field_id,
+                "D99: IRQ route for INTID {intid} must point to new sub-Field"
+            );
+        }
+        // IRQ routes outside [40,45] must still point to source Field.
+        for intid in 32..40u32 {
+            let route = irq_routes.lookup(intid).unwrap();
+
+            assert_eq!(
+                route.field_id, source_field_id,
+                "D99: IRQ route for INTID {intid} must remain at source Field"
+            );
+        }
+        for intid in 46..48u32 {
+            let route = irq_routes.lookup(intid).unwrap();
+
+            assert_eq!(
+                route.field_id, source_field_id,
+                "D99: IRQ route for INTID {intid} must remain at source Field"
+            );
+        }
+    }
+
+    /// D99: FieldSplit on wrong target type returns WrongType.
+    #[test]
+    fn test_d99_field_split_wrong_type() {
+        let ks = make_kernel_state();
+        let space_id = make_space_in_arena(&ks, 0x1000, 4096);
+        let (mut sender, _entries) =
+            make_sender_with_cap(ObjectType::Space, space_id, Rights::SPACE_ALL, Badge(0), 0);
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        setup_typed_regs(
+            sender_ptr,
+            TypedOperation::FieldSplit as u16,
+            handle,
+            [0, 10, 20, 0],
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::FieldSplit, &ks);
+
+        let x0 = read_typed_result(sender_ptr) as i64;
+
+        assert!(x0 < 0, "D99: FieldSplit on non-Field must return error");
+    }
+
+    /// D99: FieldSplit with inverted badge range returns error.
+    #[test]
+    fn test_d99_field_split_inverted_range() {
+        let ks = make_kernel_state();
+        let field_id = make_field_in_arena(&ks, 8);
+        let (mut sender, _entries) =
+            make_sender_with_cap(ObjectType::Field, field_id, Rights::FIELD_ALL, Badge(0), 0);
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        // badge_low (200) > badge_high (100).
+        setup_typed_regs(
+            sender_ptr,
+            TypedOperation::FieldSplit as u16,
+            handle,
+            [0, 200, 100, 0],
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::FieldSplit, &ks);
+
+        let x0 = read_typed_result(sender_ptr) as i64;
+
+        assert!(x0 < 0, "D99: inverted badge range must return error");
+    }
+
+    /// D99: FieldSplit without SPLIT right returns NoRight.
+    #[test]
+    fn test_d99_field_split_no_split_right() {
+        let ks = make_kernel_state();
+        let field_id = make_field_in_arena(&ks, 8);
+        // Give only SEND right, not SPLIT.
+        let (mut sender, _entries) =
+            make_sender_with_cap(ObjectType::Field, field_id, Rights::SEND, Badge(0), 0);
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        setup_typed_regs(
+            sender_ptr,
+            TypedOperation::FieldSplit as u16,
+            handle,
+            [0, 10, 20, 0],
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::FieldSplit, &ks);
+
+        let x0 = read_typed_result(sender_ptr) as i64;
+
+        assert!(x0 < 0, "D99: FieldSplit without SPLIT right must fail");
+    }
+
+    /// D99: FieldSplit with Space too small for one Message returns error.
+    #[test]
+    fn test_d99_field_split_insufficient_space() {
+        let ks = make_kernel_state();
+        let field_id = make_field_in_arena(&ks, 8);
+        let space_id = make_space_in_arena(&ks, 0x1000, 1);
+        let (mut sender, entries) =
+            make_sender_with_cap(ObjectType::Field, field_id, Rights::FIELD_ALL, Badge(0), 0);
+        let space_entry = crate::frame::capabilities::entry_mut(entries, 16, 1).unwrap();
+
+        *space_entry = crate::capability::Entry {
+            object: Some((ObjectType::Space, space_id)),
+            rights: Rights::SPACE_ALL,
+            badge: Badge(0),
+            slot_tag: crate::capability::SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+
+        let sender_ptr = NonNull::from(&mut sender);
+        let field_handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+        let space_handle = crate::capability::Handle {
+            index: 1,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        setup_typed_regs(
+            sender_ptr,
+            TypedOperation::FieldSplit as u16,
+            field_handle,
+            [space_handle, 10, 20, 0],
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::FieldSplit, &ks);
+
+        let x0 = read_typed_result(sender_ptr) as i64;
+
+        assert!(x0 < 0, "D99: Space too small for one Message must fail");
+    }
+
+    /// D99: FieldSplit with exact-match badge range (low == high).
+    #[test]
+    fn test_d99_field_split_exact_badge_range() {
+        let ks = make_kernel_state();
+        let source_field_id = make_field_in_arena(&ks, 16);
+        let space_id = make_space_in_arena(&ks, 0x4000, 4 * 4096);
+        let (mut sender, entries) = make_sender_with_cap(
+            ObjectType::Field,
+            source_field_id,
+            Rights::FIELD_ALL,
+            Badge(0),
+            0,
+        );
+        let space_entry = crate::frame::capabilities::entry_mut(entries, 16, 1).unwrap();
+
+        *space_entry = crate::capability::Entry {
+            object: Some((ObjectType::Space, space_id)),
+            rights: Rights::SPACE_ALL,
+            badge: Badge(0),
+            slot_tag: crate::capability::SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+
+        let sender_ptr = NonNull::from(&mut sender);
+        let field_handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+        let space_handle = crate::capability::Handle {
+            index: 1,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        // Exact-match: badge_low == badge_high == 42.
+        setup_typed_regs(
+            sender_ptr,
+            TypedOperation::FieldSplit as u16,
+            field_handle,
+            [space_handle, 42, 42, 0],
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::FieldSplit, &ks);
+
+        let x0 = read_typed_result(sender_ptr);
+
+        assert_eq!(x0, 0, "D99: exact-match split must succeed");
+
+        // Source Field must route badge 42 to the new sub-Field.
+        let slot1 = crate::frame::capabilities::entry_ref(entries, 16, 1).unwrap();
+        let (_, new_field_id) = slot1.object.unwrap();
+        let fields = ks.fields.acquire();
+        let source = fields.get(source_field_id).unwrap();
+
+        assert_eq!(source.resolve_route(42), Some(new_field_id));
+        assert!(source.resolve_route(41).is_none());
+        assert!(source.resolve_route(43).is_none());
     }
 }
