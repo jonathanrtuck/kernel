@@ -560,6 +560,19 @@ pub fn observer_read_cap_entry(
     unsafe { (*observer_ptr.as_ptr()).with_cap_table(|table| table.read_entry(index)) }
 }
 
+/// Read the full cap table Entry at a slot index (D100).
+///
+/// Used by dispatch_fault to read the handler cap at slot 0 with all
+/// fields (rights, badge, generation) for validate_handler_cap.
+#[cfg(any(target_os = "none", test))]
+pub fn observer_read_full_cap_entry(
+    observer_ptr: NonNull<Observer>,
+    index: u32,
+) -> Option<crate::capability::Entry> {
+    // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy.
+    unsafe { (*observer_ptr.as_ptr()).with_cap_table(|table| table.read_full_entry(index)) }
+}
+
 /// Get a NonNull<Observer> from the arena by ObjectId (D97).
 ///
 /// Used by ObserverInstallCap and ObserverChangeHandler to obtain a
@@ -630,6 +643,51 @@ pub fn observer_write_cap_at(
             index,
             new_entry,
         )
+    }
+}
+
+/// Read the faulting Observer's ObjectId and generation (D100).
+///
+/// Used by dispatch_fault to construct the TransferredCap for the
+/// fault message without resolving the self-cap at slot 2.
+#[cfg(any(target_os = "none", test))]
+pub fn observer_fault_info(observer_ptr: NonNull<Observer>) -> (crate::arena::ObjectId, u64) {
+    // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy.
+    unsafe {
+        let observer = observer_ptr.as_ref();
+
+        (
+            observer.object_id,
+            observer
+                .generation
+                .load(core::sync::atomic::Ordering::Acquire),
+        )
+    }
+}
+
+/// Transition an Observer from Runnable to Faulted (D39, D100).
+///
+/// Returns Ok(()) on success, Err if the transition is invalid.
+#[cfg(any(target_os = "none", test))]
+pub fn observer_set_faulted(
+    observer_ptr: NonNull<Observer>,
+) -> Result<(), crate::observer::ObserverError> {
+    // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy.
+    unsafe { (*observer_ptr.as_ptr()).fault() }
+}
+
+/// Read the faulting Observer's saved PC (D100 diagnostic output).
+///
+/// Returns the ELR_EL1 value saved in RegisterState — the instruction
+/// address at which the fault occurred.
+#[cfg(any(target_os = "none", test))]
+pub fn observer_read_pc(observer_ptr: NonNull<Observer>) -> u64 {
+    // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy.
+    unsafe {
+        let observer = observer_ptr.as_ref();
+        let rs = &*(observer.register_state.as_ptr().as_ptr() as *const RegisterState);
+
+        rs.pc
     }
 }
 
@@ -849,6 +907,7 @@ mod tests {
         write_test_ipc_registers(rs_ptr, &written);
 
         let mut observer = Observer {
+            object_id: crate::arena::ObjectId(0),
             register_state: RegisterStateHandle::new(rs_ptr),
             page_table_root: 0,
             cap_table: NonNull::dangling(),
@@ -895,6 +954,7 @@ mod tests {
         write_test_typed_registers(rs_ptr, &written);
 
         let mut observer = Observer {
+            object_id: crate::arena::ObjectId(0),
             register_state: RegisterStateHandle::new(rs_ptr),
             page_table_root: 0,
             cap_table: NonNull::dangling(),
@@ -926,6 +986,7 @@ mod tests {
 
     fn make_test_observer(rs_ptr: NonNull<u8>) -> Observer {
         Observer {
+            object_id: crate::arena::ObjectId(0),
             register_state: RegisterStateHandle::new(rs_ptr),
             page_table_root: 0,
             cap_table: NonNull::dangling(),

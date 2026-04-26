@@ -221,7 +221,7 @@ pub struct SlotTag(pub u32);
 /// Empty slots have `object: None`. Occupied slots carry the full
 /// capability: target, rights, badge, slot tag, send-once flag, and
 /// stored generation for D67 revocation check.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct Entry {
     /// Target object type and arena identifier. None = empty slot.
     pub object: Option<(ObjectType, ObjectId)>,
@@ -847,6 +847,16 @@ impl Table {
         let (object_type, object_id) = entry.object?;
 
         Some((object_type, object_id, entry.stored_generation))
+    }
+
+    /// Read the full Entry at a slot index (D100).
+    ///
+    /// Returns None if out of bounds. Returns the Entry regardless of
+    /// whether it is occupied — the caller checks `entry.object`.
+    pub fn read_full_entry(&self, index: u32) -> Option<Entry> {
+        let entry = crate::frame::capabilities::entry_ref(self.entries, self.capacity, index)?;
+
+        Some(*entry)
     }
 
     /// Close a capability slot, returning the outcome.

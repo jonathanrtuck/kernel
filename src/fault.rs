@@ -7,6 +7,9 @@
 //! D80: error and fault delivery protocol — how syscall errors reach
 //!      userspace and how hardware faults become IPC messages to handler
 //!      Fields.
+//! D100: fault delivery mechanics — register layout confirmation,
+//!       fault Observer cap construction (5-right subset), and
+//!       kernel-as-root-fault-handler (log + PSCI SYSTEM_OFF).
 
 use crate::capability::{self, Badge, ObjectType, Rights, TransferredCap};
 use crate::field::{self, Field, FieldError};
@@ -90,7 +93,7 @@ impl FaultType {
     /// | RESOURCE_REQUEST   | resource type   | quantity    | 0           | 0       |
     /// | CAP_TABLE_FULL     | 0               | 0           | 0           | 0       |
     /// | HARDWARE_EXCEPTION | ESR_EL1         | ELR_EL1     | FAR_EL1     | 0       |
-    const fn data_words(&self) -> [u64; 4] {
+    pub const fn data_words(&self) -> [u64; 4] {
         match *self {
             FaultType::VmFault {
                 space_slot,

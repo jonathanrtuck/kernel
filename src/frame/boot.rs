@@ -179,6 +179,7 @@ fn create_root_observer(
     let mut observers = ks.observers.acquire();
     let (obs_id, obs) = observers.allocate()?;
 
+    obs.object_id = obs_id;
     obs.register_state =
         RegisterStateHandle::new(NonNull::new(rs_pa as *mut u8).expect("rs_pa must be non-null"));
     obs.page_table_root = page_table_root;

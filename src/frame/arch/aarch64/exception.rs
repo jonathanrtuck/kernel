@@ -191,7 +191,7 @@ extern "C" fn el0_exception_handler(source: u64, esr: u64, far: u64) -> ! {
 /// All others: fault delivery.
 #[cfg(target_os = "none")]
 fn handle_el0_sync<S: crate::time_manager::Scheduler + 'static>(
-    source: u64,
+    _source: u64, // D26: needed once VmFault translation is wired
     esr: u64,
     far: u64,
 ) -> crate::core_manager::DispatchResult {
@@ -239,11 +239,44 @@ fn handle_el0_sync<S: crate::time_manager::Scheduler + 'static>(
             if imm == 0x42 {
                 test_passed()
             } else {
-                fatal_exception_el0(source, esr, far)
+                handle_el0_fault::<S>(esr, far)
             }
         }
-        _ => fatal_exception_el0(source, esr, far),
+        // D100: all other EL0 exceptions → fault delivery.
+        // EC 0x20 = Instruction abort, EC 0x24 = Data abort, plus
+        // alignment faults, FP exceptions, etc.
+        _ => handle_el0_fault::<S>(esr, far),
     }
+}
+
+/// Route an EL0 exception to the fault delivery path (D100).
+///
+/// Constructs a HardwareException FaultType from ESR/ELR/FAR and
+/// delivers it via the Observer's handler Field at slot 0.
+///
+/// D61: data/instruction aborts from EL0 should become VmFault, but
+/// translating FAR → Space slot index + byte offset requires the
+/// Space mapping infrastructure (D26). Until that is wired, all
+/// EL0 faults are delivered as HardwareException with full register
+/// state — the handler has enough information to diagnose and resolve.
+#[cfg(target_os = "none")]
+fn handle_el0_fault<S: crate::time_manager::Scheduler + 'static>(
+    esr: u64,
+    far: u64,
+) -> crate::core_manager::DispatchResult {
+    use crate::core_manager;
+
+    let core = core_manager::current_core_mut::<S>();
+    let ks = crate::frame::kernel_state();
+    let observer = core.current.unwrap();
+    let elr = crate::frame::cores::observer_read_pc(observer);
+    let fault = crate::fault::FaultType::HardwareException {
+        esr_el1: esr,
+        elr_el1: elr,
+        far_el1: far,
+    };
+
+    core.dispatch_fault(fault, ks)
 }
 
 /// Handle an IRQ that arrived while in EL0 (D81, D86).
@@ -301,6 +334,11 @@ fn restore_or_idle(result: crate::core_manager::DispatchResult) -> ! {
             // unmasks IRQs and enters a WFI loop. IRQs arrive through the
             // EL1h vector and are handled by the existing TrapFrame path.
             unsafe { __enter_idle() }
+        }
+        DispatchResult::FatalFault => {
+            // D100: root Observer faulted with no handler. Diagnostics
+            // already printed by dispatch_fault. Terminate the system.
+            super::psci::system_off()
         }
     }
 }

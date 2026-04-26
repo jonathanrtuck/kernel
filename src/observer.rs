@@ -25,6 +25,7 @@
 //!      CNTKCTL_EL1.EL0VCTEN on every context switch.
 //! D67: generation counter for revocation.
 
+use crate::arena::ObjectId;
 use crate::capability;
 use crate::field::Field;
 use core::ptr::NonNull;
@@ -137,6 +138,11 @@ pub enum WaitState {
 /// - Core assignment: transient, re-decided per runnable transition (D31/D56).
 /// - Cache affinity: per-core tracker with decay (D56).
 pub struct Observer {
+    /// Arena slot identifier (D100). Stored on the struct so fault
+    /// delivery can construct the TransferredCap without resolving
+    /// the self-cap at slot 2.
+    pub object_id: ObjectId,
+
     /// Opaque handle to saved register context in structural backing.
     /// Arch core code resolves this for save/restore on context switch.
     pub register_state: RegisterStateHandle,
@@ -423,6 +429,7 @@ impl Observer {
 impl Observer {
     pub(crate) fn test_default() -> Self {
         Observer {
+            object_id: ObjectId(0),
             register_state: RegisterStateHandle::new(NonNull::dangling()),
             page_table_root: 0,
             cap_table: NonNull::dangling(),
@@ -450,7 +457,7 @@ mod tests {
 
     #[test]
     fn observer_layout() {
-        assert_eq!(core::mem::size_of::<Observer>(), 120);
+        assert_eq!(core::mem::size_of::<Observer>(), 128);
     }
 
     #[test]
@@ -467,6 +474,7 @@ mod tests {
     #[test]
     fn precision_is_derived() {
         let observer = Observer {
+            object_id: ObjectId(0),
             register_state: RegisterStateHandle(NonNull::dangling()),
             page_table_root: 0,
             cap_table: NonNull::dangling(),
@@ -492,6 +500,7 @@ mod tests {
     #[test]
     fn resume_from_inert() {
         let mut observer = Observer {
+            object_id: ObjectId(0),
             register_state: RegisterStateHandle(NonNull::dangling()),
             page_table_root: 0,
             cap_table: NonNull::dangling(),
@@ -518,6 +527,7 @@ mod tests {
     #[test]
     fn resume_from_runnable_fails() {
         let mut observer = Observer {
+            object_id: ObjectId(0),
             register_state: RegisterStateHandle(NonNull::dangling()),
             page_table_root: 0,
             cap_table: NonNull::dangling(),
@@ -543,6 +553,7 @@ mod tests {
     #[test]
     fn compute_aggregate_tracking() {
         let mut observer = Observer {
+            object_id: ObjectId(0),
             register_state: RegisterStateHandle(NonNull::dangling()),
             page_table_root: 0,
             cap_table: NonNull::dangling(),
@@ -575,6 +586,7 @@ mod tests {
     #[test]
     fn unblock_while_suspended_transitions_but_signals_no_enqueue() {
         let mut observer = Observer {
+            object_id: ObjectId(0),
             register_state: RegisterStateHandle(NonNull::dangling()),
             page_table_root: 0,
             cap_table: NonNull::dangling(),
@@ -603,6 +615,7 @@ mod tests {
     #[test]
     fn unblock_without_suspension_signals_enqueue() {
         let mut observer = Observer {
+            object_id: ObjectId(0),
             register_state: RegisterStateHandle(NonNull::dangling()),
             page_table_root: 0,
             cap_table: NonNull::dangling(),

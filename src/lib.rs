@@ -1388,6 +1388,7 @@ mod integration_tests {
                 assert_eq!(ptr, ptr_b, "tick 1: B")
             }
             DispatchResult::Idle => panic!("must not idle with 3 observers"),
+            DispatchResult::FatalFault => panic!("unexpected FatalFault"),
         }
         // Timer tick 2: rotates B to tail → pick_next returns C.
         match core.handle_timer(1000, &ks, FREQ) {
@@ -1395,6 +1396,7 @@ mod integration_tests {
                 assert_eq!(ptr, ptr_c, "tick 2: C")
             }
             DispatchResult::Idle => panic!("must not idle"),
+            DispatchResult::FatalFault => panic!("unexpected FatalFault"),
         }
         // Timer tick 3: rotates C to tail → pick_next returns A.
         match core.handle_timer(1000, &ks, FREQ) {
@@ -1402,6 +1404,7 @@ mod integration_tests {
                 assert_eq!(ptr, ptr_a, "tick 3: A")
             }
             DispatchResult::Idle => panic!("must not idle"),
+            DispatchResult::FatalFault => panic!("unexpected FatalFault"),
         }
     }
 
@@ -1483,6 +1486,7 @@ mod integration_tests {
             DispatchResult::Resume(_) | DispatchResult::ResumeFastPath(_) => {
                 panic!("D46: empty run queue must return Idle (WFI)");
             }
+            DispatchResult::FatalFault => panic!("unexpected FatalFault"),
         }
     }
 

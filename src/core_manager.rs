@@ -170,6 +170,9 @@ pub enum DispatchResult {
     ResumeFastPath(NonNull<Observer>),
     /// No runnable Observer on this core — enter idle (D46: WFI).
     Idle,
+    /// D100: root Observer faulted with no handler. The kernel has
+    /// already logged diagnostics. frame/ calls PSCI SYSTEM_OFF.
+    FatalFault,
 }
 
 // ── CoreState methods ──────────────────────────────────────────────
@@ -1923,6 +1926,7 @@ impl<S: Scheduler> CoreState<S> {
                         Err(_) => return typed_error(SyscallError::InsufficientResource),
                     };
 
+                    obs.object_id = id;
                     obs.register_state = crate::observer::RegisterStateHandle::new(rs_ptr);
                     obs.page_table_root = 0;
                     obs.cap_table = cap_entries_new;
@@ -2207,6 +2211,131 @@ impl<S: Scheduler> CoreState<S> {
             None => DispatchResult::Idle,
         }
     }
+
+    // ── Fault delivery (D100) ────────────────────────────────────────
+
+    /// Deliver a fault to the current Observer's handler Field (D100).
+    ///
+    /// D68/D100: HandlerUnavailable for the root Observer means the
+    /// system has no recovery path — returns FatalFault so frame/ can
+    /// call PSCI SYSTEM_OFF. Observer transitions to Faulted (D39)
+    /// before delivery so it cannot be re-scheduled during the fault.
+    #[cfg(any(target_os = "none", test))]
+    pub fn dispatch_fault(
+        &mut self,
+        fault: crate::fault::FaultType,
+        kernel_state: &KernelState,
+    ) -> DispatchResult {
+        let observer_ptr = match self.current {
+            Some(ptr) => ptr,
+            None => return DispatchResult::Idle,
+        };
+        let (observer_id, observer_generation) =
+            crate::frame::cores::observer_fault_info(observer_ptr);
+        let handler_entry = match crate::frame::cores::observer_read_full_cap_entry(
+            observer_ptr,
+            crate::capability::SLOT_FAULT_HANDLER,
+        ) {
+            Some(e) => e,
+            None => return self.fatal_fault(observer_ptr, &fault),
+        };
+        // Need handler Field's ObjectId for the arena lookup below.
+        let obj_id = match handler_entry.object {
+            Some((_obj_type, id)) => id,
+            None => return self.fatal_fault(observer_ptr, &fault),
+        };
+
+        if crate::frame::cores::observer_set_faulted(observer_ptr).is_err() {
+            return self.fatal_fault(observer_ptr, &fault);
+        }
+
+        // Single lock scope: validate generation and deliver atomically.
+        let mut fields = kernel_state.fields.acquire();
+        let live_gen = match fields.get(obj_id) {
+            Some(f) => f.generation.load(Ordering::Acquire),
+            None => {
+                drop(fields);
+
+                return self.fatal_fault(observer_ptr, &fault);
+            }
+        };
+        let (handler_field_id, handler_badge) =
+            match crate::fault::validate_handler_cap(&handler_entry, live_gen) {
+                Some(pair) => pair,
+                None => {
+                    drop(fields);
+
+                    return self.fatal_fault(observer_ptr, &fault);
+                }
+            };
+        let handler_field = match fields.get_mut(handler_field_id) {
+            Some(f) => f,
+            None => {
+                drop(fields);
+
+                return self.fatal_fault(observer_ptr, &fault);
+            }
+        };
+        let outcome = crate::fault::deliver_fault(
+            fault,
+            handler_field,
+            handler_badge,
+            observer_id,
+            observer_generation,
+        );
+
+        drop(fields);
+
+        match outcome {
+            crate::fault::FaultDeliveryOutcome::Enqueued => self.schedule_next(),
+            crate::fault::FaultDeliveryOutcome::WokeReceiver(receiver_ptr, message) => {
+                Self::deliver_message(receiver_ptr, &message);
+                self.scheduler.enqueue(receiver_ptr);
+                self.schedule_next()
+            }
+            crate::fault::FaultDeliveryOutcome::Deferred => {
+                // D18: the faulting Observer should be linked into the
+                // handler Field's pending list. Pending list linkage is
+                // not yet wired — the fault stays deferred until the
+                // handler Field drains a slot.
+                self.schedule_next()
+            }
+            crate::fault::FaultDeliveryOutcome::HandlerUnavailable => {
+                self.fatal_fault(observer_ptr, &fault)
+            }
+        }
+    }
+
+    /// D68 chain terminus: no handler available, system has no recovery path.
+    #[cfg(any(target_os = "none", test))]
+    #[cfg_attr(not(target_os = "none"), allow(unused_variables))]
+    fn fatal_fault(
+        &self,
+        observer_ptr: NonNull<Observer>,
+        fault: &crate::fault::FaultType,
+    ) -> DispatchResult {
+        #[cfg(target_os = "none")]
+        {
+            let pc = crate::frame::cores::observer_read_pc(observer_ptr);
+            let data = fault.data_words();
+            let label = fault.label();
+
+            crate::println!();
+            crate::println!("FATAL FAULT: handler unavailable (D68/D100)");
+            crate::println!("  label: 0x{label:016x}");
+            crate::println!(
+                "  data:  [{:016x}, {:016x}, {:016x}, {:016x}]",
+                data[0],
+                data[1],
+                data[2],
+                data[3]
+            );
+            crate::println!("  PC:    0x{pc:016x}");
+            crate::println!();
+        }
+
+        DispatchResult::FatalFault
+    }
 }
 
 // ── Creation-path helpers (D95, D32) ────────────────────────────────
@@ -2437,6 +2566,7 @@ mod tests {
                 );
             }
             DispatchResult::Idle => panic!("must resume when run queue is non-empty"),
+            DispatchResult::FatalFault => panic!("unexpected FatalFault"),
         }
     }
 
@@ -2464,6 +2594,7 @@ mod tests {
                 );
             }
             DispatchResult::Idle => panic!("must resume after timer with runnable Observers"),
+            DispatchResult::FatalFault => panic!("unexpected FatalFault"),
         }
     }
 
@@ -2498,6 +2629,7 @@ mod tests {
                 );
             }
             DispatchResult::Idle => panic!("must resume the single runnable Observer"),
+            DispatchResult::FatalFault => panic!("unexpected FatalFault"),
         }
     }
 
@@ -2527,6 +2659,7 @@ mod tests {
             DispatchResult::Idle => {
                 panic!("must not idle with current Observer and runnable queue")
             }
+            DispatchResult::FatalFault => panic!("unexpected FatalFault"),
         }
     }
 
@@ -2558,6 +2691,7 @@ mod tests {
             DispatchResult::Idle => {
                 panic!("D48: Yield with runnable Observer in queue must not Idle")
             }
+            DispatchResult::FatalFault => panic!("unexpected FatalFault"),
         }
     }
 
@@ -2601,6 +2735,7 @@ mod tests {
                 assert_eq!(resumed, ptr, "handle_irq must schedule_next after handling");
             }
             DispatchResult::Idle => panic!("handle_irq with runnable Observer must not Idle"),
+            DispatchResult::FatalFault => panic!("unexpected FatalFault"),
         }
     }
 
@@ -2631,6 +2766,7 @@ mod tests {
                     );
                 }
                 DispatchResult::Idle => panic!("timer tick {i}: must not Idle with 3 Observers"),
+                DispatchResult::FatalFault => panic!("unexpected FatalFault"),
             }
         }
     }
@@ -2711,6 +2847,7 @@ mod tests {
                 DispatchResult::ResumeFastPath(_) => {
                     panic!("tick {i}: timer must not use fast path")
                 }
+                DispatchResult::FatalFault => panic!("unexpected FatalFault"),
             }
         }
     }
@@ -2757,6 +2894,7 @@ mod tests {
             DispatchResult::ResumeFastPath(_) => {
                 panic!("D76: Yield must not use fast path")
             }
+            DispatchResult::FatalFault => panic!("unexpected FatalFault"),
         }
     }
 
@@ -3548,6 +3686,7 @@ mod tests {
         let rs_ptr = crate::frame::cores::alloc_test_register_state();
 
         Observer {
+            object_id: ObjectId(0),
             register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
             page_table_root: 0,
             cap_table: NonNull::dangling(),
@@ -4370,6 +4509,7 @@ mod tests {
         };
 
         let observer = Observer {
+            object_id: ObjectId(0),
             register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
             page_table_root: 0,
             cap_table: entries,
@@ -6083,6 +6223,7 @@ mod tests {
             DispatchResult::Idle => {
                 panic!("D50: Call with a waiter must not return Idle");
             }
+            DispatchResult::FatalFault => panic!("unexpected FatalFault"),
         }
 
         // Sender must be dequeued (D16: Call always blocks the sender).
@@ -6595,6 +6736,7 @@ mod tests {
         crate::frame::capabilities::init_freelist(entries, 16, crate::capability::SLOT_USER_START);
 
         let mut receiver = Observer {
+            object_id: ObjectId(0),
             register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
             page_table_root: 0,
             cap_table: entries,
@@ -6658,6 +6800,7 @@ mod tests {
         let entries = crate::frame::capabilities::alloc_test_entries(4);
         // No freelist initialized — free_head is None.
         let mut receiver = Observer {
+            object_id: ObjectId(0),
             register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
             page_table_root: 0,
             cap_table: entries,
@@ -6703,6 +6846,7 @@ mod tests {
         crate::frame::capabilities::init_freelist(entries, 16, crate::capability::SLOT_USER_START);
 
         let mut receiver = Observer {
+            object_id: ObjectId(0),
             register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
             page_table_root: 0,
             cap_table: entries,
@@ -6751,6 +6895,7 @@ mod tests {
         crate::frame::capabilities::init_freelist(entries, 16, crate::capability::SLOT_USER_START);
 
         let mut receiver = Observer {
+            object_id: ObjectId(0),
             register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
             page_table_root: 0,
             cap_table: entries,
@@ -6850,6 +6995,7 @@ mod tests {
     fn test_d96_deliver_message_no_caps_writes_absent() {
         let rs_ptr = crate::frame::cores::alloc_test_register_state();
         let mut receiver = Observer {
+            object_id: ObjectId(0),
             register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
             page_table_root: 0,
             cap_table: NonNull::dangling(),
@@ -6916,6 +7062,7 @@ mod tests {
         );
 
         let mut receiver = Observer {
+            object_id: ObjectId(0),
             register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
             page_table_root: 0,
             cap_table: receiver_entries,
@@ -6974,6 +7121,7 @@ mod tests {
         );
 
         let mut receiver = Observer {
+            object_id: ObjectId(0),
             register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
             page_table_root: 0,
             cap_table: receiver_entries,
@@ -6995,6 +7143,7 @@ mod tests {
         let receiver_ptr = NonNull::from(&mut receiver);
         let sender_rs = crate::frame::cores::alloc_test_register_state();
         let mut sender = Observer {
+            object_id: ObjectId(0),
             register_state: crate::observer::RegisterStateHandle::new(sender_rs),
             page_table_root: 0,
             cap_table: NonNull::dangling(),
@@ -7086,6 +7235,7 @@ mod tests {
         );
 
         let mut receiver = Observer {
+            object_id: ObjectId(0),
             register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
             page_table_root: 0,
             cap_table: receiver_entries,
@@ -7107,6 +7257,7 @@ mod tests {
         let receiver_ptr = NonNull::from(&mut receiver);
         let sender_rs = crate::frame::cores::alloc_test_register_state();
         let mut sender = Observer {
+            object_id: ObjectId(0),
             register_state: crate::observer::RegisterStateHandle::new(sender_rs),
             page_table_root: 0,
             cap_table: NonNull::dangling(),
@@ -7189,6 +7340,7 @@ mod tests {
         crate::frame::capabilities::init_freelist(entries, 8, crate::capability::SLOT_USER_START);
 
         let mut receiver = Observer {
+            object_id: ObjectId(0),
             register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
             page_table_root: 0,
             cap_table: entries,
@@ -7376,6 +7528,7 @@ mod tests {
         };
 
         let mut sender = Observer {
+            object_id: ObjectId(0),
             register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
             page_table_root: 0,
             cap_table: entries,
@@ -7554,6 +7707,7 @@ mod tests {
         };
 
         let mut sender = Observer {
+            object_id: ObjectId(0),
             register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
             page_table_root: 0,
             cap_table: entries,
@@ -7773,6 +7927,7 @@ mod tests {
                 crate::capability::SLOT_USER_START,
             );
 
+            obs.object_id = id;
             obs.register_state = crate::observer::RegisterStateHandle::new(rs);
             obs.cap_table = cap_entries;
             obs.cap_table_capacity = 16;
@@ -7813,6 +7968,7 @@ mod tests {
         };
 
         let mut sender = Observer {
+            object_id: ObjectId(0),
             register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
             page_table_root: 0,
             cap_table: entries,
@@ -7922,6 +8078,7 @@ mod tests {
                 stored_generation: 0,
             };
 
+            obs.object_id = id;
             obs.register_state = crate::observer::RegisterStateHandle::new(rs);
             obs.cap_table = cap_entries;
             obs.cap_table_capacity = 16;
@@ -7962,6 +8119,7 @@ mod tests {
         };
 
         let mut sender = Observer {
+            object_id: ObjectId(0),
             register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
             page_table_root: 0,
             cap_table: entries,
@@ -8045,6 +8203,7 @@ mod tests {
                 crate::capability::SLOT_USER_START,
             );
 
+            obs.object_id = id;
             obs.register_state = crate::observer::RegisterStateHandle::new(rs);
             obs.cap_table = cap_entries;
             obs.cap_table_capacity = 16;
@@ -8096,6 +8255,7 @@ mod tests {
         };
 
         let mut sender = Observer {
+            object_id: ObjectId(0),
             register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
             page_table_root: 0,
             cap_table: entries,
@@ -8665,5 +8825,399 @@ mod tests {
         assert_eq!(source.resolve_route(42), Some(new_field_id));
         assert!(source.resolve_route(41).is_none());
         assert!(source.resolve_route(43).is_none());
+    }
+
+    // ── D100 fault delivery mechanics ─────────────────────────────────
+
+    /// Helper: create an Observer with registers AND a cap table.
+    /// Optionally installs a handler cap at slot 0 pointing to the given Field.
+    fn make_observer_with_handler(handler_field_id: Option<(ObjectId, u64)>) -> Observer {
+        let rs_ptr = crate::frame::cores::alloc_test_register_state();
+        let cap_capacity = 8u32;
+        let entries =
+            crate::frame::capabilities::allocate_cap_table(cap_capacity).expect("cap table alloc");
+        let mut obs = Observer {
+            object_id: ObjectId(42),
+            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
+            page_table_root: 0,
+            cap_table: entries,
+            cap_table_capacity: cap_capacity,
+            cap_table_free_head: Some(crate::capability::SLOT_USER_START),
+            cap_table_count: 0,
+            state: crate::observer::PrimaryState::Runnable,
+            suspended: false,
+            compute_aggregate: 100,
+            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
+            throughput: crate::observer::DEFAULT_THROUGHPUT,
+            clock_access: false,
+            wait_state: crate::observer::WaitState::None,
+            backing_va_base: 0,
+            backing_size: 0,
+            refcount: 1,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+
+        if let Some((field_id, field_gen)) = handler_field_id {
+            let handler_entry = crate::capability::Entry {
+                object: Some((ObjectType::Field, field_id)),
+                rights: Rights::SEND,
+                badge: Badge(0xFA17),
+                slot_tag: crate::capability::SlotTag(0),
+                send_once: false,
+                stored_generation: field_gen,
+            };
+            let ptr = NonNull::from(&mut obs);
+
+            crate::frame::cores::observer_write_cap_at(
+                ptr,
+                crate::capability::SLOT_FAULT_HANDLER,
+                handler_entry,
+            );
+        }
+
+        obs
+    }
+
+    /// D100: dispatch_fault with no handler cap → FatalFault.
+    #[test]
+    fn test_d100_dispatch_fault_no_handler_returns_fatal() {
+        let ks = make_kernel_state();
+        let mut core = make_core_state();
+        let mut obs = make_observer_with_handler(None);
+        let ptr = NonNull::from(&mut obs);
+
+        core.current = Some(ptr);
+        core.scheduler.enqueue(ptr);
+
+        let fault = crate::fault::FaultType::HardwareException {
+            esr_el1: 0x8200_0000,
+            elr_el1: 0x4000,
+            far_el1: 0xDEAD,
+        };
+        let result = core.dispatch_fault(fault, &ks);
+
+        assert!(
+            matches!(result, DispatchResult::FatalFault),
+            "D100: no handler must produce FatalFault"
+        );
+    }
+
+    /// D100: dispatch_fault with valid handler → Enqueued, Observer Faulted.
+    #[test]
+    fn test_d100_dispatch_fault_valid_handler_enqueues() {
+        let ks = make_kernel_state();
+        let field_id = make_field_in_arena(&ks, 8);
+        let mut core = make_core_state();
+        let mut obs = make_observer_with_handler(Some((field_id, 0)));
+        let ptr = NonNull::from(&mut obs);
+
+        core.current = Some(ptr);
+
+        let fault = crate::fault::FaultType::VmFault {
+            space_slot: 1,
+            byte_offset: 0x1000,
+            access: crate::fault::AccessType::Read,
+        };
+        let result = core.dispatch_fault(fault, &ks);
+
+        // Observer transitions to Faulted.
+        assert!(
+            matches!(obs.state, crate::observer::PrimaryState::Faulted),
+            "D100/D39: Observer must be Faulted after dispatch_fault"
+        );
+
+        // Fault message enqueued in handler Field.
+        let fields = ks.fields.acquire();
+        let handler = fields.get(field_id).unwrap();
+
+        assert_eq!(
+            handler.queue_length, 1,
+            "D100: fault message must be enqueued"
+        );
+        // Result must be Idle or Resume (schedule_next with empty run queue).
+        assert!(
+            matches!(result, DispatchResult::Idle),
+            "D100: schedule_next with empty queue must return Idle"
+        );
+    }
+
+    /// D100: enqueued fault message carries correct label and data words.
+    #[test]
+    fn test_d100_fault_message_has_correct_content() {
+        let ks = make_kernel_state();
+        let field_id = make_field_in_arena(&ks, 8);
+        let mut core = make_core_state();
+        let mut obs = make_observer_with_handler(Some((field_id, 0)));
+        let ptr = NonNull::from(&mut obs);
+
+        core.current = Some(ptr);
+
+        let fault = crate::fault::FaultType::HardwareException {
+            esr_el1: 0x8200_0000,
+            elr_el1: 0xFFFF_0000_0040_0000,
+            far_el1: 0xDEAD_BEEF,
+        };
+
+        core.dispatch_fault(fault, &ks);
+
+        let mut fields = ks.fields.acquire();
+        let handler = fields.get_mut(field_id).unwrap();
+        let msg = handler.dequeue().unwrap();
+
+        assert_eq!(msg.label, crate::field::LABEL_HARDWARE_EXCEPTION);
+        assert_eq!(msg.data[0], 0x8200_0000, "D100: data[0] = ESR_EL1");
+        assert_eq!(
+            msg.data[1], 0xFFFF_0000_0040_0000,
+            "D100: data[1] = ELR_EL1"
+        );
+        assert_eq!(msg.data[2], 0xDEAD_BEEF, "D100: data[2] = FAR_EL1");
+        assert_eq!(msg.data[3], 0, "D100: data[3] = 0");
+        assert_eq!(msg.badge, Badge(0xFA17), "D100: badge from handler cap");
+        assert!(msg.reply_cap.is_none(), "D100: no reply cap on fault");
+    }
+
+    /// D100: fault message carries Observer cap with FAULT_OBSERVER rights.
+    #[test]
+    fn test_d100_fault_message_carries_observer_cap() {
+        let ks = make_kernel_state();
+        let field_id = make_field_in_arena(&ks, 8);
+        let mut core = make_core_state();
+        let mut obs = make_observer_with_handler(Some((field_id, 0)));
+        let ptr = NonNull::from(&mut obs);
+
+        core.current = Some(ptr);
+
+        let fault = crate::fault::FaultType::CapTableFull;
+
+        core.dispatch_fault(fault, &ks);
+
+        let mut fields = ks.fields.acquire();
+        let handler = fields.get_mut(field_id).unwrap();
+        let msg = handler.dequeue().unwrap();
+        let cap = msg
+            .user_cap
+            .expect("D100: fault message must carry Observer cap");
+
+        assert_eq!(cap.object_type, ObjectType::Observer);
+        assert_eq!(cap.object_id, ObjectId(42), "D100: cap ID matches Observer");
+        assert_eq!(cap.rights, Rights::FAULT_OBSERVER, "D100: exactly 5 rights");
+        assert_eq!(cap.stored_generation, 0);
+    }
+
+    /// D100: stale handler cap (generation mismatch) → FatalFault.
+    #[test]
+    fn test_d100_stale_handler_cap_returns_fatal() {
+        let ks = make_kernel_state();
+        let field_id = make_field_in_arena(&ks, 8);
+
+        {
+            let mut fields = ks.fields.acquire();
+
+            fields
+                .get_mut(field_id)
+                .unwrap()
+                .generation
+                .store(1, core::sync::atomic::Ordering::Release);
+        }
+
+        let mut core = make_core_state();
+        // handler_field_gen=0 but live gen=1 → stale.
+        let mut obs = make_observer_with_handler(Some((field_id, 0)));
+        let ptr = NonNull::from(&mut obs);
+
+        core.current = Some(ptr);
+        core.scheduler.enqueue(ptr);
+
+        let fault = crate::fault::FaultType::CapTableFull;
+        let result = core.dispatch_fault(fault, &ks);
+
+        assert!(
+            matches!(result, DispatchResult::FatalFault),
+            "D100: stale handler must produce FatalFault"
+        );
+    }
+
+    /// D100: handler Field queue full → Deferred → schedule_next.
+    #[test]
+    fn test_d100_full_handler_queue_defers() {
+        let ks = make_kernel_state();
+        let field_id = make_field_in_arena(&ks, 1);
+
+        {
+            let mut fields = ks.fields.acquire();
+
+            fields
+                .get_mut(field_id)
+                .unwrap()
+                .enqueue(crate::field::Message::timer_fire(Badge(0), 0, 0))
+                .unwrap();
+        }
+
+        let mut core = make_core_state();
+        let mut obs = make_observer_with_handler(Some((field_id, 0)));
+        let ptr = NonNull::from(&mut obs);
+
+        core.current = Some(ptr);
+
+        let fault = crate::fault::FaultType::ResourceRequest {
+            resource: crate::fault::ResourceType::Space,
+            quantity: 4,
+        };
+        let result = core.dispatch_fault(fault, &ks);
+
+        assert!(
+            matches!(obs.state, crate::observer::PrimaryState::Faulted),
+            "D100: Observer must be Faulted even on deferred delivery"
+        );
+        assert!(
+            matches!(result, DispatchResult::Idle),
+            "D100: deferred delivery returns schedule_next result"
+        );
+    }
+
+    /// D100: all four fault types deliver through dispatch_fault.
+    #[test]
+    fn test_d100_all_fault_types_dispatch() {
+        let faults: [crate::fault::FaultType; 4] = [
+            crate::fault::FaultType::VmFault {
+                space_slot: 0,
+                byte_offset: 0,
+                access: crate::fault::AccessType::Read,
+            },
+            crate::fault::FaultType::ResourceRequest {
+                resource: crate::fault::ResourceType::Space,
+                quantity: 1,
+            },
+            crate::fault::FaultType::CapTableFull,
+            crate::fault::FaultType::HardwareException {
+                esr_el1: 0,
+                elr_el1: 0,
+                far_el1: 0,
+            },
+        ];
+
+        for fault in faults {
+            let ks = make_kernel_state();
+            let field_id = make_field_in_arena(&ks, 8);
+            let mut core = make_core_state();
+            let mut obs = make_observer_with_handler(Some((field_id, 0)));
+            let ptr = NonNull::from(&mut obs);
+
+            core.current = Some(ptr);
+
+            core.dispatch_fault(fault, &ks);
+
+            let fields = ks.fields.acquire();
+
+            assert_eq!(
+                fields.get(field_id).unwrap().queue_length,
+                1,
+                "D100: fault message must be enqueued for all types"
+            );
+            assert!(matches!(obs.state, crate::observer::PrimaryState::Faulted));
+        }
+    }
+
+    /// D100: Observer's object_id is used in the fault cap (not hardcoded).
+    #[test]
+    fn test_d100_fault_cap_uses_observer_object_id() {
+        let ks = make_kernel_state();
+        let field_id = make_field_in_arena(&ks, 8);
+        let mut core = make_core_state();
+        let mut obs = make_observer_with_handler(Some((field_id, 0)));
+
+        // Set a distinctive ObjectId.
+        obs.object_id = ObjectId(99);
+
+        let ptr = NonNull::from(&mut obs);
+
+        core.current = Some(ptr);
+
+        core.dispatch_fault(crate::fault::FaultType::CapTableFull, &ks);
+
+        let mut fields = ks.fields.acquire();
+        let handler = fields.get_mut(field_id).unwrap();
+        let msg = handler.dequeue().unwrap();
+        let cap = msg.user_cap.unwrap();
+
+        assert_eq!(
+            cap.object_id,
+            ObjectId(99),
+            "D100: fault cap must carry the Observer's arena ObjectId"
+        );
+    }
+
+    /// D100: fault cap generation matches Observer's current generation.
+    #[test]
+    fn test_d100_fault_cap_uses_observer_generation() {
+        let ks = make_kernel_state();
+        let field_id = make_field_in_arena(&ks, 8);
+        let mut core = make_core_state();
+        let mut obs = make_observer_with_handler(Some((field_id, 0)));
+
+        obs.generation = core::sync::atomic::AtomicU64::new(7);
+
+        let ptr = NonNull::from(&mut obs);
+
+        core.current = Some(ptr);
+
+        core.dispatch_fault(crate::fault::FaultType::CapTableFull, &ks);
+
+        let mut fields = ks.fields.acquire();
+        let handler = fields.get_mut(field_id).unwrap();
+        let msg = handler.dequeue().unwrap();
+        let cap = msg.user_cap.unwrap();
+
+        assert_eq!(
+            cap.stored_generation, 7,
+            "D100: fault cap generation must match Observer's current generation"
+        );
+    }
+
+    /// D100: dispatch_fault with no current Observer returns Idle.
+    #[test]
+    fn test_d100_dispatch_fault_no_current_returns_idle() {
+        let ks = make_kernel_state();
+        let mut core = make_core_state();
+
+        core.current = None;
+
+        let fault = crate::fault::FaultType::CapTableFull;
+        let result = core.dispatch_fault(fault, &ks);
+
+        assert!(
+            matches!(result, DispatchResult::Idle),
+            "D100: no current Observer must return Idle"
+        );
+    }
+
+    /// D100: VmFault data word layout matches D61 table.
+    #[test]
+    fn test_d100_vm_fault_data_layout_in_dispatch() {
+        let ks = make_kernel_state();
+        let field_id = make_field_in_arena(&ks, 8);
+        let mut core = make_core_state();
+        let mut obs = make_observer_with_handler(Some((field_id, 0)));
+        let ptr = NonNull::from(&mut obs);
+
+        core.current = Some(ptr);
+
+        let fault = crate::fault::FaultType::VmFault {
+            space_slot: 3,
+            byte_offset: 0x4000,
+            access: crate::fault::AccessType::Execute,
+        };
+
+        core.dispatch_fault(fault, &ks);
+
+        let mut fields = ks.fields.acquire();
+        let handler = fields.get_mut(field_id).unwrap();
+        let msg = handler.dequeue().unwrap();
+
+        assert_eq!(msg.label, crate::field::LABEL_VM_FAULT);
+        assert_eq!(msg.data[0], 3, "D100: data[0] = space slot");
+        assert_eq!(msg.data[1], 0x4000, "D100: data[1] = byte offset");
+        assert_eq!(msg.data[2], 2, "D100: data[2] = Execute");
+        assert_eq!(msg.data[3], 0, "D100: data[3] = 0");
     }
 }
