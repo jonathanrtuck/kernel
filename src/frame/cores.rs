@@ -560,6 +560,79 @@ pub fn observer_read_cap_entry(
     unsafe { (*observer_ptr.as_ptr()).with_cap_table(|table| table.read_entry(index)) }
 }
 
+/// Get a NonNull<Observer> from the arena by ObjectId (D97).
+///
+/// Used by ObserverInstallCap and ObserverChangeHandler to obtain a
+/// pointer to the target Observer for cap table mutation. The pointer
+/// is valid while the arena lock is not held (the Observer's arena
+/// slot persists until free() is called).
+#[cfg(any(target_os = "none", test))]
+pub fn observer_ptr_from_arena(
+    kernel_state: &crate::kernel_state::KernelState,
+    object_id: crate::arena::ObjectId,
+) -> Option<NonNull<Observer>> {
+    let mut observers = kernel_state.observers.acquire();
+    let observer = observers.get_mut(object_id)?;
+
+    Some(NonNull::from(&mut *observer))
+}
+
+// ── Cap table self-mutation helpers (D97) ─────────────────────────
+//
+// Unsafe pointer wrappers for D97 cap-table-mutating typed operations.
+// Clone, Close, Mint operate on the caller's own table. InstallCap and
+// ChangeHandler operate on a target Observer's table.
+
+/// Close a capability slot in an Observer's cap table (D97, D11).
+/// Delegates to Table::close. Returns the CloseResult indicating what
+/// was closed (or AlreadyEmpty if the slot was free).
+#[cfg(any(target_os = "none", test))]
+pub fn observer_close_cap(
+    observer_ptr: NonNull<Observer>,
+    index: u32,
+) -> crate::capability::CloseResult {
+    // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy.
+    unsafe { (*observer_ptr.as_ptr()).with_cap_table(|table| table.close(index)) }
+}
+
+/// Check whether an Observer's cap table holds any cap to a specific
+/// (type, id) pair, excluding one slot index.
+#[cfg(any(target_os = "none", test))]
+pub fn observer_has_cap_to_object(
+    observer_ptr: NonNull<Observer>,
+    target_type: crate::capability::ObjectType,
+    target_id: crate::arena::ObjectId,
+    exclude_index: u32,
+) -> bool {
+    // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy.
+    unsafe {
+        (*observer_ptr.as_ptr())
+            .with_cap_table(|table| table.has_cap_to_object(target_type, target_id, exclude_index))
+    }
+}
+
+/// D97: write a cap entry at a specific slot in an Observer's cap table.
+/// Used by ObserverChangeHandler to overwrite SLOT_FAULT_HANDLER.
+/// Returns true if the write succeeded (index in bounds).
+#[cfg(any(target_os = "none", test))]
+pub fn observer_write_cap_at(
+    observer_ptr: NonNull<Observer>,
+    index: u32,
+    new_entry: crate::capability::Entry,
+) -> bool {
+    // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy.
+    unsafe {
+        let observer = &*observer_ptr.as_ptr();
+
+        crate::frame::capabilities::write_entry(
+            observer.cap_table,
+            observer.cap_table_capacity,
+            index,
+            new_entry,
+        )
+    }
+}
+
 // ── Observer restore helpers for EL0 exception exit ─────────────
 
 /// Extract the restore parameters for an Observer (D74, D76).

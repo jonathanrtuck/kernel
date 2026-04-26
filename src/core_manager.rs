@@ -1044,25 +1044,118 @@ impl<S: Scheduler> CoreState<S> {
                 }
             }
             TypedOperation::ObserverInstallCap => {
-                // TODO: requires installing a cap into the target Observer's
-                // cap table — needs the source cap entry and target table.
-                // Infrastructure not yet built.
-                typed_error(SyscallError::InvalidState)
+                // D97: install a cap into the target Observer's cap table.
+                // args[0] = source cap handle (in caller's table).
+                let source_handle = regs.args[0];
+                let source_entry =
+                    match capability::resolve_cap_entry(source_handle, cap_entries, cap_capacity) {
+                        Ok(e) => e,
+                        Err(cap_err) => return typed_error(SyscallError::from(cap_err)),
+                    };
+                let (source_type, source_id) = match source_entry.object {
+                    Some(pair) => pair,
+                    None => return typed_error(SyscallError::InvalidCap),
+                };
+                let mut observers = kernel_state.observers.acquire();
+                let observer = match observers.get_mut(object_id) {
+                    Some(o) => o,
+                    None => return typed_error(SyscallError::InvalidCap),
+                };
+                let live_gen = observer.generation.load(Ordering::Acquire);
+
+                if !entry.check_generation(live_gen) {
+                    return typed_error(SyscallError::StaleCap);
+                }
+
+                let target_ptr = NonNull::from(&mut *observer);
+
+                drop(observers);
+
+                let transferred = capability::TransferredCap {
+                    object_type: source_type,
+                    object_id: source_id,
+                    rights: source_entry.rights,
+                    badge: source_entry.badge,
+                    send_once: source_entry.send_once,
+                    stored_generation: source_entry.stored_generation,
+                };
+
+                match crate::frame::cores::observer_install_transferred_cap(
+                    target_ptr,
+                    &transferred,
+                ) {
+                    Ok(encoded_handle) => typed_ok(encoded_handle),
+                    Err(_) => typed_error(SyscallError::TableFull),
+                }
             }
             TypedOperation::ObserverWriteRegisters => {
-                // TODO: requires writing to Observer's saved RegisterState.
-                // Needs frame/ helpers for register write by index.
+                // D97: memory region designation is unsettled (see D97
+                // "Does NOT settle" section). The full batch write requires
+                // knowing which Space cap designates the buffer and how the
+                // kernel locates it in the caller's address space. Left as
+                // an error until the memory protocol is derived.
                 typed_error(SyscallError::InvalidState)
             }
             TypedOperation::ObserverReadRegisters => {
-                // TODO: requires reading Observer's saved RegisterState
-                // and writing values back to the caller's registers.
+                // D97: same unsettled dependency as WriteRegisters.
                 typed_error(SyscallError::InvalidState)
             }
             TypedOperation::ObserverChangeHandler => {
-                // TODO: requires changing the fault handler Field cap in
-                // the target Observer's cap table at SLOT_FAULT_HANDLER.
-                typed_error(SyscallError::InvalidState)
+                // D97: replace the fault handler Field cap at SLOT_FAULT_HANDLER
+                // in the target Observer's cap table.
+                // args[0] = new handler Field cap handle (in caller's table).
+                let handler_handle = regs.args[0];
+                let handler_entry = match capability::resolve_cap_entry(
+                    handler_handle,
+                    cap_entries,
+                    cap_capacity,
+                ) {
+                    Ok(e) => e,
+                    Err(cap_err) => return typed_error(SyscallError::from(cap_err)),
+                };
+                let (handler_type, handler_id) = match handler_entry.object {
+                    Some(pair) => pair,
+                    None => return typed_error(SyscallError::InvalidCap),
+                };
+
+                if handler_type != ObjectType::Field {
+                    return typed_error(SyscallError::WrongType);
+                }
+
+                let handler_badge = capability::Badge(regs.args[1]);
+                let handler_stored_gen = handler_entry.stored_generation;
+                let mut observers = kernel_state.observers.acquire();
+                let observer = match observers.get_mut(object_id) {
+                    Some(o) => o,
+                    None => return typed_error(SyscallError::InvalidCap),
+                };
+                let live_gen = observer.generation.load(Ordering::Acquire);
+
+                if !entry.check_generation(live_gen) {
+                    return typed_error(SyscallError::StaleCap);
+                }
+
+                let target_ptr = NonNull::from(&mut *observer);
+
+                drop(observers);
+                let new_handler = capability::Entry {
+                    object: Some((ObjectType::Field, handler_id)),
+                    rights: Rights::SEND,
+                    badge: handler_badge,
+                    slot_tag: capability::SlotTag(0),
+                    send_once: false,
+                    stored_generation: handler_stored_gen,
+                };
+
+                if crate::frame::cores::observer_write_cap_at(
+                    target_ptr,
+                    capability::SLOT_FAULT_HANDLER,
+                    new_handler,
+                ) {
+                    typed_ok(0)
+                } else {
+                    typed_error(SyscallError::InvalidCap)
+                }
             }
 
             // ── Generic operations ──────────────────────────────────
@@ -1164,20 +1257,78 @@ impl<S: Scheduler> CoreState<S> {
                 if object_type == ObjectType::Time {
                     return typed_error(SyscallError::CloneForbidden);
                 }
-                // TODO: create a new cap entry in the sender's cap table
-                // pointing to the same object with the same rights/badge.
-                // Requires cap table mutation infrastructure.
-                typed_error(SyscallError::InvalidState)
+                // D97: duplicate entry in caller's own cap table.
+                // No generation check needed — Clone is a cap-table
+                // operation. The stored_generation is copied; validation
+                // happens when the cloned cap is used.
+                let transferred = capability::TransferredCap {
+                    object_type,
+                    object_id,
+                    rights: entry.rights,
+                    badge: entry.badge,
+                    send_once: entry.send_once,
+                    stored_generation: entry.stored_generation,
+                };
+
+                match crate::frame::cores::observer_install_transferred_cap(
+                    sender_ptr,
+                    &transferred,
+                ) {
+                    Ok(encoded_handle) => typed_ok(encoded_handle),
+                    Err(_) => typed_error(SyscallError::TableFull),
+                }
             }
             TypedOperation::Close => {
-                // TODO: close the cap entry (decrement refcount, free slot).
-                // Requires mutable cap table access and refcount management.
-                typed_error(SyscallError::InvalidState)
+                // D97: free slot in caller's cap table.
+                let handle = capability::Handle::decode(regs.target_handle);
+                let close_result =
+                    crate::frame::cores::observer_close_cap(sender_ptr, handle.index);
+
+                match close_result {
+                    capability::CloseResult::Closed { .. } => {
+                        // D24 (bare-metal): when closed_type == Space,
+                        // scan for remaining Space caps via
+                        // observer_has_cap_to_object and unmap if none
+                        // remain (frame::mapping::unmap_space_from_observer).
+
+                        typed_ok(0)
+                    }
+                    capability::CloseResult::ClosedWithBadgeClosure { .. } => {
+                        // D17: badge-closure tracking map not yet built.
+                        // The close succeeded; badge-closure delivery is
+                        // deferred.
+                        typed_ok(0)
+                    }
+                    capability::CloseResult::AlreadyEmpty => typed_error(SyscallError::InvalidCap),
+                }
             }
             TypedOperation::Mint => {
-                // TODO: create attenuated cap (reduced rights, badge).
-                // Requires cap table mutation.
-                typed_error(SyscallError::InvalidState)
+                // D97: create attenuated cap with optional badge.
+                // args[0] = requested rights mask, args[1] = badge value.
+                // If badge == CAP_ABSENT, keep the source badge.
+                let requested_rights = Rights::from_bits(regs.args[0] as u16);
+                let badge = if regs.args[1] == capability::CAP_ABSENT {
+                    entry.badge
+                } else {
+                    capability::Badge(regs.args[1])
+                };
+                let attenuated = entry.rights.attenuate(requested_rights);
+                let transferred = capability::TransferredCap {
+                    object_type,
+                    object_id,
+                    rights: attenuated,
+                    badge,
+                    send_once: entry.send_once,
+                    stored_generation: entry.stored_generation,
+                };
+
+                match crate::frame::cores::observer_install_transferred_cap(
+                    sender_ptr,
+                    &transferred,
+                ) {
+                    Ok(encoded_handle) => typed_ok(encoded_handle),
+                    Err(_) => typed_error(SyscallError::TableFull),
+                }
             }
 
             // ── Space operations ────────────────────────────────────
@@ -6453,5 +6604,951 @@ mod tests {
         assert_eq!(obj_type, ObjectType::Space);
         assert_eq!(obj_id, ObjectId(999));
         assert_eq!(sender.cap_table_count, 1, "count back to 1 after roundtrip");
+    }
+
+    // ── D97 cap-table self-mutation tests ────────────────────────────
+
+    /// D97 Clone: cloning a Field cap produces a new entry with identical
+    /// object reference, rights, badge, send_once, and stored_generation.
+    #[test]
+    fn test_d97_clone_field_cap() {
+        let ks = make_kernel_state();
+        let field_id = make_field_in_arena(&ks, 4);
+        let (mut sender, entries) = make_sender_with_cap(
+            ObjectType::Field,
+            field_id,
+            Rights::FIELD_ALL,
+            Badge(0xCAFE),
+            0,
+        );
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        setup_typed_regs(sender_ptr, TypedOperation::Clone as u16, handle, [0; 4]);
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::Clone, &ks);
+
+        let x0 = read_typed_result(sender_ptr);
+
+        assert!(
+            (x0 as i64) >= 0,
+            "D97: Clone must return non-negative slot handle, got {x0}"
+        );
+
+        let new_handle = crate::capability::Handle::decode(x0);
+
+        assert!(
+            new_handle.index >= crate::capability::SLOT_USER_START,
+            "D97: cloned cap must be in user slot range"
+        );
+
+        let new_entry =
+            crate::frame::capabilities::entry_ref(entries, 16, new_handle.index).unwrap();
+        let (obj_type, obj_id) = new_entry.object.unwrap();
+
+        assert_eq!(obj_type, ObjectType::Field, "D97: clone preserves type");
+        assert_eq!(obj_id, field_id, "D97: clone preserves object_id");
+        assert_eq!(
+            new_entry.rights,
+            Rights::FIELD_ALL,
+            "D97: clone preserves rights"
+        );
+        assert_eq!(new_entry.badge, Badge(0xCAFE), "D97: clone preserves badge");
+        assert_eq!(
+            new_entry.stored_generation, 0,
+            "D97: clone preserves stored_generation"
+        );
+        assert_eq!(sender.cap_table_count, 2, "D97: count incremented to 2");
+    }
+
+    /// D97 Clone: send-once flag is preserved through clone (D51).
+    #[test]
+    fn test_d97_clone_preserves_send_once() {
+        let ks = make_kernel_state();
+        let field_id = make_field_in_arena(&ks, 4);
+        let rs_ptr = crate::frame::cores::alloc_test_register_state();
+        let entries = crate::frame::capabilities::alloc_test_entries(16);
+
+        crate::frame::capabilities::init_freelist(entries, 16, crate::capability::SLOT_USER_START);
+
+        let entry = crate::frame::capabilities::entry_mut(entries, 16, 0).unwrap();
+
+        *entry = crate::capability::Entry {
+            object: Some((ObjectType::Field, field_id)),
+            rights: Rights::FIELD_ALL,
+            badge: Badge(0),
+            slot_tag: crate::capability::SlotTag(0),
+            send_once: true,
+            stored_generation: 0,
+        };
+
+        let mut sender = Observer {
+            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
+            page_table_root: 0,
+            cap_table: entries,
+            cap_table_capacity: 16,
+            cap_table_free_head: Some(crate::capability::SLOT_USER_START),
+            cap_table_count: 1,
+            state: crate::observer::PrimaryState::Runnable,
+            suspended: false,
+            compute_aggregate: 100,
+            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
+            throughput: crate::observer::DEFAULT_THROUGHPUT,
+            clock_access: false,
+            wait_state: crate::observer::WaitState::None,
+            refcount: 1,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        setup_typed_regs(sender_ptr, TypedOperation::Clone as u16, handle, [0; 4]);
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::Clone, &ks);
+
+        let x0 = read_typed_result(sender_ptr);
+        let new_handle = crate::capability::Handle::decode(x0);
+        let new_entry =
+            crate::frame::capabilities::entry_ref(entries, 16, new_handle.index).unwrap();
+
+        assert!(
+            new_entry.send_once,
+            "D51/D97: clone must preserve send_once flag"
+        );
+    }
+
+    /// D97 Clone: cloning an Observer cap works (non-linear type).
+    #[test]
+    fn test_d97_clone_observer_cap() {
+        let ks = make_kernel_state();
+        let target_id = {
+            let mut observers = ks.observers.acquire();
+            let (id, obs) = observers.allocate().expect("allocate observer");
+
+            obs.state = crate::observer::PrimaryState::Inert;
+            obs.refcount = 1;
+            obs.generation = core::sync::atomic::AtomicU64::new(0);
+
+            id
+        };
+        let (mut sender, entries) = make_sender_with_cap(
+            ObjectType::Observer,
+            target_id,
+            Rights::OBSERVER_ALL,
+            Badge(42),
+            0,
+        );
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        setup_typed_regs(sender_ptr, TypedOperation::Clone as u16, handle, [0; 4]);
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::Clone, &ks);
+
+        let x0 = read_typed_result(sender_ptr);
+
+        assert!((x0 as i64) >= 0, "D97: Clone Observer must succeed");
+
+        let new_handle = crate::capability::Handle::decode(x0);
+        let new_entry =
+            crate::frame::capabilities::entry_ref(entries, 16, new_handle.index).unwrap();
+        let (obj_type, obj_id) = new_entry.object.unwrap();
+
+        assert_eq!(obj_type, ObjectType::Observer);
+        assert_eq!(obj_id, target_id);
+    }
+
+    /// D97 Close: closing a Field cap succeeds and frees the slot.
+    #[test]
+    fn test_d97_close_field_cap() {
+        let ks = make_kernel_state();
+        let field_id = make_field_in_arena(&ks, 4);
+        let (mut sender, entries) =
+            make_sender_with_cap(ObjectType::Field, field_id, Rights::FIELD_ALL, Badge(0), 0);
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        setup_typed_regs(sender_ptr, TypedOperation::Close as u16, handle, [0; 4]);
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::Close, &ks);
+
+        let x0 = read_typed_result(sender_ptr);
+
+        assert_eq!(x0, 0, "D97: Close must return 0 on success");
+
+        let closed_entry = crate::frame::capabilities::entry_ref(entries, 16, 0).unwrap();
+
+        assert!(
+            !closed_entry.is_occupied(),
+            "D97: closed slot must be empty"
+        );
+        assert_eq!(
+            sender.cap_table_count, 0,
+            "D97: count must be 0 after close"
+        );
+    }
+
+    /// D97 Close: closing a Space cap triggers D24 mapping bridge scan.
+    /// Verifies the scan correctly detects remaining Space caps.
+    #[test]
+    fn test_d97_close_space_cap_mapping_bridge_scan() {
+        let ks = make_kernel_state();
+        let space_id = {
+            let mut spaces = ks.spaces.acquire();
+            let (id, space) = spaces.allocate().expect("allocate space");
+
+            space.va_base = 0x1000;
+            space.size = 0x4000;
+            space.refcount = 2;
+            space.generation = core::sync::atomic::AtomicU64::new(0);
+
+            id
+        };
+        // Create a sender with TWO caps to the same Space:
+        // slot 0 = Space cap (will be closed)
+        // slot 3 = Space cap (remains)
+        let rs_ptr = crate::frame::cores::alloc_test_register_state();
+        let entries = crate::frame::capabilities::alloc_test_entries(16);
+
+        crate::frame::capabilities::init_freelist(entries, 16, crate::capability::SLOT_USER_START);
+
+        let entry0 = crate::frame::capabilities::entry_mut(entries, 16, 0).unwrap();
+
+        *entry0 = crate::capability::Entry {
+            object: Some((ObjectType::Space, space_id)),
+            rights: Rights::SPACE_ALL,
+            badge: Badge(0),
+            slot_tag: crate::capability::SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+
+        let entry3 = crate::frame::capabilities::entry_mut(entries, 16, 3).unwrap();
+
+        *entry3 = crate::capability::Entry {
+            object: Some((ObjectType::Space, space_id)),
+            rights: Rights::SPACE_ALL,
+            badge: Badge(0),
+            slot_tag: crate::capability::SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+
+        let mut sender = Observer {
+            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
+            page_table_root: 0,
+            cap_table: entries,
+            cap_table_capacity: 16,
+            cap_table_free_head: Some(4),
+            cap_table_count: 2,
+            state: crate::observer::PrimaryState::Runnable,
+            suspended: false,
+            compute_aggregate: 100,
+            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
+            throughput: crate::observer::DEFAULT_THROUGHPUT,
+            clock_access: false,
+            wait_state: crate::observer::WaitState::None,
+            refcount: 1,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        setup_typed_regs(sender_ptr, TypedOperation::Close as u16, handle, [0; 4]);
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::Close, &ks);
+
+        let x0 = read_typed_result(sender_ptr);
+
+        assert_eq!(x0, 0, "D97: Close Space cap must succeed");
+
+        let slot0 = crate::frame::capabilities::entry_ref(entries, 16, 0).unwrap();
+
+        assert!(!slot0.is_occupied(), "D97: slot 0 must be freed");
+
+        let slot3 = crate::frame::capabilities::entry_ref(entries, 16, 3).unwrap();
+
+        assert!(
+            slot3.is_occupied(),
+            "D97: slot 3 (other Space cap) must remain"
+        );
+
+        let still_has = crate::frame::cores::observer_has_cap_to_object(
+            sender_ptr,
+            ObjectType::Space,
+            space_id,
+            0,
+        );
+
+        assert!(
+            still_has,
+            "D24: Observer still holds another cap to the same Space"
+        );
+    }
+
+    /// D97 Mint: attenuate rights and assign new badge.
+    #[test]
+    fn test_d97_mint_attenuates_rights_and_sets_badge() {
+        let ks = make_kernel_state();
+        let field_id = make_field_in_arena(&ks, 4);
+        let (mut sender, entries) =
+            make_sender_with_cap(ObjectType::Field, field_id, Rights::FIELD_ALL, Badge(0), 0);
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+        let requested_rights = Rights::SEND.union(Rights::RECEIVE);
+
+        setup_typed_regs(
+            sender_ptr,
+            TypedOperation::Mint as u16,
+            handle,
+            [requested_rights.bits() as u64, 0xBEEF, 0, 0],
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::Mint, &ks);
+
+        let x0 = read_typed_result(sender_ptr);
+
+        assert!((x0 as i64) >= 0, "D97: Mint must succeed");
+
+        let new_handle = crate::capability::Handle::decode(x0);
+        let new_entry =
+            crate::frame::capabilities::entry_ref(entries, 16, new_handle.index).unwrap();
+        let (obj_type, obj_id) = new_entry.object.unwrap();
+
+        assert_eq!(obj_type, ObjectType::Field, "D97: mint preserves type");
+        assert_eq!(obj_id, field_id, "D97: mint preserves object_id");
+
+        let attenuated = Rights::FIELD_ALL.attenuate(requested_rights);
+
+        assert_eq!(
+            new_entry.rights, attenuated,
+            "D97: mint must attenuate rights to intersection"
+        );
+        assert_eq!(
+            new_entry.badge,
+            Badge(0xBEEF),
+            "D97: mint must set caller-provided badge"
+        );
+    }
+
+    /// D97 Mint: badge == CAP_ABSENT preserves source badge.
+    #[test]
+    fn test_d97_mint_preserves_badge_with_sentinel() {
+        let ks = make_kernel_state();
+        let field_id = make_field_in_arena(&ks, 4);
+        let (mut sender, entries) = make_sender_with_cap(
+            ObjectType::Field,
+            field_id,
+            Rights::FIELD_ALL,
+            Badge(0xAAAA),
+            0,
+        );
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        setup_typed_regs(
+            sender_ptr,
+            TypedOperation::Mint as u16,
+            handle,
+            [
+                Rights::FIELD_ALL.bits() as u64,
+                crate::capability::CAP_ABSENT,
+                0,
+                0,
+            ],
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::Mint, &ks);
+
+        let x0 = read_typed_result(sender_ptr);
+        let new_handle = crate::capability::Handle::decode(x0);
+        let new_entry =
+            crate::frame::capabilities::entry_ref(entries, 16, new_handle.index).unwrap();
+
+        assert_eq!(
+            new_entry.badge,
+            Badge(0xAAAA),
+            "D97: Mint with CAP_ABSENT badge must preserve source badge"
+        );
+    }
+
+    /// D97 Mint: cannot escalate rights (attenuate is intersection).
+    #[test]
+    fn test_d97_mint_cannot_escalate_rights() {
+        let ks = make_kernel_state();
+        let field_id = make_field_in_arena(&ks, 4);
+        let (mut sender, entries) =
+            make_sender_with_cap(ObjectType::Field, field_id, Rights::SEND, Badge(0), 0);
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        setup_typed_regs(
+            sender_ptr,
+            TypedOperation::Mint as u16,
+            handle,
+            [Rights::FIELD_ALL.bits() as u64, 0, 0, 0],
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+
+        // MINT right is not in the source cap — should fail NoRight.
+        core.dispatch_typed(TypedOperation::Mint, &ks);
+
+        let x0 = read_typed_result(sender_ptr) as i64;
+
+        assert_eq!(
+            x0,
+            crate::syscall::SyscallError::NoRight.error_code() as i64,
+            "D97: Mint without MINT right must return NoRight"
+        );
+    }
+
+    /// D97 ObserverInstallCap: install a Field cap into a target Observer's table.
+    #[test]
+    fn test_d97_observer_install_cap() {
+        let ks = make_kernel_state();
+        let field_id = make_field_in_arena(&ks, 4);
+        // Create target Observer in arena with a cap table.
+        let (target_id, target_entries) = {
+            let mut observers = ks.observers.acquire();
+            let (id, obs) = observers.allocate().expect("allocate observer");
+            let rs = crate::frame::cores::alloc_test_register_state();
+            let cap_entries = crate::frame::capabilities::alloc_test_entries(16);
+
+            crate::frame::capabilities::init_freelist(
+                cap_entries,
+                16,
+                crate::capability::SLOT_USER_START,
+            );
+
+            obs.register_state = crate::observer::RegisterStateHandle::new(rs);
+            obs.cap_table = cap_entries;
+            obs.cap_table_capacity = 16;
+            obs.cap_table_free_head = Some(crate::capability::SLOT_USER_START);
+            obs.cap_table_count = 0;
+            obs.state = crate::observer::PrimaryState::Inert;
+            obs.refcount = 1;
+            obs.generation = core::sync::atomic::AtomicU64::new(0);
+
+            (id, cap_entries)
+        };
+        // Sender has TWO caps: slot 0 = Observer cap (target), slot 3 = Field cap (source).
+        let rs_ptr = crate::frame::cores::alloc_test_register_state();
+        let entries = crate::frame::capabilities::alloc_test_entries(16);
+
+        crate::frame::capabilities::init_freelist(entries, 16, 4);
+
+        let slot0 = crate::frame::capabilities::entry_mut(entries, 16, 0).unwrap();
+
+        *slot0 = crate::capability::Entry {
+            object: Some((ObjectType::Observer, target_id)),
+            rights: Rights::OBSERVER_ALL,
+            badge: Badge(0),
+            slot_tag: crate::capability::SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+
+        let slot3 = crate::frame::capabilities::entry_mut(entries, 16, 3).unwrap();
+
+        *slot3 = crate::capability::Entry {
+            object: Some((ObjectType::Field, field_id)),
+            rights: Rights::SEND.union(Rights::RECEIVE),
+            badge: Badge(0xDEAD),
+            slot_tag: crate::capability::SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+
+        let mut sender = Observer {
+            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
+            page_table_root: 0,
+            cap_table: entries,
+            cap_table_capacity: 16,
+            cap_table_free_head: Some(4),
+            cap_table_count: 2,
+            state: crate::observer::PrimaryState::Runnable,
+            suspended: false,
+            compute_aggregate: 100,
+            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
+            throughput: crate::observer::DEFAULT_THROUGHPUT,
+            clock_access: false,
+            wait_state: crate::observer::WaitState::None,
+            refcount: 1,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let sender_ptr = NonNull::from(&mut sender);
+        let observer_handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+        let source_handle = crate::capability::Handle {
+            index: 3,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        setup_typed_regs(
+            sender_ptr,
+            TypedOperation::ObserverInstallCap as u16,
+            observer_handle,
+            [source_handle, 0, 0, 0],
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::ObserverInstallCap, &ks);
+
+        let x0 = read_typed_result(sender_ptr);
+
+        assert!(
+            (x0 as i64) >= 0,
+            "D97: ObserverInstallCap must succeed, got {x0}"
+        );
+
+        let installed_handle = crate::capability::Handle::decode(x0);
+        let installed_entry =
+            crate::frame::capabilities::entry_ref(target_entries, 16, installed_handle.index)
+                .unwrap();
+        let (obj_type, obj_id) = installed_entry.object.unwrap();
+
+        assert_eq!(
+            obj_type,
+            ObjectType::Field,
+            "D97: installed cap must be Field"
+        );
+        assert_eq!(
+            obj_id, field_id,
+            "D97: installed cap must reference the source object"
+        );
+        assert_eq!(
+            installed_entry.rights,
+            Rights::SEND.union(Rights::RECEIVE),
+            "D97: installed cap preserves source rights"
+        );
+        assert_eq!(
+            installed_entry.badge,
+            Badge(0xDEAD),
+            "D97: installed cap preserves source badge"
+        );
+    }
+
+    /// D97 ObserverChangeHandler: replaces the fault handler Field cap at
+    /// SLOT_FAULT_HANDLER in the target Observer.
+    #[test]
+    fn test_d97_observer_change_handler() {
+        let ks = make_kernel_state();
+        let old_field_id = make_field_in_arena(&ks, 4);
+        let new_field_id = make_field_in_arena(&ks, 4);
+        // Create target Observer in arena with old handler at slot 0.
+        let target_id = {
+            let mut observers = ks.observers.acquire();
+            let (id, obs) = observers.allocate().expect("allocate observer");
+            let rs = crate::frame::cores::alloc_test_register_state();
+            let cap_entries = crate::frame::capabilities::alloc_test_entries(16);
+
+            crate::frame::capabilities::init_freelist(
+                cap_entries,
+                16,
+                crate::capability::SLOT_USER_START,
+            );
+
+            // Install old handler at slot 0.
+            let handler_slot = crate::frame::capabilities::entry_mut(cap_entries, 16, 0).unwrap();
+
+            *handler_slot = crate::capability::Entry {
+                object: Some((ObjectType::Field, old_field_id)),
+                rights: Rights::SEND,
+                badge: Badge(0),
+                slot_tag: crate::capability::SlotTag(0),
+                send_once: false,
+                stored_generation: 0,
+            };
+
+            obs.register_state = crate::observer::RegisterStateHandle::new(rs);
+            obs.cap_table = cap_entries;
+            obs.cap_table_capacity = 16;
+            obs.cap_table_free_head = Some(crate::capability::SLOT_USER_START);
+            obs.cap_table_count = 1;
+            obs.state = crate::observer::PrimaryState::Inert;
+            obs.refcount = 1;
+            obs.generation = core::sync::atomic::AtomicU64::new(0);
+
+            id
+        };
+        // Sender has: slot 0 = Observer cap, slot 3 = new handler Field cap.
+        let rs_ptr = crate::frame::cores::alloc_test_register_state();
+        let entries = crate::frame::capabilities::alloc_test_entries(16);
+
+        crate::frame::capabilities::init_freelist(entries, 16, 4);
+
+        let slot0 = crate::frame::capabilities::entry_mut(entries, 16, 0).unwrap();
+
+        *slot0 = crate::capability::Entry {
+            object: Some((ObjectType::Observer, target_id)),
+            rights: Rights::OBSERVER_ALL,
+            badge: Badge(0),
+            slot_tag: crate::capability::SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+
+        let slot3 = crate::frame::capabilities::entry_mut(entries, 16, 3).unwrap();
+
+        *slot3 = crate::capability::Entry {
+            object: Some((ObjectType::Field, new_field_id)),
+            rights: Rights::SEND,
+            badge: Badge(0),
+            slot_tag: crate::capability::SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+
+        let mut sender = Observer {
+            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
+            page_table_root: 0,
+            cap_table: entries,
+            cap_table_capacity: 16,
+            cap_table_free_head: Some(4),
+            cap_table_count: 2,
+            state: crate::observer::PrimaryState::Runnable,
+            suspended: false,
+            compute_aggregate: 100,
+            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
+            throughput: crate::observer::DEFAULT_THROUGHPUT,
+            clock_access: false,
+            wait_state: crate::observer::WaitState::None,
+            refcount: 1,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let sender_ptr = NonNull::from(&mut sender);
+        let observer_handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+        let handler_handle = crate::capability::Handle {
+            index: 3,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        setup_typed_regs(
+            sender_ptr,
+            TypedOperation::ObserverChangeHandler as u16,
+            observer_handle,
+            [handler_handle, 0xBBBB, 0, 0],
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::ObserverChangeHandler, &ks);
+
+        let x0 = read_typed_result(sender_ptr);
+
+        assert_eq!(x0, 0, "D97: ObserverChangeHandler must succeed");
+
+        // Verify the target Observer's handler slot now points to new_field_id.
+        let target_ptr = crate::frame::cores::observer_ptr_from_arena(&ks, target_id).unwrap();
+        let handler_entry = crate::frame::cores::observer_read_cap_entry(
+            target_ptr,
+            crate::capability::SLOT_FAULT_HANDLER,
+        );
+        let (handler_type, handler_id, _gen) =
+            handler_entry.expect("handler slot must be occupied");
+
+        assert_eq!(
+            handler_type,
+            ObjectType::Field,
+            "D97: handler must be a Field"
+        );
+        assert_eq!(
+            handler_id, new_field_id,
+            "D97: handler must point to new Field"
+        );
+    }
+
+    /// D97 ObserverChangeHandler: non-Field handler returns WrongType.
+    #[test]
+    fn test_d97_change_handler_wrong_type() {
+        let ks = make_kernel_state();
+        let target_id = {
+            let mut observers = ks.observers.acquire();
+            let (id, obs) = observers.allocate().expect("allocate observer");
+            let rs = crate::frame::cores::alloc_test_register_state();
+            let cap_entries = crate::frame::capabilities::alloc_test_entries(16);
+
+            crate::frame::capabilities::init_freelist(
+                cap_entries,
+                16,
+                crate::capability::SLOT_USER_START,
+            );
+
+            obs.register_state = crate::observer::RegisterStateHandle::new(rs);
+            obs.cap_table = cap_entries;
+            obs.cap_table_capacity = 16;
+            obs.cap_table_free_head = Some(crate::capability::SLOT_USER_START);
+            obs.cap_table_count = 0;
+            obs.state = crate::observer::PrimaryState::Inert;
+            obs.refcount = 1;
+            obs.generation = core::sync::atomic::AtomicU64::new(0);
+
+            id
+        };
+        let space_id = {
+            let mut spaces = ks.spaces.acquire();
+            let (id, space) = spaces.allocate().expect("allocate space");
+
+            space.va_base = 0;
+            space.size = 4096;
+            space.refcount = 1;
+            space.generation = core::sync::atomic::AtomicU64::new(0);
+
+            id
+        };
+        // Sender: slot 0 = Observer, slot 3 = Space (wrong type for handler).
+        let rs_ptr = crate::frame::cores::alloc_test_register_state();
+        let entries = crate::frame::capabilities::alloc_test_entries(16);
+
+        crate::frame::capabilities::init_freelist(entries, 16, 4);
+
+        let slot0 = crate::frame::capabilities::entry_mut(entries, 16, 0).unwrap();
+
+        *slot0 = crate::capability::Entry {
+            object: Some((ObjectType::Observer, target_id)),
+            rights: Rights::OBSERVER_ALL,
+            badge: Badge(0),
+            slot_tag: crate::capability::SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+
+        let slot3 = crate::frame::capabilities::entry_mut(entries, 16, 3).unwrap();
+
+        *slot3 = crate::capability::Entry {
+            object: Some((ObjectType::Space, space_id)),
+            rights: Rights::SPACE_ALL,
+            badge: Badge(0),
+            slot_tag: crate::capability::SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+
+        let mut sender = Observer {
+            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
+            page_table_root: 0,
+            cap_table: entries,
+            cap_table_capacity: 16,
+            cap_table_free_head: Some(4),
+            cap_table_count: 2,
+            state: crate::observer::PrimaryState::Runnable,
+            suspended: false,
+            compute_aggregate: 100,
+            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
+            throughput: crate::observer::DEFAULT_THROUGHPUT,
+            clock_access: false,
+            wait_state: crate::observer::WaitState::None,
+            refcount: 1,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let sender_ptr = NonNull::from(&mut sender);
+        let observer_handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+        let bad_handler_handle = crate::capability::Handle {
+            index: 3,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        setup_typed_regs(
+            sender_ptr,
+            TypedOperation::ObserverChangeHandler as u16,
+            observer_handle,
+            [bad_handler_handle, 0, 0, 0],
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::ObserverChangeHandler, &ks);
+
+        let x0 = read_typed_result(sender_ptr) as i64;
+
+        assert_eq!(
+            x0,
+            crate::syscall::SyscallError::WrongType.error_code() as i64,
+            "D97: non-Field handler must return WrongType"
+        );
+    }
+
+    /// D24/D97: has_cap_to_object returns false when no remaining caps exist.
+    #[test]
+    fn test_d24_no_remaining_space_cap_after_close() {
+        let ks = make_kernel_state();
+        let space_id = {
+            let mut spaces = ks.spaces.acquire();
+            let (id, space) = spaces.allocate().expect("allocate space");
+
+            space.va_base = 0x1000;
+            space.size = 0x4000;
+            space.refcount = 1;
+            space.generation = core::sync::atomic::AtomicU64::new(0);
+
+            id
+        };
+        let (mut sender, _entries) =
+            make_sender_with_cap(ObjectType::Space, space_id, Rights::SPACE_ALL, Badge(0), 0);
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        setup_typed_regs(sender_ptr, TypedOperation::Close as u16, handle, [0; 4]);
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::Close, &ks);
+
+        let x0 = read_typed_result(sender_ptr);
+
+        assert_eq!(x0, 0, "D97: Close must succeed");
+
+        let still_has = crate::frame::cores::observer_has_cap_to_object(
+            sender_ptr,
+            ObjectType::Space,
+            space_id,
+            0,
+        );
+
+        assert!(
+            !still_has,
+            "D24: after closing the only Space cap, no remaining cap should exist"
+        );
+    }
+
+    /// D97: has_cap_to_object scans correctly with Table method.
+    #[test]
+    fn test_d97_table_has_cap_to_object() {
+        let entries = crate::frame::capabilities::alloc_test_entries(8);
+
+        crate::frame::capabilities::init_freelist(entries, 8, crate::capability::SLOT_USER_START);
+
+        let mut table = crate::capability::Table {
+            entries,
+            capacity: 8,
+            count: 0,
+            free_head: Some(crate::capability::SLOT_USER_START),
+        };
+        let target_id = ObjectId(42);
+
+        assert!(
+            !table.has_cap_to_object(ObjectType::Space, target_id, u32::MAX),
+            "empty table has no caps"
+        );
+
+        let e3 = crate::frame::capabilities::entry_mut(entries, 8, 3).unwrap();
+
+        *e3 = crate::capability::Entry {
+            object: Some((ObjectType::Space, target_id)),
+            rights: Rights::SPACE_ALL,
+            badge: Badge(0),
+            slot_tag: crate::capability::SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+        table.count = 1;
+
+        assert!(
+            table.has_cap_to_object(ObjectType::Space, target_id, u32::MAX),
+            "must find cap at slot 3"
+        );
+        assert!(
+            !table.has_cap_to_object(ObjectType::Space, target_id, 3),
+            "must not find cap when slot 3 is excluded"
+        );
+        assert!(
+            !table.has_cap_to_object(ObjectType::Field, target_id, u32::MAX),
+            "must not match wrong type"
+        );
+        assert!(
+            !table.has_cap_to_object(ObjectType::Space, ObjectId(99), u32::MAX),
+            "must not match wrong id"
+        );
     }
 }

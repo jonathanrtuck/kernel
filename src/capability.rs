@@ -149,6 +149,11 @@ impl Rights {
     pub const fn bits(self) -> u16 {
         self.0
     }
+
+    /// Construct a Rights from a raw u16 bitmask.
+    pub const fn from_bits(bits: u16) -> Rights {
+        Rights(bits)
+    }
 }
 
 // ── Badge (D58) ─────────────────────────────────────────────────────
@@ -860,6 +865,54 @@ impl Table {
             state.complete = true;
 
             return true;
+        }
+
+        false
+    }
+
+    /// D24/D97: check whether this table holds any cap referencing a specific
+    /// (object_type, object_id) pair, excluding one slot index.
+    ///
+    /// Used by the D24 mapping bridge: when a Space cap is closed, the kernel
+    /// scans the Observer's cap table to determine if any other cap to the
+    /// same Space remains. If not, the Space is unmapped from the Observer's
+    /// page table.
+    ///
+    /// The `exclude_index` parameter skips the slot being closed (it has
+    /// already been freed and might be reused).
+    ///
+    /// O(capacity) — cold path. D91 established ~1 us for 1024 slots as
+    /// acceptable for mapping operations.
+    pub fn has_cap_to_object(
+        &self,
+        target_type: ObjectType,
+        target_id: crate::arena::ObjectId,
+        exclude_index: u32,
+    ) -> bool {
+        let mut remaining = self.count;
+
+        for i in 0..self.capacity {
+            if remaining == 0 {
+                break;
+            }
+            if i == exclude_index {
+                continue;
+            }
+
+            let entry = crate::frame::capabilities::entry_ref(self.entries, self.capacity, i);
+
+            if let Some(e) = entry
+                && e.is_occupied()
+            {
+                remaining -= 1;
+
+                if let Some((obj_type, obj_id)) = e.object
+                    && obj_type == target_type
+                    && obj_id == target_id
+                {
+                    return true;
+                }
+            }
         }
 
         false
