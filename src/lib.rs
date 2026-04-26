@@ -1352,22 +1352,15 @@ mod integration_tests {
         use crate::time_manager::round_robin::RoundRobin;
 
         const FREQ: u64 = 24_000_000;
-        let ks = KernelState::new(
-            make_arena(),
-            make_arena(),
-            make_arena(),
-            make_arena(),
-            make_arena(),
-            SpaceManager {
-                root_pool: RootPool {
-                    total_bytes: 16 * 4096,
-                    free_bytes: 16 * 4096,
-                    page_size: 4096,
-                },
-                next_physical_base: 4096,
-                next_va_base: 4096,
+        let ks = KernelState::new(SpaceManager {
+            root_pool: RootPool {
+                total_bytes: 16 * 4096,
+                free_bytes: 16 * 4096,
+                page_size: 4096,
             },
-        );
+            next_physical_base: 4096,
+            next_va_base: 4096,
+        });
         let mut core = CoreState {
             core_id: CoreId(0),
             current: None,
@@ -1463,22 +1456,15 @@ mod integration_tests {
         use crate::time_manager::round_robin::RoundRobin;
 
         const FREQ: u64 = 24_000_000;
-        let ks = KernelState::new(
-            make_arena(),
-            make_arena(),
-            make_arena(),
-            make_arena(),
-            make_arena(),
-            SpaceManager {
-                root_pool: RootPool {
-                    total_bytes: 16 * 4096,
-                    free_bytes: 16 * 4096,
-                    page_size: 4096,
-                },
-                next_physical_base: 4096,
-                next_va_base: 4096,
+        let ks = KernelState::new(SpaceManager {
+            root_pool: RootPool {
+                total_bytes: 16 * 4096,
+                free_bytes: 16 * 4096,
+                page_size: 4096,
             },
-        );
+            next_physical_base: 4096,
+            next_va_base: 4096,
+        });
         let mut core = CoreState {
             core_id: CoreId(0),
             current: None,

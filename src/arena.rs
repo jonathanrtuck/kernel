@@ -40,7 +40,21 @@ pub struct Arena<T> {
     pub(crate) store: crate::frame::slab::SlabStore<T>,
 }
 
+impl<T> Default for Arena<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T> Arena<T> {
+    /// Create an empty arena. No pages are allocated until the first
+    /// `allocate()` call (D93: lazy page acquisition from root pool).
+    pub fn new() -> Arena<T> {
+        Arena {
+            store: crate::frame::slab::SlabStore::new(),
+        }
+    }
+
     /// Allocate a slot for a new object.
     ///
     /// D70: draws from the intrusive freelist within slab pages. When

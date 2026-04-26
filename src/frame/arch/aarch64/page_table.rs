@@ -43,10 +43,12 @@ const PAGE: u64 = 1 << 1;
 
 const ATTR_NORMAL: u64 = 1 << 2;
 const AP_RW_EL0: u64 = 0b01 << 6;
+const AP_RO_EL0: u64 = 0b11 << 6;
 const SH_ISH: u64 = 0b11 << 8;
 const AF: u64 = 1 << 10;
 const NG: u64 = 1 << 11;
 const PXN: u64 = 1 << 53;
+const UXN: u64 = 1 << 54;
 
 const PA_MASK: u64 = !((PAGE_SIZE as u64) - 1) & 0x0000_FFFF_FFFF_C000;
 
@@ -85,6 +87,20 @@ pub const fn l3_tables_for_range(va_base: usize, page_count: usize) -> usize {
 
 // ── Descriptor constructors ────────────────────────────────────────
 
+/// Common base for user-space L3 page descriptors. All user pages share:
+/// Normal memory, Inner Shareable, AF=1, nG=1 (ASID-tagged), PXN=1.
+/// The caller provides AP bits and UXN to control EL0 access and execution.
+const fn user_l3_descriptor(pa: u64, ap: u64, uxn: bool) -> u64 {
+    let mut desc =
+        (pa & !((PAGE_SIZE as u64) - 1)) | ATTR_NORMAL | ap | SH_ISH | AF | NG | PXN | PAGE | VALID;
+
+    if uxn {
+        desc |= UXN;
+    }
+
+    desc
+}
+
 /// Build a user-space L3 page descriptor (D89).
 ///
 /// Maps one 16 KiB page at the given physical address with:
@@ -95,15 +111,23 @@ pub const fn l3_tables_for_range(va_base: usize, page_count: usize) -> usize {
 /// - PXN = 1 (EL1 cannot execute from user pages)
 /// - UXN = 0 (EL0 CAN execute — permissive default)
 pub const fn user_page_descriptor(pa: u64) -> u64 {
-    (pa & !((PAGE_SIZE as u64) - 1))
-        | ATTR_NORMAL
-        | AP_RW_EL0
-        | SH_ISH
-        | AF
-        | NG
-        | PXN
-        | PAGE
-        | VALID
+    user_l3_descriptor(pa, AP_RW_EL0, false)
+}
+
+/// Build a user-space L3 code page descriptor (W^X safe).
+///
+/// AP = RO for EL0 (0b11 = EL1 RO, EL0 RO). With SCTLR.WXN=1, only
+/// read-only pages are executable. PXN prevents EL1 execution of user code.
+pub const fn user_code_descriptor(pa: u64) -> u64 {
+    user_l3_descriptor(pa, AP_RO_EL0, false)
+}
+
+/// Build a user-space L3 data page descriptor (W^X safe).
+///
+/// AP = RW for EL0 (0b01 = EL1 RW, EL0 RW). UXN=1 prevents EL0 execution.
+/// PXN=1 prevents EL1 execution. With WXN=1 this is redundant but explicit.
+pub const fn user_data_descriptor(pa: u64) -> u64 {
+    user_l3_descriptor(pa, AP_RW_EL0, true)
 }
 
 /// Build a table descriptor (L1→L2 or L2→L3 — same format on ARM64).

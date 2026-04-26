@@ -1474,7 +1474,6 @@ impl<S: Scheduler> CoreState<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arena::Arena;
     use crate::capability::Badge;
     use crate::kernel_state::{IrqRoute, IrqRoutingTable, MAX_IRQS};
     use crate::observer::Observer;
@@ -1499,12 +1498,6 @@ mod tests {
         }
     }
 
-    fn make_arena<T>() -> Arena<T> {
-        Arena {
-            store: crate::frame::slab::SlabStore::new(),
-        }
-    }
-
     fn make_space_manager() -> SpaceManager {
         SpaceManager {
             root_pool: RootPool {
@@ -1518,14 +1511,7 @@ mod tests {
     }
 
     fn make_kernel_state() -> KernelState {
-        KernelState::new(
-            make_arena(),
-            make_arena(),
-            make_arena(),
-            make_arena(),
-            make_arena(),
-            make_space_manager(),
-        )
+        KernelState::new(make_space_manager())
     }
 
     // ── Spec verifier tests ──────────────────────────────────────────

@@ -230,10 +230,19 @@ fn handle_el0_sync<S: crate::time_manager::Scheduler + 'static>(
                 }
             }
         }
-        _ => {
-            // Proper fault delivery (D80) requires page table infrastructure (Phase D).
-            fatal_exception_el0(source, esr, far)
+        0x3C => {
+            // BRK from EL0 — software breakpoint (debug exception).
+            // D102: BRK #0x42 is the Phase E test-pass signal.
+            // ARM ARM: ESR_EL1.ISS[15:0] = imm16 (direct, not shifted).
+            let imm = esr & 0xFFFF;
+
+            if imm == 0x42 {
+                test_passed()
+            } else {
+                fatal_exception_el0(source, esr, far)
+            }
         }
+        _ => fatal_exception_el0(source, esr, far),
     }
 }
 
@@ -294,6 +303,19 @@ fn restore_or_idle(result: crate::core_manager::DispatchResult) -> ! {
             unsafe { __enter_idle() }
         }
     }
+}
+
+/// Phase E test-pass handler (D102).
+///
+/// Called when the test binary signals success via BRK #0x42. Prints
+/// the result and exits the VM via PSCI SYSTEM_OFF.
+#[cfg(target_os = "none")]
+fn test_passed() -> ! {
+    crate::println!();
+    crate::println!("TEST PASSED");
+    crate::println!();
+
+    super::psci::system_off()
 }
 
 /// Fatal EL0 exception — dump state and halt.

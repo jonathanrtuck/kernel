@@ -158,8 +158,8 @@ struct KernelLayout {
 
 /// W^X permission policy: map a physical address to page attributes.
 ///
-/// Returns `None` for addresses beyond `kernel_end` (left unmapped).
 /// Every mapped page is either writable or executable, never both.
+/// Pages beyond `kernel_end` are mapped RW for the root pool (D93).
 #[allow(clippy::if_same_then_else)]
 fn page_attrs(pa: usize, layout: &KernelLayout) -> Option<u64> {
     if pa >= layout.text_start && pa < layout.text_end {
@@ -171,7 +171,10 @@ fn page_attrs(pa: usize, layout: &KernelLayout) -> Option<u64> {
     } else if pa < layout.text_start {
         Some(ATTR_NORMAL | AP_RW_EL1 | PXN | UXN)
     } else {
-        None
+        // Beyond kernel_end: root pool memory (D93). Map RW for slab
+        // pages, user page tables, RegisterState, and other kernel
+        // allocations. EL1-only, no execute.
+        Some(ATTR_NORMAL | AP_RW_EL1 | PXN | UXN)
     }
 }
 
@@ -289,6 +292,76 @@ pub const fn build_tcr_split(pa_range: u64) -> u64 {
 /// ARM ARM: `ASIDBits` at bits\[7:4\]. `0b0000` = 8-bit, `0b0010` = 16-bit.
 pub const fn asid_width_from_mmfr0(mmfr0: u64) -> u8 {
     if ((mmfr0 >> 4) & 0xF) >= 2 { 16 } else { 8 }
+}
+
+// ---------------------------------------------------------------------------
+// Boot-time page table modification (D94)
+// ---------------------------------------------------------------------------
+
+/// Install a user L3 table at a given L2 index in the kernel's identity-map
+/// L2 root table.
+///
+/// Phase E strategy: user pages are added to the existing kernel identity map
+/// at L2 index 0 (VA 0x0–0x01FF_FFFF, currently unmapped). The kernel's
+/// RAM mappings at L2 indices 32+ are EL1-only. User pages at index 0 have
+/// EL0 access (set in the L3 descriptors). __restore_observer skips the
+/// TTBR switch since TTBR0 doesn't change.
+///
+/// `l3_pa` must be page-aligned (16 KiB).
+///
+/// ARM ARM D5.10.1: installing a new valid entry where an invalid entry
+/// previously existed does not require TLB invalidation — the hardware
+/// cannot have cached an invalid descriptor as valid. DSB + ISB ensures
+/// the table walker sees the store before subsequent accesses.
+#[cfg(target_os = "none")]
+pub fn install_user_l3_in_kernel_l2(l2_index: usize, l3_pa: usize) {
+    debug_assert!(l2_index < ENTRIES_PER_TABLE);
+
+    // SAFETY: L2_ROOT is the active TTBR0 page table. Writing a table
+    // descriptor at an unmapped index followed by DSB+ISB ensures the
+    // hardware walker sees the new entry. No TLBI needed — the previous
+    // entry was invalid. Single-core BSP boot context.
+    unsafe {
+        let l2 = &mut *L2_ROOT.0.get();
+
+        l2[l2_index] = l2_table_desc(l3_pa);
+    }
+
+    sysreg::dsb_ish();
+    sysreg::isb();
+}
+
+/// Read the current TTBR0_EL1 value.
+///
+/// Used to set Observer.page_table_root to the current TTBR0 when all
+/// Observers share the kernel's identity map (Phase E, before D88 split).
+#[cfg(target_os = "none")]
+pub fn current_ttbr0() -> u64 {
+    sysreg::ttbr0_el1()
+}
+
+// ---------------------------------------------------------------------------
+// Exported constants (D25, D93)
+// ---------------------------------------------------------------------------
+
+/// Page size in bytes (D25).
+///
+/// 16 KiB granule — the native granule for Apple Silicon and the project's
+/// design target. Callers outside frame/ receive this as a parameter via
+/// SpaceManager; this function is for boot-time construction of the
+/// SpaceManager itself.
+pub const fn page_size() -> usize {
+    PAGE_SIZE
+}
+
+/// Physical address of the first byte after the kernel image.
+///
+/// Page-aligned (link.ld: `__kernel_end = ALIGN(16384)`). Used by the boot
+/// sequence (D93) to compute the root pool: usable memory runs from
+/// `kernel_end_address()` to `ram_base() + ram_size()`.
+#[cfg(target_os = "none")]
+pub fn kernel_end_address() -> usize {
+    linker_addr(&raw const __kernel_end)
 }
 
 // ---------------------------------------------------------------------------
@@ -542,11 +615,13 @@ mod tests {
     }
 
     #[test]
-    fn beyond_kernel_end_is_unmapped() {
+    fn beyond_kernel_end_is_rw_root_pool() {
         let layout = test_layout();
+        let attrs = page_attrs(layout.kernel_end, &layout).unwrap();
 
-        assert!(page_attrs(layout.kernel_end, &layout).is_none());
-        assert!(page_attrs(layout.kernel_end + PAGE_SIZE, &layout).is_none());
+        assert_eq!(attrs & AP_RO_EL1, 0, "root pool must be writable");
+        assert_ne!(attrs & PXN, 0, "root pool must not be EL1-executable");
+        assert_ne!(attrs & UXN, 0, "root pool must not be EL0-executable");
     }
 
     // -- Boundary precision --
@@ -564,7 +639,7 @@ mod tests {
     // -- L3 builder --
 
     #[test]
-    fn build_l3_maps_kernel_skips_beyond() {
+    fn build_l3_maps_kernel_and_root_pool() {
         let mut table = [0u64; ENTRIES_PER_TABLE];
         let layout = test_layout();
 
@@ -572,11 +647,11 @@ mod tests {
 
         let text_idx = (layout.text_start - 0x4000_0000) / PAGE_SIZE;
 
-        assert_ne!(table[text_idx], 0);
+        assert_ne!(table[text_idx], 0, "kernel text must be mapped");
 
-        let beyond_idx = (layout.kernel_end - 0x4000_0000) / PAGE_SIZE;
+        let pool_idx = (layout.kernel_end - 0x4000_0000) / PAGE_SIZE;
 
-        assert_eq!(table[beyond_idx], 0);
+        assert_ne!(table[pool_idx], 0, "root pool pages must be mapped (D93)");
     }
 
     // -- L2 builder --

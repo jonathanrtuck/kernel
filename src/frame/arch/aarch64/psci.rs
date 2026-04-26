@@ -11,6 +11,9 @@
 /// PSCI CPU_ON function ID (SMC64/HVC64 encoding).
 pub const CPU_ON: u32 = 0xC400_0003;
 
+/// PSCI SYSTEM_OFF function ID (SMC32 encoding, DEN0022E §5.9).
+pub const SYSTEM_OFF: u32 = 0x8400_0008;
+
 /// PSCI return codes (signed i32 per spec).
 pub const SUCCESS: i32 = 0;
 pub const NOT_SUPPORTED: i32 = -1;
@@ -58,6 +61,24 @@ pub fn cpu_on(target_cpu: u64, entry_point: u64, context_id: u64) -> Result<(), 
     }
 }
 
+/// Issue PSCI SYSTEM_OFF via HVC to power down the VM.
+///
+/// DEN0022E §5.9: no return on success. Used by the test harness
+/// (D102) to cleanly exit the hypervisor.
+#[cfg(target_os = "none")]
+pub fn system_off() -> ! {
+    // SAFETY: HVC #0 traps to EL2 (the hypervisor) with SYSTEM_OFF in x0.
+    // The hypervisor powers down the VM. No return on success.
+    // Register convention per PSCI spec DEN0022E §5.9: x0 = function_id.
+    unsafe {
+        core::arch::asm!(
+            "hvc #0",
+            in("x0") SYSTEM_OFF as u64,
+            options(nostack, noreturn),
+        );
+    }
+}
+
 /// Describe a PSCI error code for diagnostics.
 pub fn error_name(code: i32) -> &'static str {
     match code {
@@ -81,6 +102,12 @@ mod tests {
     fn cpu_on_function_id_matches_spec() {
         // SMC64/HVC64 encoding: bit 30 set (SMC64), function number 3.
         assert_eq!(CPU_ON, 0xC400_0003);
+    }
+
+    #[test]
+    fn system_off_function_id_matches_spec() {
+        // SMC32 encoding: bit 31 set, function number 8 (DEN0022E §5.9).
+        assert_eq!(SYSTEM_OFF, 0x8400_0008);
     }
 
     #[test]

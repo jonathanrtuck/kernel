@@ -5,7 +5,11 @@
 //! live in `arch/aarch64/platform.rs`.
 
 /// Kernel stack size per core. — link.ld sync: `.bss.stack`
-pub const KERNEL_STACK_SIZE: usize = 64 * 1024;
+///
+/// 256 KiB: KernelState contains IrqRoutingTable (~24 KiB). In debug
+/// builds, the compiler may create multiple unoptimized copies of large
+/// structs on the stack during construction and moves.
+pub const KERNEL_STACK_SIZE: usize = 256 * 1024;
 
 /// Maximum number of CPU cores.
 pub const MAX_CORES: usize = 8;

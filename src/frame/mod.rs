@@ -6,6 +6,8 @@
 
 #[cfg(any(target_os = "none", test))]
 pub mod arch;
+#[cfg(target_os = "none")]
+pub mod boot;
 pub mod capabilities;
 pub mod cores;
 pub mod fields;
@@ -127,15 +129,8 @@ pub fn kernel_state() -> &'static KernelState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arena::Arena;
     use crate::frame::lock::LockOrder;
     use crate::space_manager::{RootPool, SpaceManager};
-
-    fn make_arena<T>() -> Arena<T> {
-        Arena {
-            store: crate::frame::slab::SlabStore::new(),
-        }
-    }
 
     fn make_space_manager() -> SpaceManager {
         SpaceManager {
@@ -157,14 +152,7 @@ mod tests {
     /// each test in isolation.
     #[test]
     fn test_d82_init_and_access_kernel_state() {
-        let state = KernelState::new(
-            make_arena(),
-            make_arena(),
-            make_arena(),
-            make_arena(),
-            make_arena(),
-            make_space_manager(),
-        );
+        let state = KernelState::new(make_space_manager());
 
         // Initialize the global.
         init_kernel_state(state);

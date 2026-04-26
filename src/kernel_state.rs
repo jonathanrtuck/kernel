@@ -177,27 +177,20 @@ pub struct KernelState {
 }
 
 impl KernelState {
-    /// Construct a new KernelState with the given arenas and SpaceManager.
+    /// Construct a new KernelState with the given SpaceManager.
     ///
     /// D82: tests construct this locally. The boot path constructs it and
     /// passes it to `frame::init_kernel_state()` for global placement.
     ///
-    /// Each arena starts empty — first allocations draw pages from the
-    /// SpaceManager's root pool (D70, D31).
-    pub fn new(
-        fields: Arena<Field>,
-        observers: Arena<Observer>,
-        pulsars: Arena<Pulsar>,
-        spaces: Arena<Space>,
-        times: Arena<Time>,
-        space_manager: SpaceManager,
-    ) -> KernelState {
+    /// Arenas are created empty internally — first allocations draw pages
+    /// from the SpaceManager's root pool (D70, D31).
+    pub fn new(space_manager: SpaceManager) -> KernelState {
         KernelState {
-            fields: Lock::new(LockOrder::Field, fields),
-            observers: Lock::new(LockOrder::Observer, observers),
-            pulsars: Lock::new(LockOrder::Pulsar, pulsars),
-            spaces: Lock::new(LockOrder::Space, spaces),
-            times: Lock::new(LockOrder::Time, times),
+            fields: Lock::new(LockOrder::Field, Arena::new()),
+            observers: Lock::new(LockOrder::Observer, Arena::new()),
+            pulsars: Lock::new(LockOrder::Pulsar, Arena::new()),
+            spaces: Lock::new(LockOrder::Space, Arena::new()),
+            times: Lock::new(LockOrder::Time, Arena::new()),
             space_manager: Lock::new(LockOrder::SpaceManager, space_manager),
             irq_routes: Lock::new(LockOrder::IrqRouting, IrqRoutingTable::new()),
         }
@@ -210,12 +203,6 @@ mod tests {
     use crate::space_manager::RootPool;
 
     // ── Test helpers ──────────────────────────────────────────────────
-
-    fn make_arena<T>() -> Arena<T> {
-        Arena {
-            store: crate::frame::slab::SlabStore::new(),
-        }
-    }
 
     fn make_space_manager() -> SpaceManager {
         SpaceManager {
@@ -230,14 +217,7 @@ mod tests {
     }
 
     fn make_kernel_state() -> KernelState {
-        KernelState::new(
-            make_arena(),
-            make_arena(),
-            make_arena(),
-            make_arena(),
-            make_arena(),
-            make_space_manager(),
-        )
+        KernelState::new(make_space_manager())
     }
 
     // ── D82 — KernelState construction ────────────────────────────────
@@ -417,14 +397,7 @@ mod tests {
     #[test]
     fn test_d82_local_construction_for_tests() {
         // Construct directly — no frame/ global needed.
-        let state = KernelState::new(
-            make_arena(),
-            make_arena(),
-            make_arena(),
-            make_arena(),
-            make_arena(),
-            make_space_manager(),
-        );
+        let state = KernelState::new(make_space_manager());
         // Must be fully functional. Uses spaces arena (zero-safe).
         let mut spaces = state.spaces.acquire();
         let (id, _) = spaces.allocate().expect("local state must be functional");

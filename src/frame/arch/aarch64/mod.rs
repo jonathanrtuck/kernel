@@ -86,6 +86,14 @@ pub fn tpidr_el1() -> u64 {
     sysreg::tpidr_el1()
 }
 
+/// Write the per-core data pointer (TPIDR_EL1).
+///
+/// D83: called once per core during boot to store the PerCoreData pointer.
+/// TPIDR_EL1 is per-core writable state — no nomem.
+pub fn set_tpidr_el1(value: u64) {
+    sysreg::set_tpidr_el1(value);
+}
+
 /// Signal a fatal crash to the hypervisor via the pvpanic device.
 ///
 /// Writes 0x01 to the pvpanic MMIO register, which tells QEMU/HVF that
