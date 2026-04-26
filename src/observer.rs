@@ -147,8 +147,20 @@ pub struct Observer {
     /// Arch core code resolves this for save/restore on context switch.
     pub register_state: RegisterStateHandle,
 
+    /// Per-Observer ASID (D101). Assigned sequentially at creation from
+    /// the kernel's AsidAllocator. Encoded in TTBR0 bits[63:48] and used
+    /// as the TLB invalidation key on Space unmap.
+    ///
+    /// Interim field: once per-Observer page tables are fully wired
+    /// (D89 L1 root from structural backing → real TTBR0), this field
+    /// can be removed — derive from `page_table_root` bits[63:48]
+    /// instead. The field exists because Phase E sets page_table_root
+    /// to 0 for non-root Observers (identity map, no per-Observer L1).
+    pub asid: u16,
+
     /// Physical address of the per-Observer page table root (D5/D26).
     /// Hot path: loaded into the hardware translation base on context switch.
+    /// Encodes ASID in bits[63:48] via `make_ttbr0(asid, l1_root_pa)`.
     pub page_table_root: u64,
 
     /// Pointer to the flat capability array in structural backing (D4/D8).
@@ -427,9 +439,15 @@ impl Observer {
 
 #[cfg(test)]
 impl Observer {
+    /// Base test Observer: Runnable, dangling pointers, 100 compute.
+    ///
+    /// Use this for tests that only need a valid Observer struct without
+    /// interacting with register state or capabilities. Override individual
+    /// fields after construction for specific test scenarios.
     pub(crate) fn test_default() -> Self {
         Observer {
             object_id: ObjectId(0),
+            asid: 0,
             register_state: RegisterStateHandle::new(NonNull::dangling()),
             page_table_root: 0,
             cap_table: NonNull::dangling(),
@@ -448,6 +466,34 @@ impl Observer {
             backing_va_base: 0,
             backing_size: 0,
         }
+    }
+
+    /// Test Observer with a real register state allocation.
+    ///
+    /// Use for IPC dispatch tests that read/write register contexts.
+    pub(crate) fn test_with_registers() -> Self {
+        let rs = crate::frame::cores::alloc_test_register_state();
+        let mut obs = Self::test_default();
+
+        obs.register_state = RegisterStateHandle::new(rs);
+
+        obs
+    }
+
+    /// Test Observer with registers and an allocated cap table.
+    ///
+    /// Freelist is initialized from SLOT_USER_START. Use for tests that
+    /// install, transfer, or close capabilities.
+    pub(crate) fn test_with_cap_table(capacity: u32) -> Self {
+        let entries =
+            crate::frame::capabilities::allocate_cap_table(capacity).expect("test cap table alloc");
+        let mut obs = Self::test_with_registers();
+
+        obs.cap_table = entries;
+        obs.cap_table_capacity = capacity;
+        obs.cap_table_free_head = Some(crate::capability::SLOT_USER_START);
+
+        obs
     }
 }
 
@@ -473,52 +519,22 @@ mod tests {
 
     #[test]
     fn precision_is_derived() {
-        let observer = Observer {
-            object_id: ObjectId(0),
-            register_state: RegisterStateHandle(NonNull::dangling()),
-            page_table_root: 0,
-            cap_table: NonNull::dangling(),
-            cap_table_capacity: 0,
-            cap_table_free_head: None,
-            cap_table_count: 0,
-            state: PrimaryState::Inert,
-            suspended: false,
-            compute_aggregate: 0,
-            responsiveness: 43,
-            throughput: 43,
-            clock_access: false,
-            wait_state: WaitState::None,
-            refcount: 1,
-            generation: AtomicU64::new(0),
-            backing_va_base: 0,
-            backing_size: 0,
-        };
+        let mut observer = Observer::test_default();
+
+        observer.state = PrimaryState::Inert;
+        observer.compute_aggregate = 0;
+        observer.responsiveness = 43;
+        observer.throughput = 43;
 
         assert_eq!(observer.precision(), 42);
     }
 
     #[test]
     fn resume_from_inert() {
-        let mut observer = Observer {
-            object_id: ObjectId(0),
-            register_state: RegisterStateHandle(NonNull::dangling()),
-            page_table_root: 0,
-            cap_table: NonNull::dangling(),
-            cap_table_capacity: 0,
-            cap_table_free_head: None,
-            cap_table_count: 0,
-            state: PrimaryState::Inert,
-            suspended: false,
-            compute_aggregate: 0,
-            responsiveness: DEFAULT_RESPONSIVENESS,
-            throughput: DEFAULT_THROUGHPUT,
-            clock_access: false,
-            wait_state: WaitState::None,
-            refcount: 1,
-            generation: AtomicU64::new(0),
-            backing_va_base: 0,
-            backing_size: 0,
-        };
+        let mut observer = Observer::test_default();
+
+        observer.state = PrimaryState::Inert;
+        observer.compute_aggregate = 0;
 
         assert!(observer.resume().is_ok());
         assert!(matches!(observer.state, PrimaryState::Runnable));
@@ -526,52 +542,19 @@ mod tests {
 
     #[test]
     fn resume_from_runnable_fails() {
-        let mut observer = Observer {
-            object_id: ObjectId(0),
-            register_state: RegisterStateHandle(NonNull::dangling()),
-            page_table_root: 0,
-            cap_table: NonNull::dangling(),
-            cap_table_capacity: 0,
-            cap_table_free_head: None,
-            cap_table_count: 0,
-            state: PrimaryState::Runnable,
-            suspended: false,
-            compute_aggregate: 0,
-            responsiveness: DEFAULT_RESPONSIVENESS,
-            throughput: DEFAULT_THROUGHPUT,
-            clock_access: false,
-            wait_state: WaitState::None,
-            refcount: 1,
-            generation: AtomicU64::new(0),
-            backing_va_base: 0,
-            backing_size: 0,
-        };
+        let mut observer = Observer::test_default();
+
+        observer.compute_aggregate = 0;
 
         assert!(observer.resume().is_err());
     }
 
     #[test]
     fn compute_aggregate_tracking() {
-        let mut observer = Observer {
-            object_id: ObjectId(0),
-            register_state: RegisterStateHandle(NonNull::dangling()),
-            page_table_root: 0,
-            cap_table: NonNull::dangling(),
-            cap_table_capacity: 0,
-            cap_table_free_head: None,
-            cap_table_count: 0,
-            state: PrimaryState::Inert,
-            suspended: false,
-            compute_aggregate: 0,
-            responsiveness: DEFAULT_RESPONSIVENESS,
-            throughput: DEFAULT_THROUGHPUT,
-            clock_access: false,
-            wait_state: WaitState::None,
-            refcount: 1,
-            generation: AtomicU64::new(0),
-            backing_va_base: 0,
-            backing_size: 0,
-        };
+        let mut observer = Observer::test_default();
+
+        observer.state = PrimaryState::Inert;
+        observer.compute_aggregate = 0;
 
         observer.add_compute(100);
         observer.add_compute(50);
@@ -585,26 +568,12 @@ mod tests {
 
     #[test]
     fn unblock_while_suspended_transitions_but_signals_no_enqueue() {
-        let mut observer = Observer {
-            object_id: ObjectId(0),
-            register_state: RegisterStateHandle(NonNull::dangling()),
-            page_table_root: 0,
-            cap_table: NonNull::dangling(),
-            cap_table_capacity: 0,
-            cap_table_free_head: None,
-            cap_table_count: 0,
-            state: PrimaryState::Blocked,
-            suspended: true,
-            compute_aggregate: 0,
-            responsiveness: DEFAULT_RESPONSIVENESS,
-            throughput: DEFAULT_THROUGHPUT,
-            clock_access: false,
-            wait_state: WaitState::None,
-            refcount: 1,
-            generation: AtomicU64::new(0),
-            backing_va_base: 0,
-            backing_size: 0,
-        };
+        let mut observer = Observer::test_default();
+
+        observer.state = PrimaryState::Blocked;
+        observer.suspended = true;
+        observer.compute_aggregate = 0;
+
         let should_enqueue = observer.unblock().unwrap();
 
         assert!(!should_enqueue, "suspended Observer should not be enqueued");
@@ -614,26 +583,11 @@ mod tests {
 
     #[test]
     fn unblock_without_suspension_signals_enqueue() {
-        let mut observer = Observer {
-            object_id: ObjectId(0),
-            register_state: RegisterStateHandle(NonNull::dangling()),
-            page_table_root: 0,
-            cap_table: NonNull::dangling(),
-            cap_table_capacity: 0,
-            cap_table_free_head: None,
-            cap_table_count: 0,
-            state: PrimaryState::Blocked,
-            suspended: false,
-            compute_aggregate: 0,
-            responsiveness: DEFAULT_RESPONSIVENESS,
-            throughput: DEFAULT_THROUGHPUT,
-            clock_access: false,
-            wait_state: WaitState::None,
-            refcount: 1,
-            generation: AtomicU64::new(0),
-            backing_va_base: 0,
-            backing_size: 0,
-        };
+        let mut observer = Observer::test_default();
+
+        observer.state = PrimaryState::Blocked;
+        observer.compute_aggregate = 0;
+
         let should_enqueue = observer.unblock().unwrap();
 
         assert!(should_enqueue, "non-suspended Observer should be enqueued");

@@ -86,11 +86,14 @@ pub unsafe fn map_space_in_observer(
     Ok(())
 }
 
-/// Unmap a Space from an Observer's page table (D91 close).
+/// Unmap a Space from an Observer's page table (D91 close, D101 invalidation).
 ///
 /// Called when the last cap to a Space is closed in an Observer's cap table.
 /// Frees the L2 table back to the root pool if it becomes empty.
-/// Issues TLB invalidation for the unmapped range.
+///
+/// D101 threshold-based TLB invalidation:
+/// - `page_count <= ASID_TLBI_THRESHOLD`: per-VA (`TLBI VAE1IS`) for each page
+/// - `page_count > ASID_TLBI_THRESHOLD`: per-ASID (`TLBI ASIDE1IS`) in one shot
 ///
 /// # Safety
 ///
@@ -125,7 +128,12 @@ pub unsafe fn unmap_space_from_observer(
         space_manager.return_pages(l2_pa as usize, 1);
     }
 
-    mmu::tlb_invalidate_space_pages(asid, space_va_base, space_page_count);
+    // D101: threshold-based invalidation strategy.
+    if space_page_count <= crate::kernel_state::ASID_TLBI_THRESHOLD {
+        mmu::tlb_invalidate_space_pages(asid, space_va_base, space_page_count);
+    } else {
+        mmu::tlb_invalidate_asid(asid);
+    }
 }
 
 /// Populate a Space's L3 table at a physical address (D90).

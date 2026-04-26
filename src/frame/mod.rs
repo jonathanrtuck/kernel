@@ -152,7 +152,7 @@ mod tests {
     /// each test in isolation.
     #[test]
     fn test_d82_init_and_access_kernel_state() {
-        let state = KernelState::new(make_space_manager());
+        let state = KernelState::new(make_space_manager(), 16);
 
         // Initialize the global.
         init_kernel_state(state);

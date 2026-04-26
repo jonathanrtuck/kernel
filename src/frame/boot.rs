@@ -175,11 +175,13 @@ fn create_root_observer(
     ks: &KernelState,
     rs_pa: usize,
     page_table_root: u64,
+    asid: u16,
 ) -> Result<(crate::arena::ObjectId, NonNull<Observer>), AllocError> {
     let mut observers = ks.observers.acquire();
     let (obs_id, obs) = observers.allocate()?;
 
     obs.object_id = obs_id;
+    obs.asid = asid;
     obs.register_state =
         RegisterStateHandle::new(NonNull::new(rs_pa as *mut u8).expect("rs_pa must be non-null"));
     obs.page_table_root = page_table_root;
@@ -318,9 +320,11 @@ pub fn enter_first_observer(ks: &KernelState) -> ! {
     );
 
     let rs_pa = setup_register_state(ks).expect("allocate register state");
-    let page_table_root = mmu::current_ttbr0();
+    let asid = crate::frame::cores::allocate_asid(ks);
+    let l1_root_pa = mmu::ttbr_base_address(mmu::current_ttbr0());
+    let page_table_root = mmu::make_ttbr0(asid, l1_root_pa);
     let (_obs_id, obs_ptr) =
-        create_root_observer(ks, rs_pa, page_table_root).expect("create root observer");
+        create_root_observer(ks, rs_pa, page_table_root, asid).expect("create root observer");
 
     init_bsp_per_core_data(rs_pa as *mut RegisterState);
     set_current_observer(obs_ptr);

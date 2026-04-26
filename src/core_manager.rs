@@ -1925,8 +1925,10 @@ impl<S: Scheduler> CoreState<S> {
                         Ok(pair) => pair,
                         Err(_) => return typed_error(SyscallError::InsufficientResource),
                     };
+                    let asid = crate::frame::cores::allocate_asid(kernel_state);
 
                     obs.object_id = id;
+                    obs.asid = asid;
                     obs.register_state = crate::observer::RegisterStateHandle::new(rs_ptr);
                     obs.page_table_root = 0;
                     obs.cap_table = cap_entries_new;
@@ -2532,7 +2534,7 @@ mod tests {
     }
 
     fn make_kernel_state() -> KernelState {
-        KernelState::new(make_space_manager())
+        KernelState::new(make_space_manager(), 16)
     }
 
     // ── Spec verifier tests ──────────────────────────────────────────
@@ -3683,28 +3685,7 @@ mod tests {
     // Helper: make an Observer with a real (test) RegisterState so
     // register write helpers can operate on it.
     fn make_observer_with_registers() -> Observer {
-        let rs_ptr = crate::frame::cores::alloc_test_register_state();
-
-        Observer {
-            object_id: ObjectId(0),
-            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
-            page_table_root: 0,
-            cap_table: NonNull::dangling(),
-            cap_table_capacity: 0,
-            cap_table_free_head: None,
-            cap_table_count: 0,
-            state: crate::observer::PrimaryState::Runnable,
-            suspended: false,
-            compute_aggregate: 100,
-            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
-            throughput: crate::observer::DEFAULT_THROUGHPUT,
-            clock_access: false,
-            wait_state: crate::observer::WaitState::None,
-            backing_va_base: 0,
-            backing_size: 0,
-            refcount: 1,
-            generation: core::sync::atomic::AtomicU64::new(0),
-        }
+        crate::observer::Observer::test_with_registers()
     }
 
     fn make_message(label: u64, badge: u64) -> crate::field::Message {
@@ -4510,6 +4491,7 @@ mod tests {
 
         let observer = Observer {
             object_id: ObjectId(0),
+            asid: 0,
             register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
             page_table_root: 0,
             cap_table: entries,
@@ -5202,6 +5184,7 @@ mod tests {
                 crate::capability::SLOT_USER_START,
             );
 
+            obs.asid = 0;
             obs.register_state = crate::observer::RegisterStateHandle::new(rs);
             obs.page_table_root = 0;
             obs.cap_table = entries;
@@ -6730,31 +6713,8 @@ mod tests {
     /// receiver's table, returns the encoded handle.
     #[test]
     fn test_d96_install_transferred_cap_in_receiver() {
-        let rs_ptr = crate::frame::cores::alloc_test_register_state();
-        let entries = crate::frame::capabilities::alloc_test_entries(16);
-
-        crate::frame::capabilities::init_freelist(entries, 16, crate::capability::SLOT_USER_START);
-
-        let mut receiver = Observer {
-            object_id: ObjectId(0),
-            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
-            page_table_root: 0,
-            cap_table: entries,
-            cap_table_capacity: 16,
-            cap_table_free_head: Some(crate::capability::SLOT_USER_START),
-            cap_table_count: 0,
-            state: crate::observer::PrimaryState::Runnable,
-            suspended: false,
-            compute_aggregate: 100,
-            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
-            throughput: crate::observer::DEFAULT_THROUGHPUT,
-            clock_access: false,
-            wait_state: crate::observer::WaitState::None,
-            backing_va_base: 0,
-            backing_size: 0,
-            refcount: 1,
-            generation: core::sync::atomic::AtomicU64::new(0),
-        };
+        let mut receiver = crate::observer::Observer::test_with_cap_table(16);
+        let entries = receiver.cap_table;
         let receiver_ptr = NonNull::from(&mut receiver);
         let transferred = crate::capability::TransferredCap {
             object_type: ObjectType::Field,
@@ -6796,29 +6756,16 @@ mod tests {
     /// D96: install into a full table returns TableFull.
     #[test]
     fn test_d96_install_cap_table_full_returns_error() {
-        let rs_ptr = crate::frame::cores::alloc_test_register_state();
-        let entries = crate::frame::capabilities::alloc_test_entries(4);
         // No freelist initialized — free_head is None.
-        let mut receiver = Observer {
-            object_id: ObjectId(0),
-            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
-            page_table_root: 0,
-            cap_table: entries,
-            cap_table_capacity: 4,
-            cap_table_free_head: None,
-            cap_table_count: 4,
-            state: crate::observer::PrimaryState::Runnable,
-            suspended: false,
-            compute_aggregate: 0,
-            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
-            throughput: crate::observer::DEFAULT_THROUGHPUT,
-            clock_access: false,
-            wait_state: crate::observer::WaitState::None,
-            backing_va_base: 0,
-            backing_size: 0,
-            refcount: 1,
-            generation: core::sync::atomic::AtomicU64::new(0),
-        };
+        let mut receiver = crate::observer::Observer::test_with_registers();
+        let entries = crate::frame::capabilities::alloc_test_entries(4);
+
+        receiver.cap_table = entries;
+        receiver.cap_table_capacity = 4;
+        receiver.cap_table_free_head = None;
+        receiver.cap_table_count = 4;
+        receiver.compute_aggregate = 0;
+
         let receiver_ptr = NonNull::from(&mut receiver);
         let transferred = crate::capability::TransferredCap {
             object_type: ObjectType::Space,
@@ -6840,31 +6787,8 @@ mod tests {
     /// D96: reply cap is send-once — the transferred cap carries the flag.
     #[test]
     fn test_d96_reply_cap_is_send_once() {
-        let rs_ptr = crate::frame::cores::alloc_test_register_state();
-        let entries = crate::frame::capabilities::alloc_test_entries(16);
-
-        crate::frame::capabilities::init_freelist(entries, 16, crate::capability::SLOT_USER_START);
-
-        let mut receiver = Observer {
-            object_id: ObjectId(0),
-            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
-            page_table_root: 0,
-            cap_table: entries,
-            cap_table_capacity: 16,
-            cap_table_free_head: Some(crate::capability::SLOT_USER_START),
-            cap_table_count: 0,
-            state: crate::observer::PrimaryState::Runnable,
-            suspended: false,
-            compute_aggregate: 100,
-            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
-            throughput: crate::observer::DEFAULT_THROUGHPUT,
-            clock_access: false,
-            wait_state: crate::observer::WaitState::None,
-            backing_va_base: 0,
-            backing_size: 0,
-            refcount: 1,
-            generation: core::sync::atomic::AtomicU64::new(0),
-        };
+        let mut receiver = crate::observer::Observer::test_with_cap_table(16);
+        let entries = receiver.cap_table;
         let receiver_ptr = NonNull::from(&mut receiver);
         // Simulate a reply cap: send-once = true, reply badge embedded.
         let reply_transferred = crate::capability::TransferredCap {
@@ -6889,31 +6813,8 @@ mod tests {
     /// table. Registers x6 and x7 carry the encoded handles.
     #[test]
     fn test_d96_deliver_message_installs_caps() {
-        let rs_ptr = crate::frame::cores::alloc_test_register_state();
-        let entries = crate::frame::capabilities::alloc_test_entries(16);
-
-        crate::frame::capabilities::init_freelist(entries, 16, crate::capability::SLOT_USER_START);
-
-        let mut receiver = Observer {
-            object_id: ObjectId(0),
-            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
-            page_table_root: 0,
-            cap_table: entries,
-            cap_table_capacity: 16,
-            cap_table_free_head: Some(crate::capability::SLOT_USER_START),
-            cap_table_count: 0,
-            state: crate::observer::PrimaryState::Runnable,
-            suspended: false,
-            compute_aggregate: 100,
-            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
-            throughput: crate::observer::DEFAULT_THROUGHPUT,
-            clock_access: false,
-            wait_state: crate::observer::WaitState::None,
-            backing_va_base: 0,
-            backing_size: 0,
-            refcount: 1,
-            generation: core::sync::atomic::AtomicU64::new(0),
-        };
+        let mut receiver = crate::observer::Observer::test_with_cap_table(16);
+        let entries = receiver.cap_table;
         let receiver_ptr = NonNull::from(&mut receiver);
         let message = crate::field::Message {
             data: [0xAA, 0xBB, 0xCC, 0xDD],
@@ -6993,27 +6894,10 @@ mod tests {
     /// D96: deliver_message with no caps writes CAP_ABSENT to x6 and x7.
     #[test]
     fn test_d96_deliver_message_no_caps_writes_absent() {
-        let rs_ptr = crate::frame::cores::alloc_test_register_state();
-        let mut receiver = Observer {
-            object_id: ObjectId(0),
-            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
-            page_table_root: 0,
-            cap_table: NonNull::dangling(),
-            cap_table_capacity: 0,
-            cap_table_free_head: None,
-            cap_table_count: 0,
-            state: crate::observer::PrimaryState::Runnable,
-            suspended: false,
-            compute_aggregate: 0,
-            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
-            throughput: crate::observer::DEFAULT_THROUGHPUT,
-            clock_access: false,
-            wait_state: crate::observer::WaitState::None,
-            backing_va_base: 0,
-            backing_size: 0,
-            refcount: 1,
-            generation: core::sync::atomic::AtomicU64::new(0),
-        };
+        let mut receiver = crate::observer::Observer::test_with_registers();
+
+        receiver.compute_aggregate = 0;
+
         let receiver_ptr = NonNull::from(&mut receiver);
         let message = crate::field::Message {
             data: [1, 2, 3, 4],
@@ -7052,35 +6936,8 @@ mod tests {
         );
         let sender_ptr = NonNull::from(&mut sender);
         // Receiver has an empty table with freelist.
-        let rs_ptr = crate::frame::cores::alloc_test_register_state();
-        let receiver_entries = crate::frame::capabilities::alloc_test_entries(16);
-
-        crate::frame::capabilities::init_freelist(
-            receiver_entries,
-            16,
-            crate::capability::SLOT_USER_START,
-        );
-
-        let mut receiver = Observer {
-            object_id: ObjectId(0),
-            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
-            page_table_root: 0,
-            cap_table: receiver_entries,
-            cap_table_capacity: 16,
-            cap_table_free_head: Some(crate::capability::SLOT_USER_START),
-            cap_table_count: 0,
-            state: crate::observer::PrimaryState::Runnable,
-            suspended: false,
-            compute_aggregate: 100,
-            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
-            throughput: crate::observer::DEFAULT_THROUGHPUT,
-            clock_access: false,
-            wait_state: crate::observer::WaitState::None,
-            backing_va_base: 0,
-            backing_size: 0,
-            refcount: 1,
-            generation: core::sync::atomic::AtomicU64::new(0),
-        };
+        let mut receiver = crate::observer::Observer::test_with_cap_table(16);
+        let receiver_entries = receiver.cap_table;
         let receiver_ptr = NonNull::from(&mut receiver);
         // D96 §2: move cap from sender to receiver.
         let transferred =
@@ -7111,57 +6968,13 @@ mod tests {
     /// RoundRobin always approves, so this tests the fast-path cap install.
     #[test]
     fn test_d96_direct_switch_approved_installs_reply_cap() {
-        let rs_ptr = crate::frame::cores::alloc_test_register_state();
-        let receiver_entries = crate::frame::capabilities::alloc_test_entries(16);
+        let mut receiver = crate::observer::Observer::test_with_cap_table(16);
+        let receiver_entries = receiver.cap_table;
 
-        crate::frame::capabilities::init_freelist(
-            receiver_entries,
-            16,
-            crate::capability::SLOT_USER_START,
-        );
+        receiver.state = crate::observer::PrimaryState::Blocked;
 
-        let mut receiver = Observer {
-            object_id: ObjectId(0),
-            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
-            page_table_root: 0,
-            cap_table: receiver_entries,
-            cap_table_capacity: 16,
-            cap_table_free_head: Some(crate::capability::SLOT_USER_START),
-            cap_table_count: 0,
-            state: crate::observer::PrimaryState::Blocked,
-            suspended: false,
-            compute_aggregate: 100,
-            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
-            throughput: crate::observer::DEFAULT_THROUGHPUT,
-            clock_access: false,
-            wait_state: crate::observer::WaitState::None,
-            backing_va_base: 0,
-            backing_size: 0,
-            refcount: 1,
-            generation: core::sync::atomic::AtomicU64::new(0),
-        };
         let receiver_ptr = NonNull::from(&mut receiver);
-        let sender_rs = crate::frame::cores::alloc_test_register_state();
-        let mut sender = Observer {
-            object_id: ObjectId(0),
-            register_state: crate::observer::RegisterStateHandle::new(sender_rs),
-            page_table_root: 0,
-            cap_table: NonNull::dangling(),
-            cap_table_capacity: 0,
-            cap_table_free_head: None,
-            cap_table_count: 0,
-            state: crate::observer::PrimaryState::Runnable,
-            suspended: false,
-            compute_aggregate: 100,
-            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
-            throughput: crate::observer::DEFAULT_THROUGHPUT,
-            clock_access: false,
-            wait_state: crate::observer::WaitState::None,
-            backing_va_base: 0,
-            backing_size: 0,
-            refcount: 1,
-            generation: core::sync::atomic::AtomicU64::new(0),
-        };
+        let mut sender = crate::observer::Observer::test_with_registers();
         let sender_ptr = NonNull::from(&mut sender);
         let mut core = make_core_state();
 
@@ -7225,57 +7038,13 @@ mod tests {
     /// Uses WokeReceiverSlowPath as a proxy since RoundRobin always approves.
     #[test]
     fn test_d96_slow_path_delivers_reply_cap() {
-        let rs_ptr = crate::frame::cores::alloc_test_register_state();
-        let receiver_entries = crate::frame::capabilities::alloc_test_entries(16);
+        let mut receiver = crate::observer::Observer::test_with_cap_table(16);
+        let receiver_entries = receiver.cap_table;
 
-        crate::frame::capabilities::init_freelist(
-            receiver_entries,
-            16,
-            crate::capability::SLOT_USER_START,
-        );
+        receiver.state = crate::observer::PrimaryState::Blocked;
 
-        let mut receiver = Observer {
-            object_id: ObjectId(0),
-            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
-            page_table_root: 0,
-            cap_table: receiver_entries,
-            cap_table_capacity: 16,
-            cap_table_free_head: Some(crate::capability::SLOT_USER_START),
-            cap_table_count: 0,
-            state: crate::observer::PrimaryState::Blocked,
-            suspended: false,
-            compute_aggregate: 100,
-            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
-            throughput: crate::observer::DEFAULT_THROUGHPUT,
-            clock_access: false,
-            wait_state: crate::observer::WaitState::None,
-            backing_va_base: 0,
-            backing_size: 0,
-            refcount: 1,
-            generation: core::sync::atomic::AtomicU64::new(0),
-        };
         let receiver_ptr = NonNull::from(&mut receiver);
-        let sender_rs = crate::frame::cores::alloc_test_register_state();
-        let mut sender = Observer {
-            object_id: ObjectId(0),
-            register_state: crate::observer::RegisterStateHandle::new(sender_rs),
-            page_table_root: 0,
-            cap_table: NonNull::dangling(),
-            cap_table_capacity: 0,
-            cap_table_free_head: None,
-            cap_table_count: 0,
-            state: crate::observer::PrimaryState::Runnable,
-            suspended: false,
-            compute_aggregate: 100,
-            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
-            throughput: crate::observer::DEFAULT_THROUGHPUT,
-            clock_access: false,
-            wait_state: crate::observer::WaitState::None,
-            backing_va_base: 0,
-            backing_size: 0,
-            refcount: 1,
-            generation: core::sync::atomic::AtomicU64::new(0),
-        };
+        let mut sender = crate::observer::Observer::test_with_registers();
         let sender_ptr = NonNull::from(&mut sender);
         let mut core = make_core_state();
 
@@ -7334,31 +7103,10 @@ mod tests {
     /// D96: multiple cap installations advance the freelist correctly.
     #[test]
     fn test_d96_multiple_installs_advance_freelist() {
-        let rs_ptr = crate::frame::cores::alloc_test_register_state();
-        let entries = crate::frame::capabilities::alloc_test_entries(8);
+        let mut receiver = crate::observer::Observer::test_with_cap_table(8);
 
-        crate::frame::capabilities::init_freelist(entries, 8, crate::capability::SLOT_USER_START);
+        receiver.compute_aggregate = 0;
 
-        let mut receiver = Observer {
-            object_id: ObjectId(0),
-            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
-            page_table_root: 0,
-            cap_table: entries,
-            cap_table_capacity: 8,
-            cap_table_free_head: Some(crate::capability::SLOT_USER_START),
-            cap_table_count: 0,
-            state: crate::observer::PrimaryState::Runnable,
-            suspended: false,
-            compute_aggregate: 0,
-            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
-            throughput: crate::observer::DEFAULT_THROUGHPUT,
-            clock_access: false,
-            wait_state: crate::observer::WaitState::None,
-            backing_va_base: 0,
-            backing_size: 0,
-            refcount: 1,
-            generation: core::sync::atomic::AtomicU64::new(0),
-        };
         let receiver_ptr = NonNull::from(&mut receiver);
 
         // Install caps until the table is full (slots 3..8 = 5 slots).
@@ -7511,11 +7259,8 @@ mod tests {
     fn test_d97_clone_preserves_send_once() {
         let ks = make_kernel_state();
         let field_id = make_field_in_arena(&ks, 4);
-        let rs_ptr = crate::frame::cores::alloc_test_register_state();
-        let entries = crate::frame::capabilities::alloc_test_entries(16);
-
-        crate::frame::capabilities::init_freelist(entries, 16, crate::capability::SLOT_USER_START);
-
+        let mut sender = crate::observer::Observer::test_with_cap_table(16);
+        let entries = sender.cap_table;
         let entry = crate::frame::capabilities::entry_mut(entries, 16, 0).unwrap();
 
         *entry = crate::capability::Entry {
@@ -7526,27 +7271,8 @@ mod tests {
             send_once: true,
             stored_generation: 0,
         };
+        sender.cap_table_count = 1;
 
-        let mut sender = Observer {
-            object_id: ObjectId(0),
-            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
-            page_table_root: 0,
-            cap_table: entries,
-            cap_table_capacity: 16,
-            cap_table_free_head: Some(crate::capability::SLOT_USER_START),
-            cap_table_count: 1,
-            state: crate::observer::PrimaryState::Runnable,
-            suspended: false,
-            compute_aggregate: 100,
-            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
-            throughput: crate::observer::DEFAULT_THROUGHPUT,
-            clock_access: false,
-            wait_state: crate::observer::WaitState::None,
-            backing_va_base: 0,
-            backing_size: 0,
-            refcount: 1,
-            generation: core::sync::atomic::AtomicU64::new(0),
-        };
         let sender_ptr = NonNull::from(&mut sender);
         let handle = crate::capability::Handle {
             index: 0,
@@ -7679,11 +7405,8 @@ mod tests {
         // Create a sender with TWO caps to the same Space:
         // slot 0 = Space cap (will be closed)
         // slot 3 = Space cap (remains)
-        let rs_ptr = crate::frame::cores::alloc_test_register_state();
-        let entries = crate::frame::capabilities::alloc_test_entries(16);
-
-        crate::frame::capabilities::init_freelist(entries, 16, crate::capability::SLOT_USER_START);
-
+        let mut sender = crate::observer::Observer::test_with_cap_table(16);
+        let entries = sender.cap_table;
         let entry0 = crate::frame::capabilities::entry_mut(entries, 16, 0).unwrap();
 
         *entry0 = crate::capability::Entry {
@@ -7705,27 +7428,8 @@ mod tests {
             send_once: false,
             stored_generation: 0,
         };
-
-        let mut sender = Observer {
-            object_id: ObjectId(0),
-            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
-            page_table_root: 0,
-            cap_table: entries,
-            cap_table_capacity: 16,
-            cap_table_free_head: Some(4),
-            cap_table_count: 2,
-            state: crate::observer::PrimaryState::Runnable,
-            suspended: false,
-            compute_aggregate: 100,
-            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
-            throughput: crate::observer::DEFAULT_THROUGHPUT,
-            clock_access: false,
-            wait_state: crate::observer::WaitState::None,
-            backing_va_base: 0,
-            backing_size: 0,
-            refcount: 1,
-            generation: core::sync::atomic::AtomicU64::new(0),
-        };
+        sender.cap_table_free_head = Some(4);
+        sender.cap_table_count = 2;
         let sender_ptr = NonNull::from(&mut sender);
         let handle = crate::capability::Handle {
             index: 0,
@@ -7928,6 +7632,7 @@ mod tests {
             );
 
             obs.object_id = id;
+            obs.asid = 0;
             obs.register_state = crate::observer::RegisterStateHandle::new(rs);
             obs.cap_table = cap_entries;
             obs.cap_table_capacity = 16;
@@ -7940,11 +7645,8 @@ mod tests {
             (id, cap_entries)
         };
         // Sender has TWO caps: slot 0 = Observer cap (target), slot 3 = Field cap (source).
-        let rs_ptr = crate::frame::cores::alloc_test_register_state();
-        let entries = crate::frame::capabilities::alloc_test_entries(16);
-
-        crate::frame::capabilities::init_freelist(entries, 16, 4);
-
+        let mut sender = crate::observer::Observer::test_with_cap_table(16);
+        let entries = sender.cap_table;
         let slot0 = crate::frame::capabilities::entry_mut(entries, 16, 0).unwrap();
 
         *slot0 = crate::capability::Entry {
@@ -7966,27 +7668,9 @@ mod tests {
             send_once: false,
             stored_generation: 0,
         };
+        sender.cap_table_free_head = Some(4);
+        sender.cap_table_count = 2;
 
-        let mut sender = Observer {
-            object_id: ObjectId(0),
-            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
-            page_table_root: 0,
-            cap_table: entries,
-            cap_table_capacity: 16,
-            cap_table_free_head: Some(4),
-            cap_table_count: 2,
-            state: crate::observer::PrimaryState::Runnable,
-            suspended: false,
-            compute_aggregate: 100,
-            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
-            throughput: crate::observer::DEFAULT_THROUGHPUT,
-            clock_access: false,
-            wait_state: crate::observer::WaitState::None,
-            backing_va_base: 0,
-            backing_size: 0,
-            refcount: 1,
-            generation: core::sync::atomic::AtomicU64::new(0),
-        };
         let sender_ptr = NonNull::from(&mut sender);
         let observer_handle = crate::capability::Handle {
             index: 0,
@@ -8079,6 +7763,7 @@ mod tests {
             };
 
             obs.object_id = id;
+            obs.asid = 0;
             obs.register_state = crate::observer::RegisterStateHandle::new(rs);
             obs.cap_table = cap_entries;
             obs.cap_table_capacity = 16;
@@ -8091,11 +7776,8 @@ mod tests {
             id
         };
         // Sender has: slot 0 = Observer cap, slot 3 = new handler Field cap.
-        let rs_ptr = crate::frame::cores::alloc_test_register_state();
-        let entries = crate::frame::capabilities::alloc_test_entries(16);
-
-        crate::frame::capabilities::init_freelist(entries, 16, 4);
-
+        let mut sender = crate::observer::Observer::test_with_cap_table(16);
+        let entries = sender.cap_table;
         let slot0 = crate::frame::capabilities::entry_mut(entries, 16, 0).unwrap();
 
         *slot0 = crate::capability::Entry {
@@ -8117,27 +7799,9 @@ mod tests {
             send_once: false,
             stored_generation: 0,
         };
+        sender.cap_table_free_head = Some(4);
+        sender.cap_table_count = 2;
 
-        let mut sender = Observer {
-            object_id: ObjectId(0),
-            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
-            page_table_root: 0,
-            cap_table: entries,
-            cap_table_capacity: 16,
-            cap_table_free_head: Some(4),
-            cap_table_count: 2,
-            state: crate::observer::PrimaryState::Runnable,
-            suspended: false,
-            compute_aggregate: 100,
-            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
-            throughput: crate::observer::DEFAULT_THROUGHPUT,
-            clock_access: false,
-            wait_state: crate::observer::WaitState::None,
-            backing_va_base: 0,
-            backing_size: 0,
-            refcount: 1,
-            generation: core::sync::atomic::AtomicU64::new(0),
-        };
         let sender_ptr = NonNull::from(&mut sender);
         let observer_handle = crate::capability::Handle {
             index: 0,
@@ -8204,6 +7868,7 @@ mod tests {
             );
 
             obs.object_id = id;
+            obs.asid = 0;
             obs.register_state = crate::observer::RegisterStateHandle::new(rs);
             obs.cap_table = cap_entries;
             obs.cap_table_capacity = 16;
@@ -8227,11 +7892,8 @@ mod tests {
             id
         };
         // Sender: slot 0 = Observer, slot 3 = Space (wrong type for handler).
-        let rs_ptr = crate::frame::cores::alloc_test_register_state();
-        let entries = crate::frame::capabilities::alloc_test_entries(16);
-
-        crate::frame::capabilities::init_freelist(entries, 16, 4);
-
+        let mut sender = crate::observer::Observer::test_with_cap_table(16);
+        let entries = sender.cap_table;
         let slot0 = crate::frame::capabilities::entry_mut(entries, 16, 0).unwrap();
 
         *slot0 = crate::capability::Entry {
@@ -8253,27 +7915,9 @@ mod tests {
             send_once: false,
             stored_generation: 0,
         };
+        sender.cap_table_free_head = Some(4);
+        sender.cap_table_count = 2;
 
-        let mut sender = Observer {
-            object_id: ObjectId(0),
-            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
-            page_table_root: 0,
-            cap_table: entries,
-            cap_table_capacity: 16,
-            cap_table_free_head: Some(4),
-            cap_table_count: 2,
-            state: crate::observer::PrimaryState::Runnable,
-            suspended: false,
-            compute_aggregate: 100,
-            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
-            throughput: crate::observer::DEFAULT_THROUGHPUT,
-            clock_access: false,
-            wait_state: crate::observer::WaitState::None,
-            backing_va_base: 0,
-            backing_size: 0,
-            refcount: 1,
-            generation: core::sync::atomic::AtomicU64::new(0),
-        };
         let sender_ptr = NonNull::from(&mut sender);
         let observer_handle = crate::capability::Handle {
             index: 0,
@@ -8832,30 +8476,9 @@ mod tests {
     /// Helper: create an Observer with registers AND a cap table.
     /// Optionally installs a handler cap at slot 0 pointing to the given Field.
     fn make_observer_with_handler(handler_field_id: Option<(ObjectId, u64)>) -> Observer {
-        let rs_ptr = crate::frame::cores::alloc_test_register_state();
-        let cap_capacity = 8u32;
-        let entries =
-            crate::frame::capabilities::allocate_cap_table(cap_capacity).expect("cap table alloc");
-        let mut obs = Observer {
-            object_id: ObjectId(42),
-            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
-            page_table_root: 0,
-            cap_table: entries,
-            cap_table_capacity: cap_capacity,
-            cap_table_free_head: Some(crate::capability::SLOT_USER_START),
-            cap_table_count: 0,
-            state: crate::observer::PrimaryState::Runnable,
-            suspended: false,
-            compute_aggregate: 100,
-            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
-            throughput: crate::observer::DEFAULT_THROUGHPUT,
-            clock_access: false,
-            wait_state: crate::observer::WaitState::None,
-            backing_va_base: 0,
-            backing_size: 0,
-            refcount: 1,
-            generation: core::sync::atomic::AtomicU64::new(0),
-        };
+        let mut obs = crate::observer::Observer::test_with_cap_table(8);
+
+        obs.object_id = ObjectId(42);
 
         if let Some((field_id, field_gen)) = handler_field_id {
             let handler_entry = crate::capability::Entry {

@@ -294,6 +294,33 @@ pub const fn asid_width_from_mmfr0(mmfr0: u64) -> u8 {
     if ((mmfr0 >> 4) & 0xF) >= 2 { 16 } else { 8 }
 }
 
+/// Read the hardware ASID width (D101).
+///
+/// Reads `ID_AA64MMFR0_EL1` and returns 8 or 16. Called at boot to
+/// configure the `AsidAllocator` in `KernelState`.
+#[cfg(target_os = "none")]
+pub fn asid_width() -> u8 {
+    asid_width_from_mmfr0(sysreg::id_aa64mmfr0_el1())
+}
+
+/// Invalidate all user-space TLB entries across all cores (D101 wrap flush).
+///
+/// Called when the ASID counter wraps to flush stale entries from the
+/// previous generation. No preceding page-table stores to drain, so no
+/// pre-barrier (`DSB ISHST`) is needed — unlike the per-VA/per-ASID
+/// unmap paths which must drain page-table stores before the TLBI.
+///
+/// Sequence: `TLBI VMALLE1IS; DSB ISH; ISB` — the minimum ARM ARM
+/// requirement for recycled-identifier flush. `DSB ISH` ensures the TLBI
+/// completes on all cores before the new ASID enters TTBR0. `ISB`
+/// synchronizes the instruction stream.
+#[cfg(target_os = "none")]
+pub fn tlb_flush_all_user() {
+    sysreg::tlbi_vmalle1is();
+    sysreg::dsb_ish();
+    sysreg::isb();
+}
+
 // ---------------------------------------------------------------------------
 // Boot-time page table modification (D94)
 // ---------------------------------------------------------------------------

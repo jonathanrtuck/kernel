@@ -52,6 +52,9 @@ pub enum LockOrder {
     /// not participate in the Field-Observer-Pulsar ordering chain.
     /// Acquired independently by handle_irq on the interrupt path.
     IrqRouting = 6,
+    /// ASID allocator (D101) — unordered with Field/Observer/Pulsar.
+    /// Sequential ASID counter, acquired during Observer creation.
+    AsidAllocator = 7,
 }
 
 impl LockOrder {

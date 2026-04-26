@@ -14,8 +14,13 @@
 //! Direct-indexed by INTID (max 1024). Lock<IrqRoutingTable> with unordered
 //! LockOrder::IrqRouting (does not participate in Field-Observer-Pulsar chain).
 //!
+//! D101: ASID allocator added — sequential counter for per-Observer ASID
+//! assignment. Lock<AsidAllocator> with unordered LockOrder::AsidAllocator.
+//! Wrap triggers full TLB flush; counter resets.
+//!
 //! D53: lock ordering — Field < Observer < Pulsar. Space, Time, SpaceManager,
-//! and IrqRouting are unordered (no cross-arena operations with the ordered types).
+//! IrqRouting, and AsidAllocator are unordered (no cross-arena operations with
+//! the ordered types).
 
 use crate::arena::{Arena, ObjectId};
 use crate::capability::Badge;
@@ -207,6 +212,99 @@ impl IrqRoutingTable {
     }
 }
 
+// ── ASID allocation (D101) ─────────────────────────────────────────
+
+/// D101: per-VA vs per-ASID TLB invalidation threshold.
+///
+/// When unmapping a Space from an Observer, if `page_count <= ASID_TLBI_THRESHOLD`
+/// the kernel uses per-VA invalidation (`TLBI VAE1IS`). Above the threshold, it
+/// switches to per-ASID invalidation (`TLBI ASIDE1IS`) which flushes all entries
+/// for that Observer's ASID in one instruction.
+pub const ASID_TLBI_THRESHOLD: usize = 16;
+
+/// Sequential ASID allocator (D101).
+///
+/// Each Observer receives a unique ASID at creation. ARM64 supports 8-bit
+/// or 16-bit ASIDs (detected from `ID_AA64MMFR0_EL1` at boot). The allocator
+/// uses the maximum available width.
+///
+/// Assignment is sequential: `next_asid++`. No recycling — sequential
+/// assignment avoids the ABA problem where a reused ASID could match stale
+/// TLB entries from a destroyed Observer. When the counter wraps, the caller
+/// must issue `TLBI VMALLE1IS` (full broadcast) and the counter resets.
+///
+/// The wrap + flush is a one-time cost amortized over 2^16 (or 2^8) Observer
+/// creations.
+pub struct AsidAllocator {
+    next_asid: u16,
+    max_asid: u16,
+}
+
+/// Result of an ASID allocation (D101).
+///
+/// `wrapped` signals that the counter rolled over and all user TLB entries
+/// must be flushed before the returned ASID can be safely used.
+pub struct AsidAllocation {
+    pub asid: u16,
+    pub wrapped: bool,
+}
+
+impl AsidAllocator {
+    /// Create a new allocator for the given ASID width (8 or 16 bits).
+    ///
+    /// Starts at ASID 1: ASID 0 is architecturally reserved for global
+    /// entries (ARM ARM D5.9.1 — translations with nG=0 match any ASID).
+    pub fn new(asid_width: u8) -> AsidAllocator {
+        debug_assert!(
+            asid_width == 8 || asid_width == 16,
+            "ASID width must be 8 or 16 per ID_AA64MMFR0_EL1 (got {asid_width})"
+        );
+
+        let max_asid = if asid_width >= 16 { u16::MAX } else { 255 };
+
+        AsidAllocator {
+            next_asid: 1,
+            max_asid,
+        }
+    }
+
+    /// Allocate the next sequential ASID.
+    ///
+    /// Returns the ASID and whether a wrap occurred. On wrap, the caller
+    /// MUST issue a full TLB broadcast (`TLBI VMALLE1IS`) before using
+    /// the returned ASID — stale entries from the previous generation
+    /// of that ASID number may exist in TLBs across all cores.
+    pub fn allocate(&mut self) -> AsidAllocation {
+        let asid = self.next_asid;
+
+        if asid >= self.max_asid {
+            self.next_asid = 1;
+
+            AsidAllocation {
+                asid,
+                wrapped: true,
+            }
+        } else {
+            self.next_asid = asid + 1;
+
+            AsidAllocation {
+                asid,
+                wrapped: false,
+            }
+        }
+    }
+
+    /// The maximum ASID value this allocator will produce (2^width - 1).
+    pub const fn max_asid(&self) -> u16 {
+        self.max_asid
+    }
+
+    /// The next ASID that will be returned (for diagnostics/testing).
+    pub const fn next_asid(&self) -> u16 {
+        self.next_asid
+    }
+}
+
 /// Kernel-wide shared cold-path state (D75, D82).
 ///
 /// Bundles all per-type arenas and the SpaceManager in one namespace.
@@ -223,9 +321,9 @@ impl IrqRoutingTable {
 /// - `observers` (LockOrder::Observer) must be acquired after `fields`, before `pulsars`.
 /// - `pulsars` (LockOrder::Pulsar) must be acquired after `fields` and `observers`.
 ///
-/// `spaces`, `times`, `space_manager`, and `irq_routes` are unordered —
-/// they do not participate in the Field-Observer-Pulsar ordering chain
-/// and may be acquired independently at any time.
+/// `spaces`, `times`, `space_manager`, `irq_routes`, and `asid_allocator`
+/// are unordered — they do not participate in the Field-Observer-Pulsar
+/// ordering chain and may be acquired independently at any time.
 pub struct KernelState {
     /// Per-type arena for Field objects (D15, D53).
     pub fields: Lock<Arena<Field>>,
@@ -243,17 +341,20 @@ pub struct KernelState {
     /// Unordered lock — acquired independently by handle_irq on the
     /// interrupt path.
     pub irq_routes: Lock<IrqRoutingTable>,
+    /// Sequential ASID allocator (D101). Unordered lock — acquired
+    /// during Observer creation to assign a unique ASID.
+    pub asid_allocator: Lock<AsidAllocator>,
 }
 
 impl KernelState {
-    /// Construct a new KernelState with the given SpaceManager.
+    /// Construct a new KernelState with the given SpaceManager and ASID width.
     ///
     /// D82: tests construct this locally. The boot path constructs it and
     /// passes it to `frame::init_kernel_state()` for global placement.
     ///
     /// Arenas are created empty internally — first allocations draw pages
     /// from the SpaceManager's root pool (D70, D31).
-    pub fn new(space_manager: SpaceManager) -> KernelState {
+    pub fn new(space_manager: SpaceManager, asid_width: u8) -> KernelState {
         KernelState {
             fields: Lock::new(LockOrder::Field, Arena::new()),
             observers: Lock::new(LockOrder::Observer, Arena::new()),
@@ -262,6 +363,7 @@ impl KernelState {
             times: Lock::new(LockOrder::Time, Arena::new()),
             space_manager: Lock::new(LockOrder::SpaceManager, space_manager),
             irq_routes: Lock::new(LockOrder::IrqRouting, IrqRoutingTable::new()),
+            asid_allocator: Lock::new(LockOrder::AsidAllocator, AsidAllocator::new(asid_width)),
         }
     }
 }
@@ -286,7 +388,7 @@ mod tests {
     }
 
     fn make_kernel_state() -> KernelState {
-        KernelState::new(make_space_manager())
+        KernelState::new(make_space_manager(), 16)
     }
 
     // ── D82 — KernelState construction ────────────────────────────────
@@ -466,7 +568,7 @@ mod tests {
     #[test]
     fn test_d82_local_construction_for_tests() {
         // Construct directly — no frame/ global needed.
-        let state = KernelState::new(make_space_manager());
+        let state = KernelState::new(make_space_manager(), 16);
         // Must be fully functional. Uses spaces arena (zero-safe).
         let mut spaces = state.spaces.acquire();
         let (id, _) = spaces.allocate().expect("local state must be functional");
@@ -905,5 +1007,170 @@ mod tests {
             updated, 5,
             "D99: only routes 45-49 exist in [45,55] → 5 updated"
         );
+    }
+
+    // ── D101 — ASID allocator ────────────────────────────────────────
+
+    /// D101: new allocator starts at ASID 1 (ASID 0 reserved for global entries).
+    #[test]
+    fn test_d101_asid_allocator_starts_at_one() {
+        let alloc = AsidAllocator::new(16);
+
+        assert_eq!(alloc.next_asid(), 1, "D101: first ASID must be 1, not 0");
+    }
+
+    /// D101: sequential allocation produces monotonically increasing ASIDs.
+    #[test]
+    fn test_d101_asid_sequential_allocation() {
+        let mut alloc = AsidAllocator::new(16);
+
+        for expected in 1..=10u16 {
+            let result = alloc.allocate();
+
+            assert_eq!(result.asid, expected, "D101: ASID must be sequential");
+            assert!(!result.wrapped, "D101: no wrap in first 10 allocations");
+        }
+    }
+
+    /// D101: 16-bit ASID width supports max ASID = 65535.
+    #[test]
+    fn test_d101_asid_16bit_max() {
+        let alloc = AsidAllocator::new(16);
+
+        assert_eq!(
+            alloc.max_asid(),
+            u16::MAX,
+            "D101: 16-bit width → max ASID = 65535"
+        );
+    }
+
+    /// D101: 8-bit ASID width supports max ASID = 255.
+    #[test]
+    fn test_d101_asid_8bit_max() {
+        let alloc = AsidAllocator::new(8);
+
+        assert_eq!(alloc.max_asid(), 255, "D101: 8-bit width → max ASID = 255");
+    }
+
+    /// D101: 8-bit wrap occurs at ASID 255, resets to 1.
+    #[test]
+    fn test_d101_asid_8bit_wrap() {
+        let mut alloc = AsidAllocator::new(8);
+
+        for _ in 1..255u16 {
+            let result = alloc.allocate();
+
+            assert!(!result.wrapped, "D101: no wrap before ASID 255");
+        }
+
+        let wrap_result = alloc.allocate();
+
+        assert_eq!(wrap_result.asid, 255, "D101: last ASID before wrap is 255");
+        assert!(
+            wrap_result.wrapped,
+            "D101: allocation at max must signal wrap"
+        );
+        assert_eq!(alloc.next_asid(), 1, "D101: counter resets to 1 after wrap");
+    }
+
+    /// D101: 16-bit wrap occurs at ASID 65535, resets to 1.
+    #[test]
+    fn test_d101_asid_16bit_wrap() {
+        let mut alloc = AsidAllocator::new(16);
+
+        for _ in 1..u16::MAX {
+            let _ = alloc.allocate();
+        }
+
+        let wrap_result = alloc.allocate();
+
+        assert_eq!(
+            wrap_result.asid,
+            u16::MAX,
+            "D101: last 16-bit ASID before wrap is 65535"
+        );
+        assert!(
+            wrap_result.wrapped,
+            "D101: allocation at max must signal wrap"
+        );
+        assert_eq!(alloc.next_asid(), 1, "D101: counter resets to 1 after wrap");
+    }
+
+    /// D101: post-wrap allocation continues sequentially from 1.
+    #[test]
+    fn test_d101_asid_post_wrap_continues_from_one() {
+        let mut alloc = AsidAllocator::new(8);
+
+        for _ in 1..=255u16 {
+            let _ = alloc.allocate();
+        }
+
+        let post_wrap = alloc.allocate();
+
+        assert_eq!(post_wrap.asid, 1, "D101: first ASID after wrap must be 1");
+        assert!(
+            !post_wrap.wrapped,
+            "D101: first allocation of new generation is not a wrap"
+        );
+    }
+
+    /// D101: ASID allocator is accessible through KernelState.
+    #[test]
+    fn test_d101_asid_allocator_in_kernel_state() {
+        let state = make_kernel_state();
+        let mut alloc = state.asid_allocator.acquire();
+        let result = alloc.allocate();
+
+        assert_eq!(
+            result.asid, 1,
+            "D101: first ASID from KernelState must be 1"
+        );
+    }
+
+    /// D101: asid_allocator lock uses LockOrder::AsidAllocator (unordered).
+    #[test]
+    fn test_d101_asid_allocator_lock_order() {
+        let state = make_kernel_state();
+
+        assert_eq!(
+            state.asid_allocator.order(),
+            LockOrder::AsidAllocator,
+            "D101: asid_allocator must use LockOrder::AsidAllocator"
+        );
+        assert!(
+            !state.asid_allocator.order().is_ordered(),
+            "D101: AsidAllocator must be unordered"
+        );
+    }
+
+    /// D101: asid_allocator can be acquired alongside observer lock.
+    #[test]
+    fn test_d101_asid_allocator_acquirable_with_observers() {
+        let state = make_kernel_state();
+        let _alloc = state.asid_allocator.acquire();
+        let _observers = state.observers.acquire();
+    }
+
+    /// D101: ASID_TLBI_THRESHOLD is 16 pages.
+    #[test]
+    fn test_d101_tlbi_threshold_value() {
+        assert_eq!(ASID_TLBI_THRESHOLD, 16, "D101: threshold must be 16 pages");
+    }
+
+    /// D101: multiple wraps produce correct sequence.
+    #[test]
+    fn test_d101_asid_multiple_wraps() {
+        let mut alloc = AsidAllocator::new(8);
+        let mut wrap_count = 0;
+
+        for _ in 0..768 {
+            let result = alloc.allocate();
+
+            if result.wrapped {
+                wrap_count += 1;
+            }
+        }
+
+        assert_eq!(wrap_count, 3, "D101: 768 allocations on 8-bit = 3 wraps");
     }
 }

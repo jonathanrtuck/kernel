@@ -749,6 +749,32 @@ pub fn update_register_state_ptr(rs_ptr: *mut RegisterState) {
     }
 }
 
+/// Allocate a unique ASID from the kernel's AsidAllocator (D101).
+///
+/// The TLB flush on wrap is issued outside the lock's critical section.
+/// This is safe because the returned ASID is freshly allocated — no
+/// existing TTBR0 encodes it, so no stale TLB entries can exist for it.
+/// The flush only needs to complete before the ASID enters TTBR0, which
+/// happens after this function returns.
+pub fn allocate_asid(ks: &crate::kernel_state::KernelState) -> u16 {
+    let (asid, wrapped) = {
+        let mut alloc = ks.asid_allocator.acquire();
+        let result = alloc.allocate();
+
+        (result.asid, result.wrapped)
+    };
+
+    #[cfg(target_os = "none")]
+    if wrapped {
+        crate::frame::arch::mmu::tlb_flush_all_user();
+    }
+
+    #[cfg(not(target_os = "none"))]
+    let _ = wrapped;
+
+    asid
+}
+
 /// Read the hardware counter frequency (D72, CNTFRQ_EL0).
 #[cfg(any(target_os = "none", test))]
 pub fn read_counter_freq() -> u64 {
@@ -887,11 +913,7 @@ pub fn write_test_typed_registers(register_state: NonNull<u8>, regs: &TypedRegis
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::observer::{
-        DEFAULT_RESPONSIVENESS, DEFAULT_THROUGHPUT, Observer, PrimaryState, RegisterStateHandle,
-        WaitState,
-    };
-    use core::sync::atomic::AtomicU64;
+    use crate::observer::{Observer, RegisterStateHandle};
 
     #[test]
     fn test_ipc_register_roundtrip() {
@@ -906,25 +928,13 @@ mod tests {
 
         write_test_ipc_registers(rs_ptr, &written);
 
-        let mut observer = Observer {
-            object_id: crate::arena::ObjectId(0),
-            register_state: RegisterStateHandle::new(rs_ptr),
-            page_table_root: 0,
-            cap_table: NonNull::dangling(),
-            cap_table_capacity: 0,
-            cap_table_free_head: None,
-            cap_table_count: 0,
-            state: PrimaryState::Runnable,
-            suspended: false,
-            compute_aggregate: 0,
-            responsiveness: DEFAULT_RESPONSIVENESS,
-            throughput: DEFAULT_THROUGHPUT,
-            clock_access: false,
-            wait_state: WaitState::None,
-            backing_va_base: 0,
-            backing_size: 0,
-            refcount: 1,
-            generation: AtomicU64::new(0),
+        let mut observer = {
+            let mut o = crate::observer::Observer::test_default();
+
+            o.register_state = RegisterStateHandle::new(rs_ptr);
+            o.compute_aggregate = 0;
+
+            o
         };
         let obs_ptr = NonNull::from(&mut observer);
         let read = read_ipc_registers(obs_ptr);
@@ -953,25 +963,13 @@ mod tests {
 
         write_test_typed_registers(rs_ptr, &written);
 
-        let mut observer = Observer {
-            object_id: crate::arena::ObjectId(0),
-            register_state: RegisterStateHandle::new(rs_ptr),
-            page_table_root: 0,
-            cap_table: NonNull::dangling(),
-            cap_table_capacity: 0,
-            cap_table_free_head: None,
-            cap_table_count: 0,
-            state: PrimaryState::Runnable,
-            suspended: false,
-            compute_aggregate: 0,
-            responsiveness: DEFAULT_RESPONSIVENESS,
-            throughput: DEFAULT_THROUGHPUT,
-            clock_access: false,
-            wait_state: WaitState::None,
-            backing_va_base: 0,
-            backing_size: 0,
-            refcount: 1,
-            generation: AtomicU64::new(0),
+        let mut observer = {
+            let mut o = crate::observer::Observer::test_default();
+
+            o.register_state = RegisterStateHandle::new(rs_ptr);
+            o.compute_aggregate = 0;
+
+            o
         };
         let obs_ptr = NonNull::from(&mut observer);
         let read = read_typed_registers(obs_ptr);
@@ -985,26 +983,12 @@ mod tests {
     }
 
     fn make_test_observer(rs_ptr: NonNull<u8>) -> Observer {
-        Observer {
-            object_id: crate::arena::ObjectId(0),
-            register_state: RegisterStateHandle::new(rs_ptr),
-            page_table_root: 0,
-            cap_table: NonNull::dangling(),
-            cap_table_capacity: 0,
-            cap_table_free_head: None,
-            cap_table_count: 0,
-            state: PrimaryState::Runnable,
-            suspended: false,
-            compute_aggregate: 0,
-            responsiveness: DEFAULT_RESPONSIVENESS,
-            throughput: DEFAULT_THROUGHPUT,
-            clock_access: false,
-            wait_state: WaitState::None,
-            backing_va_base: 0,
-            backing_size: 0,
-            refcount: 1,
-            generation: AtomicU64::new(0),
-        }
+        let mut o = crate::observer::Observer::test_default();
+
+        o.register_state = RegisterStateHandle::new(rs_ptr);
+        o.compute_aggregate = 0;
+
+        o
     }
 
     // ── D76 write helper tests ──────────────────────────────────────

@@ -56,7 +56,11 @@ extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
         next_physical_base: usable_start,
         next_va_base: usable_start,
     };
-    let kernel_state = KernelState::new(space_manager);
+    let asid_width = arch::mmu::asid_width();
+
+    println!("asid: {}-bit", asid_width);
+
+    let kernel_state = KernelState::new(space_manager, asid_width);
 
     kernel::frame::init_kernel_state(kernel_state);
 
