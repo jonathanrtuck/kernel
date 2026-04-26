@@ -747,4 +747,152 @@ mod tests {
             "3 full cycles must return to start"
         );
     }
+
+    // ── Additional edge cases ────────────────────────────────────────
+
+    #[test]
+    fn new_scheduler_is_empty() {
+        let sched = RoundRobin::new();
+
+        assert!(sched.is_empty());
+        assert_eq!(sched.queue_depth(), 0);
+        assert!(sched.pick_next().is_none());
+    }
+
+    #[test]
+    fn on_preempt_empty_is_noop() {
+        let mut sched = RoundRobin::new();
+
+        sched.on_preempt();
+
+        assert!(sched.is_empty());
+    }
+
+    #[test]
+    fn on_preempt_single_is_noop() {
+        let mut sched = RoundRobin::new();
+        let mut obs = make_observer();
+        let ptr = NonNull::from(&mut obs);
+
+        sched.enqueue(ptr);
+        sched.on_preempt();
+
+        assert_eq!(sched.pick_next(), Some(ptr));
+        assert_eq!(sched.queue_depth(), 1);
+    }
+
+    #[test]
+    fn dequeue_not_in_queue_is_noop() {
+        let mut sched = RoundRobin::new();
+        let mut obs_a = make_observer();
+        let mut obs_b = make_observer();
+        let ptr_a = NonNull::from(&mut obs_a);
+        let ptr_b = NonNull::from(&mut obs_b);
+
+        sched.enqueue(ptr_a);
+        sched.dequeue(ptr_b);
+
+        assert_eq!(sched.queue_depth(), 1);
+        assert_eq!(sched.pick_next(), Some(ptr_a));
+    }
+
+    #[test]
+    fn dequeue_empty_is_noop() {
+        let mut sched = RoundRobin::new();
+        let mut obs = make_observer();
+
+        sched.dequeue(NonNull::from(&mut obs));
+
+        assert!(sched.is_empty());
+    }
+
+    #[test]
+    fn contains_after_enqueue() {
+        let mut sched = RoundRobin::new();
+        let mut obs = make_observer();
+        let ptr = NonNull::from(&mut obs);
+
+        assert!(!sched.contains(ptr));
+
+        sched.enqueue(ptr);
+
+        assert!(sched.contains(ptr));
+    }
+
+    #[test]
+    fn contains_after_dequeue() {
+        let mut sched = RoundRobin::new();
+        let mut obs = make_observer();
+        let ptr = NonNull::from(&mut obs);
+
+        sched.enqueue(ptr);
+        sched.dequeue(ptr);
+
+        assert!(!sched.contains(ptr));
+    }
+
+    #[test]
+    fn should_switch_to_always_true() {
+        let sched = RoundRobin::new();
+        let mut obs = make_observer();
+
+        assert!(sched.should_switch_to(NonNull::from(&mut obs)));
+    }
+
+    #[test]
+    fn enqueue_dequeue_interleaved_preserves_depth() {
+        let mut sched = RoundRobin::new();
+        let mut observers: [Observer; 4] = core::array::from_fn(|_| make_observer());
+        let ptrs: [NonNull<Observer>; 4] =
+            core::array::from_fn(|i| NonNull::from(&mut observers[i]));
+
+        sched.enqueue(ptrs[0]);
+        sched.enqueue(ptrs[1]);
+
+        assert_eq!(sched.queue_depth(), 2);
+
+        sched.dequeue(ptrs[0]);
+
+        assert_eq!(sched.queue_depth(), 1);
+
+        sched.enqueue(ptrs[2]);
+        sched.enqueue(ptrs[3]);
+
+        assert_eq!(sched.queue_depth(), 3);
+    }
+
+    #[test]
+    fn pick_next_does_not_remove() {
+        let mut sched = RoundRobin::new();
+        let mut obs = make_observer();
+        let ptr = NonNull::from(&mut obs);
+
+        sched.enqueue(ptr);
+
+        assert_eq!(sched.pick_next(), Some(ptr));
+        assert_eq!(sched.pick_next(), Some(ptr));
+        assert_eq!(sched.queue_depth(), 1);
+    }
+
+    #[test]
+    fn on_preempt_two_alternates() {
+        let mut sched = RoundRobin::new();
+        let mut obs_a = make_observer();
+        let mut obs_b = make_observer();
+        let ptr_a = NonNull::from(&mut obs_a);
+        let ptr_b = NonNull::from(&mut obs_b);
+
+        sched.enqueue(ptr_a);
+        sched.enqueue(ptr_b);
+
+        assert_eq!(sched.pick_next(), Some(ptr_a));
+
+        sched.on_preempt();
+
+        assert_eq!(sched.pick_next(), Some(ptr_b));
+
+        sched.on_preempt();
+
+        assert_eq!(sched.pick_next(), Some(ptr_a));
+    }
 }

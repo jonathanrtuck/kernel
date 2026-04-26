@@ -130,8 +130,8 @@ pub fn write_entry(entries: NonNull<Entry>, capacity: u32, index: u32, new_entry
 /// Allocate cap table entries for a new Observer (D95, D32).
 ///
 /// Cap table pages come from the consumed Space's structural backing (D95).
-/// Test builds use the heap allocator. Bare-metal builds will use Space
-/// pages once wired.
+/// Test builds use the heap allocator. Bare-metal builds allocate zeroed
+/// pages from the SpaceManager root pool (identity-mapped PA = VA).
 #[cfg(any(target_os = "none", test))]
 pub fn allocate_cap_table(capacity: u32) -> Option<NonNull<Entry>> {
     if capacity == 0 {
@@ -148,7 +148,15 @@ pub fn allocate_cap_table(capacity: u32) -> Option<NonNull<Entry>> {
     }
     #[cfg(not(test))]
     {
-        None
+        let total_bytes = (capacity as usize) * core::mem::size_of::<Entry>();
+        let page_count = total_bytes.div_ceil(crate::frame::arch::mmu::page_size());
+        let ks = crate::frame::kernel_state();
+        let pa = crate::frame::boot::alloc_zeroed_pages(ks, page_count).ok()?;
+        let entries = NonNull::new(pa as *mut Entry)?;
+
+        init_freelist(entries, capacity, crate::capability::SLOT_USER_START);
+
+        Some(entries)
     }
 }
 
@@ -157,7 +165,7 @@ pub fn allocate_cap_table(capacity: u32) -> Option<NonNull<Entry>> {
 /// Links slots from `start` to `capacity - 1`. Each empty entry's
 /// `stored_generation` stores the next-free index; the last stores
 /// `u64::MAX` (freelist end sentinel).
-#[cfg(test)]
+#[cfg(any(target_os = "none", test))]
 pub fn init_freelist(entries: NonNull<Entry>, capacity: u32, start: u32) {
     for i in start..capacity {
         if let Some(e) = entry_mut(entries, capacity, i) {
@@ -346,5 +354,63 @@ mod tests {
         let ptr = alloc_test_entries(0);
 
         assert_eq!(ptr, NonNull::dangling());
+    }
+
+    #[test]
+    fn init_freelist_single_slot() {
+        let entries = alloc_test_entries(4);
+
+        init_freelist(entries, 4, 3);
+
+        let e = entry_ref(entries, 4, 3).unwrap();
+
+        assert_eq!(
+            e.stored_generation,
+            u64::MAX,
+            "single free slot must be sentinel"
+        );
+    }
+
+    #[test]
+    fn entry_ref_and_mut_same_index_see_same_data() {
+        let capacity = 8u32;
+        let entries = alloc_test_entries(capacity);
+        let e = entry_mut(entries, capacity, 5).unwrap();
+
+        e.object = Some((ObjectType::Time, ObjectId(77)));
+        e.badge = Badge(0xFACE);
+
+        let read = entry_ref(entries, capacity, 5).unwrap();
+
+        assert!(read.check_type(ObjectType::Time));
+        assert_eq!(read.badge, Badge(0xFACE));
+    }
+
+    #[test]
+    fn write_entry_preserves_adjacent_slots() {
+        let capacity = 4u32;
+        let entries = alloc_test_entries(capacity);
+        let e0 = Entry {
+            object: Some((ObjectType::Field, ObjectId(0))),
+            rights: Rights::SEND,
+            badge: Badge(10),
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+        let e1 = Entry {
+            object: Some((ObjectType::Space, ObjectId(1))),
+            rights: Rights::SPACE_ALL,
+            badge: Badge(20),
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+
+        write_entry(entries, capacity, 0, e0);
+        write_entry(entries, capacity, 1, e1);
+
+        assert_eq!(entry_ref(entries, capacity, 0).unwrap().badge, Badge(10));
+        assert_eq!(entry_ref(entries, capacity, 1).unwrap().badge, Badge(20));
     }
 }

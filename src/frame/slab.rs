@@ -597,4 +597,78 @@ mod tests {
 
         assert_eq!(id, ObjectId(100));
     }
+
+    #[test]
+    fn get_mut_out_of_bounds_returns_none() {
+        let mut store: SlabStore<TestObject> = SlabStore::new();
+
+        assert!(store.get_mut(ObjectId(0)).is_none());
+        assert!(store.get_mut(ObjectId(999)).is_none());
+    }
+
+    #[test]
+    fn free_then_get_mut_returns_none() {
+        let mut store: SlabStore<TestObject> = SlabStore::new();
+        let (id, obj) = store.allocate().unwrap();
+
+        obj.value = 1;
+
+        store.free(id);
+
+        assert!(store.get_mut(id).is_none());
+    }
+
+    #[test]
+    fn allocate_free_all_then_reallocate_all() {
+        let mut store: SlabStore<TestObject> = SlabStore::new();
+        let max = 256u32;
+        let mut ids = [ObjectId(0); 256];
+
+        for i in 0..max {
+            let (id, obj) = store.allocate().unwrap();
+
+            obj.value = i as u64;
+            ids[i as usize] = id;
+        }
+
+        for id in &ids {
+            store.free(*id);
+        }
+
+        for _ in 0..max {
+            assert!(store.allocate().is_ok());
+        }
+
+        assert!(store.allocate().is_err());
+    }
+
+    #[test]
+    fn interleaved_allocate_free_no_corruption() {
+        let mut store: SlabStore<TestObject> = SlabStore::new();
+
+        let (id_a, a) = store.allocate().unwrap();
+
+        a.value = 0xAAAA;
+
+        let (id_b, b) = store.allocate().unwrap();
+
+        b.value = 0xBBBB;
+
+        store.free(id_a);
+
+        let (id_c, c) = store.allocate().unwrap();
+
+        c.value = 0xCCCC;
+
+        assert_eq!(store.get(id_b).unwrap().value, 0xBBBB);
+        assert_eq!(store.get(id_c).unwrap().value, 0xCCCC);
+        assert!(store.get(id_a).is_none() || store.get(id_a).unwrap().value == 0xCCCC);
+    }
+
+    #[test]
+    fn new_store_is_empty() {
+        let store: SlabStore<TestObject> = SlabStore::new();
+
+        assert!(store.get(ObjectId(0)).is_none());
+    }
 }

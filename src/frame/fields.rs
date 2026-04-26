@@ -544,8 +544,8 @@ fn grow_routing_table(_table: &mut RoutingTable, _new_capacity: u32) -> Result<(
 /// Allocate queue backing for a new Field (D95, D32).
 ///
 /// Queue pages logically come from the consumed Space's structural backing.
-/// Test builds use the heap allocator; bare-metal builds will use Space
-/// pages once the page allocator is wired.
+/// Test builds use the heap allocator; bare-metal builds allocate zeroed
+/// pages from the SpaceManager root pool (identity-mapped PA = VA).
 #[cfg(any(target_os = "none", test))]
 pub fn allocate_field_queue(capacity: u32) -> Option<NonNull<Message>> {
     if capacity == 0 {
@@ -558,7 +558,12 @@ pub fn allocate_field_queue(capacity: u32) -> Option<NonNull<Message>> {
     }
     #[cfg(not(test))]
     {
-        None
+        let total_bytes = (capacity as usize) * core::mem::size_of::<Message>();
+        let page_count = total_bytes.div_ceil(crate::frame::arch::mmu::page_size());
+        let ks = crate::frame::kernel_state();
+        let pa = crate::frame::boot::alloc_zeroed_pages(ks, page_count).ok()?;
+
+        NonNull::new(pa as *mut Message)
     }
 }
 

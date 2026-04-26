@@ -1173,4 +1173,163 @@ mod tests {
 
         assert_eq!(wrap_count, 3, "D101: 768 allocations on 8-bit = 3 wraps");
     }
+
+    // ── AsidAllocator edge cases ─────────────────────────────────────
+
+    #[test]
+    fn asid_allocator_starts_at_one() {
+        let alloc = AsidAllocator::new(8);
+
+        assert_eq!(alloc.next_asid(), 1);
+    }
+
+    #[test]
+    fn asid_allocator_8bit_max_is_255() {
+        let alloc = AsidAllocator::new(8);
+
+        assert_eq!(alloc.max_asid(), 255);
+    }
+
+    #[test]
+    fn asid_allocator_16bit_max_is_65535() {
+        let alloc = AsidAllocator::new(16);
+
+        assert_eq!(alloc.max_asid(), u16::MAX);
+    }
+
+    #[test]
+    fn asid_first_allocation_is_1_no_wrap() {
+        let mut alloc = AsidAllocator::new(8);
+        let result = alloc.allocate();
+
+        assert_eq!(result.asid, 1);
+        assert!(!result.wrapped);
+    }
+
+    #[test]
+    fn asid_sequential_no_duplicates() {
+        let mut alloc = AsidAllocator::new(8);
+        let mut seen = [false; 256];
+
+        for _ in 0..255 {
+            let result = alloc.allocate();
+
+            assert!(
+                !seen[result.asid as usize],
+                "ASID {} allocated twice before wrap",
+                result.asid
+            );
+
+            seen[result.asid as usize] = true;
+        }
+    }
+
+    #[test]
+    fn asid_wrap_at_max_signals_true() {
+        let mut alloc = AsidAllocator::new(8);
+
+        for _ in 0..254 {
+            let r = alloc.allocate();
+
+            assert!(!r.wrapped);
+        }
+
+        let wrap_result = alloc.allocate();
+
+        assert!(wrap_result.wrapped);
+        assert_eq!(wrap_result.asid, 255);
+    }
+
+    #[test]
+    fn asid_after_wrap_restarts_at_1() {
+        let mut alloc = AsidAllocator::new(8);
+
+        for _ in 0..255 {
+            alloc.allocate();
+        }
+
+        let after_wrap = alloc.allocate();
+
+        assert_eq!(after_wrap.asid, 1);
+        assert!(!after_wrap.wrapped);
+    }
+
+    #[test]
+    fn asid_never_returns_zero() {
+        let mut alloc = AsidAllocator::new(8);
+
+        for _ in 0..512 {
+            let r = alloc.allocate();
+
+            assert_ne!(r.asid, 0, "ASID 0 is architecturally reserved");
+        }
+    }
+
+    // ── IRQ routing edge cases ───────────────────────────────────────
+
+    #[test]
+    fn irq_routing_table_size_is_1024() {
+        assert_eq!(MAX_IRQS, 1024);
+    }
+
+    #[test]
+    fn irq_route_install_all_1024_slots() {
+        let mut table = IrqRoutingTable::new();
+
+        for i in 0..MAX_IRQS as u32 {
+            let route = IrqRoute {
+                field_id: ObjectId(i),
+                badge: Badge(i as u64),
+                generation: 0,
+            };
+
+            assert!(table.install(i, route).is_some());
+        }
+
+        for i in 0..MAX_IRQS as u32 {
+            let r = table.lookup(i).unwrap();
+
+            assert_eq!(r.field_id, ObjectId(i));
+        }
+    }
+
+    #[test]
+    fn irq_route_remove_then_lookup_returns_none() {
+        let mut table = IrqRoutingTable::new();
+        let route = IrqRoute {
+            field_id: ObjectId(1),
+            badge: Badge(42),
+            generation: 0,
+        };
+
+        table.install(100, route);
+
+        assert!(table.lookup(100).is_some());
+
+        table.remove(100);
+
+        assert!(table.lookup(100).is_none());
+    }
+
+    #[test]
+    fn irq_route_remove_out_of_range_returns_none() {
+        let mut table = IrqRoutingTable::new();
+
+        assert!(table.remove(MAX_IRQS as u32).is_none());
+        assert!(table.remove(u32::MAX).is_none());
+    }
+
+    // ── KernelState construction ─────────────────────────────────────
+
+    #[test]
+    fn kernel_state_all_arenas_independent() {
+        let state = make_kernel_state();
+        let mut fields = state.fields.acquire();
+        let mut spaces = state.spaces.acquire();
+        let (fid, _) = fields.allocate().unwrap();
+        let (sid, _) = spaces.allocate().unwrap();
+
+        assert_eq!(fid, ObjectId(0));
+        assert_eq!(sid, ObjectId(0));
+    }
 }

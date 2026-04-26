@@ -1798,9 +1798,190 @@ mod tests {
         let field = test_field(4);
 
         assert!(field.routing_table.is_none());
-        // These should all return None without panicking.
         assert!(field.resolve_route(0).is_none());
         assert!(field.resolve_route(u64::MAX).is_none());
         assert!(field.resolve_route(u64::MAX / 2).is_none());
+    }
+
+    // ── Message constructor tests ────────────────────────────────────
+
+    #[test]
+    fn timer_fire_message_layout() {
+        let msg = Message::timer_fire(Badge(0xAA), 12345, 3);
+
+        assert_eq!(msg.label, LABEL_TIMER_FIRE);
+        assert_eq!(msg.badge, Badge(0xAA));
+        assert_eq!(msg.data[0], 12345);
+        assert_eq!(msg.data[1], 3);
+        assert!(msg.user_cap.is_none());
+        assert!(msg.reply_cap.is_none());
+    }
+
+    #[test]
+    fn badge_closure_message_layout() {
+        let msg = Message::badge_closure(Badge(0xBB));
+
+        assert_eq!(msg.label, LABEL_CLOSURE);
+        assert_eq!(msg.badge, Badge(0xBB));
+        assert_eq!(msg.data, [0; 4]);
+        assert!(msg.user_cap.is_none());
+    }
+
+    #[test]
+    fn device_irq_message_layout() {
+        let msg = Message::device_irq(Badge(0xCC), 42);
+
+        assert_eq!(msg.label, LABEL_DEVICE_IRQ);
+        assert_eq!(msg.badge, Badge(0xCC));
+        assert_eq!(msg.data[0], 42);
+        assert!(msg.user_cap.is_none());
+    }
+
+    #[test]
+    fn label_constants_are_in_kernel_range() {
+        let labels = [
+            LABEL_TIMER_FIRE,
+            LABEL_CLOSURE,
+            LABEL_VM_FAULT,
+            LABEL_RESOURCE_REQUEST,
+            LABEL_CAP_TABLE_FULL,
+            LABEL_HARDWARE_EXCEPTION,
+            LABEL_DEVICE_IRQ,
+        ];
+
+        for label in labels {
+            assert!(
+                label >= 0xFFFF_FFFF_FFFF_0000,
+                "kernel labels must be in reserved high range"
+            );
+        }
+    }
+
+    // ── Queue boundary tests ─────────────────────────────────────────
+
+    #[test]
+    fn enqueue_then_dequeue_preserves_order() {
+        let mut field = test_field(4);
+
+        for i in 0..3u64 {
+            let msg = Message {
+                data: [i, 0, 0, 0],
+                label: i * 10,
+                badge: Badge(i),
+                user_cap: None,
+                reply_cap: None,
+            };
+
+            field.enqueue(msg).unwrap();
+        }
+        for i in 0..3u64 {
+            let msg = field.dequeue().unwrap();
+
+            assert_eq!(msg.data[0], i);
+            assert_eq!(msg.badge, Badge(i));
+        }
+    }
+
+    #[test]
+    fn dequeue_empty_field_returns_none() {
+        let mut field = test_field(4);
+
+        assert!(field.dequeue().is_none());
+    }
+
+    #[test]
+    fn is_empty_and_is_full_consistency() {
+        let mut field = test_field(2);
+
+        assert!(field.is_empty());
+        assert!(!field.is_full());
+
+        let msg = Message {
+            data: [0; 4],
+            label: 0,
+            badge: Badge(0),
+            user_cap: None,
+            reply_cap: None,
+        };
+
+        field.enqueue(msg).unwrap();
+
+        assert!(!field.is_empty());
+        assert!(!field.is_full());
+
+        let msg2 = Message {
+            data: [1; 4],
+            label: 1,
+            badge: Badge(1),
+            user_cap: None,
+            reply_cap: None,
+        };
+
+        field.enqueue(msg2).unwrap();
+
+        assert!(!field.is_empty());
+        assert!(field.is_full());
+    }
+
+    #[test]
+    fn enqueue_full_field_returns_error() {
+        let mut field = test_field(1);
+        let msg = Message {
+            data: [0; 4],
+            label: 0,
+            badge: Badge(0),
+            user_cap: None,
+            reply_cap: None,
+        };
+
+        field.enqueue(msg).unwrap();
+
+        let msg2 = Message {
+            data: [1; 4],
+            label: 1,
+            badge: Badge(1),
+            user_cap: None,
+            reply_cap: None,
+        };
+
+        assert!(field.enqueue(msg2).is_err());
+    }
+
+    #[test]
+    fn enqueue_dequeue_wraps_around() {
+        let mut field = test_field(2);
+        let msg = |v: u64| Message {
+            data: [v, 0, 0, 0],
+            label: v,
+            badge: Badge(v),
+            user_cap: None,
+            reply_cap: None,
+        };
+
+        field.enqueue(msg(1)).unwrap();
+        field.enqueue(msg(2)).unwrap();
+        field.dequeue().unwrap();
+        field.enqueue(msg(3)).unwrap();
+
+        let m = field.dequeue().unwrap();
+
+        assert_eq!(m.data[0], 2);
+
+        let m = field.dequeue().unwrap();
+
+        assert_eq!(m.data[0], 3);
+        assert!(field.dequeue().is_none());
+    }
+
+    #[test]
+    fn revoke_increments_generation() {
+        let field = test_field(4);
+        let gen_before = field.generation.load(core::sync::atomic::Ordering::Acquire);
+
+        field.revoke();
+
+        let gen_after = field.generation.load(core::sync::atomic::Ordering::Acquire);
+
+        assert_eq!(gen_after, gen_before + 1);
     }
 }

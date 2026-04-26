@@ -2016,4 +2016,174 @@ mod tests {
             }
         }
     }
+
+    // ── Additional edge cases ────────────────────────────────────────
+
+    #[test]
+    fn send_to_empty_field_enqueues() {
+        let mut field = test_field(4);
+
+        assert!(send(&mut field, make_message(1, 1)).is_ok());
+        assert_eq!(field.queue_length, 1);
+    }
+
+    #[test]
+    fn send_multiple_preserves_fifo_order() {
+        let mut field = test_field(4);
+
+        for i in 0..3u64 {
+            send(&mut field, make_message(i * 10, i)).unwrap();
+        }
+
+        let mut receiver = make_wait_entry();
+
+        for i in 0..3u64 {
+            match receive(&mut field, &mut receiver) {
+                ReceiveOutcome::Received(msg) => assert_eq!(msg.label, i * 10),
+                ReceiveOutcome::Blocked => panic!("should not block"),
+            }
+        }
+    }
+
+    #[test]
+    fn send_to_full_returns_error() {
+        let mut field = test_field(1);
+
+        send(&mut field, make_message(1, 1)).unwrap();
+
+        assert!(send(&mut field, make_message(2, 2)).is_err());
+    }
+
+    #[test]
+    fn receive_empty_blocks() {
+        let mut field = test_field(4);
+        let mut receiver = make_wait_entry();
+
+        assert!(matches!(
+            receive(&mut field, &mut receiver),
+            ReceiveOutcome::Blocked
+        ));
+    }
+
+    #[test]
+    fn send_wakes_blocked_receiver() {
+        let mut field = test_field(4);
+        let mut receiver = make_wait_entry();
+
+        receive(&mut field, &mut receiver);
+
+        assert!(field.waiters_head.is_some());
+
+        match send(&mut field, make_message(1, 1)).unwrap() {
+            SendOutcome::Enqueued => panic!("should wake receiver"),
+            SendOutcome::WokeReceiver(_, _) => {}
+        }
+    }
+
+    #[test]
+    fn yield_cpu_is_noop() {
+        yield_cpu();
+    }
+
+    #[test]
+    fn send_receive_data_integrity() {
+        let mut field = test_field(4);
+        let msg = Message {
+            data: [0xAA, 0xBB, 0xCC, 0xDD],
+            label: 0x1234,
+            badge: Badge(0x5678),
+            user_cap: None,
+            reply_cap: None,
+        };
+
+        send(&mut field, msg).unwrap();
+
+        let mut receiver = make_wait_entry();
+
+        match receive(&mut field, &mut receiver) {
+            ReceiveOutcome::Received(m) => {
+                assert_eq!(m.data, [0xAA, 0xBB, 0xCC, 0xDD]);
+                assert_eq!(m.label, 0x1234);
+                assert_eq!(m.badge, Badge(0x5678));
+            }
+            ReceiveOutcome::Blocked => panic!("should not block"),
+        }
+    }
+
+    #[test]
+    fn first_waiter_woken_first() {
+        let mut field = test_field(4);
+        let mut r1 = make_wait_entry();
+        let mut r2 = make_wait_entry();
+
+        receive(&mut field, &mut r1);
+        receive(&mut field, &mut r2);
+
+        match send(&mut field, make_message(1, 1)).unwrap() {
+            SendOutcome::WokeReceiver(observer_ptr, _) => {
+                assert_eq!(observer_ptr, r1.observer);
+            }
+            SendOutcome::Enqueued => panic!("should wake first waiter"),
+        }
+    }
+
+    #[test]
+    fn send_after_receive_drains_queue() {
+        let mut field = test_field(4);
+
+        send(&mut field, make_message(10, 1)).unwrap();
+        send(&mut field, make_message(20, 2)).unwrap();
+
+        let mut receiver = make_wait_entry();
+
+        receive(&mut field, &mut receiver);
+        receive(&mut field, &mut receiver);
+
+        assert!(field.is_empty());
+    }
+
+    #[test]
+    fn send_enqueued_does_not_wake_when_no_waiters() {
+        let mut field = test_field(4);
+
+        match send(&mut field, make_message(1, 1)).unwrap() {
+            SendOutcome::Enqueued => {}
+            SendOutcome::WokeReceiver(_, _) => panic!("no waiters should mean enqueued"),
+        }
+    }
+
+    #[test]
+    fn queue_wraps_around_correctly() {
+        let mut field = test_field(2);
+        let mut receiver = make_wait_entry();
+
+        send(&mut field, make_message(10, 1)).unwrap();
+        send(&mut field, make_message(20, 2)).unwrap();
+        receive(&mut field, &mut receiver);
+        send(&mut field, make_message(30, 3)).unwrap();
+
+        match receive(&mut field, &mut receiver) {
+            ReceiveOutcome::Received(m) => assert_eq!(m.label, 20),
+            ReceiveOutcome::Blocked => panic!("should not block"),
+        }
+
+        match receive(&mut field, &mut receiver) {
+            ReceiveOutcome::Received(m) => assert_eq!(m.label, 30),
+            ReceiveOutcome::Blocked => panic!("should not block"),
+        }
+    }
+
+    #[test]
+    fn receive_after_all_consumed_blocks() {
+        let mut field = test_field(4);
+        let mut receiver = make_wait_entry();
+
+        send(&mut field, make_message(1, 1)).unwrap();
+        receive(&mut field, &mut receiver);
+
+        assert!(matches!(
+            receive(&mut field, &mut receiver),
+            ReceiveOutcome::Blocked
+        ));
+    }
 }

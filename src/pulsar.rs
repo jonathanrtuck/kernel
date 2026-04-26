@@ -213,4 +213,100 @@ mod tests {
         assert!(msg.user_cap.is_none());
         assert!(msg.reply_cap.is_none());
     }
+
+    #[test]
+    fn fire_message_carries_badge_and_fire_time() {
+        let p = Pulsar::new(ObjectId(0), Badge(0xABCD), 1_000_000, 0, 24_000_000, 0);
+        let msg = p.fire_message(99999);
+
+        assert_eq!(msg.badge, Badge(0xABCD));
+        assert_eq!(msg.data[0], 99999, "data[0] = fire time");
+    }
+
+    #[test]
+    fn new_computes_deadline_from_now() {
+        let now = 1000;
+        let freq = 24_000_000;
+        let duration_ns = 1_000_000;
+        let p = Pulsar::new(ObjectId(0), Badge(0), duration_ns, 0, freq, now);
+        let expected_ticks = ns_to_ticks(duration_ns, freq);
+
+        assert_eq!(p.next_deadline_ticks, now + expected_ticks);
+    }
+
+    #[test]
+    fn record_overrun_increments() {
+        let mut p = Pulsar::new(ObjectId(0), Badge(0), 1_000_000, 10_000_000, 24_000_000, 0);
+
+        assert_eq!(p.overrun_count, 0);
+
+        p.record_overrun();
+        p.record_overrun();
+        p.record_overrun();
+
+        assert_eq!(p.overrun_count, 3);
+    }
+
+    #[test]
+    fn rearm_resets_overrun_count() {
+        let mut p = Pulsar::new(ObjectId(0), Badge(0), 1_000_000, 10_000_000, 24_000_000, 0);
+
+        p.record_overrun();
+        p.record_overrun();
+
+        assert_eq!(p.overrun_count, 2);
+
+        p.rearm(24_000_000);
+
+        assert_eq!(p.overrun_count, 0);
+    }
+
+    #[test]
+    fn rearm_drift_compensates_across_multiple_periods() {
+        let freq = 24_000_000;
+        let period_ns = 10_000_000;
+        let mut p = Pulsar::new(ObjectId(0), Badge(0), 1_000_000, period_ns, freq, 0);
+        let first = p.next_deadline_ticks;
+        let period_ticks = ns_to_ticks(period_ns, freq);
+
+        p.rearm(freq);
+
+        assert_eq!(p.next_deadline_ticks, first + period_ticks);
+
+        p.rearm(freq);
+
+        assert_eq!(p.next_deadline_ticks, first + 2 * period_ticks);
+    }
+
+    #[test]
+    fn revoke_is_cumulative() {
+        let p = Pulsar::new(ObjectId(0), Badge(0), 1_000_000, 0, 24_000_000, 0);
+
+        p.revoke();
+        p.revoke();
+
+        assert_eq!(p.generation.load(core::sync::atomic::Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn ns_to_ticks_large_value_no_overflow() {
+        let freq = 24_000_000;
+        let ns = 60_000_000_000u64; // 60 seconds
+
+        let ticks = ns_to_ticks(ns, freq);
+
+        assert_eq!(ticks, 1_440_000_000);
+    }
+
+    #[test]
+    fn fire_message_includes_overrun_count() {
+        let mut p = Pulsar::new(ObjectId(0), Badge(0), 1_000_000, 10_000_000, 24_000_000, 0);
+
+        p.record_overrun();
+        p.record_overrun();
+
+        let msg = p.fire_message(5000);
+
+        assert_eq!(msg.data[1], 2, "data[1] = overrun count");
+    }
 }

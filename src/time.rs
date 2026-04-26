@@ -159,4 +159,74 @@ mod tests {
             1
         );
     }
+
+    #[test]
+    fn split_conservation_across_multiple_splits() {
+        let mut time = Time {
+            compute_units: 100,
+            refcount: 1,
+            generation: AtomicU64::new(0),
+        };
+        let a = time.split(30).unwrap();
+        let b = time.split(20).unwrap();
+        let c = time.split(50).unwrap();
+
+        assert_eq!(a + b + c + time.compute_units, 100);
+        assert_eq!(time.compute_units, 0);
+    }
+
+    #[test]
+    fn split_after_exhaust_fails() {
+        let mut time = Time {
+            compute_units: 100,
+            refcount: 1,
+            generation: AtomicU64::new(0),
+        };
+
+        time.split(100).unwrap();
+
+        assert_eq!(time.split(1), Err(TimeError::InsufficientUnits));
+    }
+
+    #[test]
+    fn split_does_not_modify_on_error() {
+        let mut time = Time {
+            compute_units: 50,
+            refcount: 1,
+            generation: AtomicU64::new(0),
+        };
+        let _ = time.split(51);
+
+        assert_eq!(time.compute_units, 50);
+    }
+
+    #[test]
+    fn split_one_unit() {
+        let mut time = Time {
+            compute_units: 1,
+            refcount: 1,
+            generation: AtomicU64::new(0),
+        };
+
+        assert_eq!(time.split(1).unwrap(), 1);
+        assert_eq!(time.compute_units, 0);
+    }
+
+    #[test]
+    fn revoke_is_cumulative() {
+        let time = Time {
+            compute_units: 10,
+            refcount: 1,
+            generation: AtomicU64::new(0),
+        };
+
+        time.revoke();
+        time.revoke();
+        time.revoke();
+
+        assert_eq!(
+            time.generation.load(core::sync::atomic::Ordering::Acquire),
+            3
+        );
+    }
 }

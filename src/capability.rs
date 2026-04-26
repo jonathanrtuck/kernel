@@ -2929,4 +2929,214 @@ mod tests {
         assert_eq!(resolved.badge, Badge(0xDEAD_BEEF));
         assert!(!resolved.send_once);
     }
+
+    // ── Handle encoding/decoding ─────────────────────────────────────
+
+    #[test]
+    fn handle_encode_decode_roundtrip() {
+        let handle = Handle {
+            index: 42,
+            slot_tag: SlotTag(7),
+        };
+        let encoded = handle.encode();
+        let decoded = Handle::decode(encoded);
+
+        assert_eq!(decoded.index, 42);
+        assert_eq!(decoded.slot_tag, SlotTag(7));
+    }
+
+    #[test]
+    fn handle_encode_zero_index_and_tag() {
+        let h = Handle {
+            index: 0,
+            slot_tag: SlotTag(0),
+        };
+
+        assert_eq!(h.encode(), 0);
+    }
+
+    #[test]
+    fn handle_encode_max_index() {
+        let h = Handle {
+            index: u32::MAX,
+            slot_tag: SlotTag(0),
+        };
+
+        assert_eq!(h.encode(), u32::MAX as u64);
+        assert_eq!(Handle::decode(h.encode()).index, u32::MAX);
+    }
+
+    #[test]
+    fn handle_encode_max_tag() {
+        let h = Handle {
+            index: 0,
+            slot_tag: SlotTag(u32::MAX),
+        };
+        let decoded = Handle::decode(h.encode());
+
+        assert_eq!(decoded.index, 0);
+        assert_eq!(decoded.slot_tag, SlotTag(u32::MAX));
+    }
+
+    #[test]
+    fn handle_decode_arbitrary_u64() {
+        let h = Handle::decode(u64::MAX);
+
+        assert_eq!(h.index, u32::MAX);
+        assert_eq!(h.slot_tag, SlotTag(u32::MAX));
+    }
+
+    // ── Rights ───────────────────────────────────────────────────────
+
+    #[test]
+    fn rights_empty_has_no_bits() {
+        assert_eq!(Rights::empty().bits(), 0);
+    }
+
+    #[test]
+    fn rights_union_combines_bits() {
+        let r = Rights::SEND.union(Rights::RECEIVE);
+
+        assert!(r.contains(Rights::SEND));
+        assert!(r.contains(Rights::RECEIVE));
+    }
+
+    #[test]
+    fn rights_all_object_rights_are_nonzero() {
+        assert_ne!(Rights::FIELD_ALL.bits(), 0);
+        assert_ne!(Rights::OBSERVER_ALL.bits(), 0);
+        assert_ne!(Rights::SPACE_ALL.bits(), 0);
+        assert_ne!(Rights::TIME_ALL.bits(), 0);
+        assert_ne!(Rights::PULSAR_ALL.bits(), 0);
+    }
+
+    #[test]
+    fn rights_contains_subset() {
+        let all = Rights::FIELD_ALL;
+
+        assert!(all.contains(Rights::SEND));
+        assert!(all.contains(Rights::RECEIVE));
+    }
+
+    #[test]
+    fn rights_does_not_contain_disjoint() {
+        let send_only = Rights::SEND;
+
+        assert!(!send_only.contains(Rights::RECEIVE));
+    }
+
+    // ── Entry operations ─────────────────────────────────────────────
+
+    #[test]
+    fn entry_empty_is_not_occupied() {
+        let e = Entry::empty(SlotTag(0));
+
+        assert!(!e.is_occupied());
+    }
+
+    #[test]
+    fn entry_check_generation_matches() {
+        let e = Entry {
+            object: Some((ObjectType::Field, ObjectId(1))),
+            rights: Rights::SEND,
+            badge: Badge(0),
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: 42,
+        };
+
+        assert!(e.check_generation(42));
+        assert!(!e.check_generation(41));
+        assert!(!e.check_generation(43));
+    }
+
+    #[test]
+    fn entry_check_rights_subset() {
+        let e = Entry {
+            object: Some((ObjectType::Field, ObjectId(1))),
+            rights: Rights::SEND.union(Rights::RECEIVE),
+            badge: Badge(0),
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+
+        assert!(e.check_rights(Rights::SEND));
+        assert!(e.check_rights(Rights::RECEIVE));
+        assert!(e.check_rights(Rights::SEND.union(Rights::RECEIVE)));
+        assert!(!e.check_rights(Rights::SPLIT));
+    }
+
+    #[test]
+    fn entry_check_type_matches() {
+        let e = Entry {
+            object: Some((ObjectType::Space, ObjectId(5))),
+            rights: Rights::SPACE_ALL,
+            badge: Badge(0),
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+
+        assert!(e.check_type(ObjectType::Space));
+        assert!(!e.check_type(ObjectType::Field));
+        assert!(!e.check_type(ObjectType::Observer));
+    }
+
+    #[test]
+    fn entry_is_send_once_flag() {
+        let mut e = Entry::empty(SlotTag(0));
+
+        e.send_once = true;
+
+        assert!(e.is_send_once());
+
+        e.send_once = false;
+
+        assert!(!e.is_send_once());
+    }
+
+    // ── Badge ────────────────────────────────────────────────────────
+
+    #[test]
+    fn badge_zero_is_valid() {
+        let b = Badge(0);
+
+        assert_eq!(b.0, 0);
+        assert_ne!(b.0, CAP_ABSENT);
+    }
+
+    // ── SlotTag ──────────────────────────────────────────────────────
+
+    #[test]
+    fn slot_tag_equality() {
+        assert_eq!(SlotTag(0), SlotTag(0));
+        assert_ne!(SlotTag(0), SlotTag(1));
+    }
+
+    // ── ObjectType ───────────────────────────────────────────────────
+
+    #[test]
+    fn object_types_are_distinct() {
+        let types = [
+            ObjectType::Field,
+            ObjectType::Observer,
+            ObjectType::Pulsar,
+            ObjectType::Space,
+            ObjectType::Time,
+        ];
+
+        for i in 0..types.len() {
+            for j in (i + 1)..types.len() {
+                assert_ne!(types[i], types[j]);
+            }
+        }
+    }
+
+    // ── CAP_ABSENT sentinel ──────────────────────────────────────────
+
+    #[test]
+    fn cap_absent_is_max_u64() {
+        assert_eq!(CAP_ABSENT, u64::MAX);
+    }
 }

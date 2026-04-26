@@ -906,8 +906,8 @@ pub fn read_counter_ticks() -> u64 {
 /// Allocate a RegisterState for a new Observer (D95, D32).
 ///
 /// RegisterState lives in the consumed Space's structural backing (D95).
-/// Test builds use the heap allocator; bare-metal builds will use Space
-/// pages once the page allocator is wired.
+/// Test builds use the heap allocator; bare-metal builds allocate zeroed
+/// pages from the SpaceManager root pool (identity-mapped PA = VA).
 #[cfg(any(target_os = "none", test))]
 pub fn allocate_register_state() -> Option<NonNull<u8>> {
     #[cfg(test)]
@@ -916,7 +916,14 @@ pub fn allocate_register_state() -> Option<NonNull<u8>> {
     }
     #[cfg(not(test))]
     {
-        None
+        use crate::frame::arch::register_state::RegisterState;
+
+        let total_bytes = core::mem::size_of::<RegisterState>();
+        let page_count = total_bytes.div_ceil(crate::frame::arch::mmu::page_size());
+        let ks = crate::frame::kernel_state();
+        let pa = crate::frame::boot::alloc_zeroed_pages(ks, page_count).ok()?;
+
+        NonNull::new(pa as *mut u8)
     }
 }
 

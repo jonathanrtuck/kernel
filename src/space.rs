@@ -464,4 +464,185 @@ mod tests {
             "zero-size Space must report 0 pages"
         );
     }
+
+    #[test]
+    fn split_conservation_total_size() {
+        let mut space = Space {
+            va_base: 0x0,
+            size: 8 * 4096,
+            refcount: 1,
+            l3_table_pa: 0,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let original_size = space.size;
+        let (_, split_size) = space.split(4096, 4096).unwrap();
+
+        assert_eq!(space.size + split_size, original_size);
+    }
+
+    #[test]
+    fn split_new_va_is_at_end_of_parent() {
+        let mut space = Space {
+            va_base: 0x10000,
+            size: 4 * 4096,
+            refcount: 1,
+            l3_table_pa: 0,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let (new_va, new_size) = space.split(4096, 4096).unwrap();
+
+        assert_eq!(new_va, space.va_base + space.size);
+        assert_eq!(new_va + new_size, 0x10000 + 4 * 4096);
+    }
+
+    #[test]
+    fn split_exact_page_no_rounding() {
+        let mut space = Space {
+            va_base: 0,
+            size: 2 * 16384,
+            refcount: 1,
+            l3_table_pa: 0,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let (_, rounded) = space.split(16384, 16384).unwrap();
+
+        assert_eq!(rounded, 16384);
+    }
+
+    #[test]
+    fn split_leaves_minimum_one_page() {
+        let mut space = Space {
+            va_base: 0,
+            size: 2 * 4096,
+            refcount: 1,
+            l3_table_pa: 0,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+
+        space.split(4096, 4096).unwrap();
+
+        assert_eq!(space.size, 4096);
+        assert!(space.split(4096, 4096).is_err());
+    }
+
+    #[test]
+    fn merge_extends_size() {
+        let mut target = Space {
+            va_base: 0,
+            size: 4096,
+            refcount: 1,
+            l3_table_pa: 0,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let source = Space {
+            va_base: 4096,
+            size: 4096,
+            refcount: 1,
+            l3_table_pa: 0,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+
+        target.merge(&source).unwrap();
+
+        assert_eq!(target.size, 8192);
+        assert_eq!(target.va_base, 0);
+    }
+
+    #[test]
+    fn merge_rejects_gap() {
+        let mut target = Space {
+            va_base: 0,
+            size: 4096,
+            refcount: 1,
+            l3_table_pa: 0,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let source = Space {
+            va_base: 8192,
+            size: 4096,
+            refcount: 1,
+            l3_table_pa: 0,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+
+        assert_eq!(target.merge(&source), Err(SpaceError::NotAdjacent));
+    }
+
+    #[test]
+    fn merge_rejects_overlap() {
+        let mut target = Space {
+            va_base: 0,
+            size: 8192,
+            refcount: 1,
+            l3_table_pa: 0,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let source = Space {
+            va_base: 4096,
+            size: 4096,
+            refcount: 1,
+            l3_table_pa: 0,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+
+        assert_eq!(target.merge(&source), Err(SpaceError::NotAdjacent));
+    }
+
+    #[test]
+    fn contains_offset_zero_size_space() {
+        let space = Space {
+            va_base: 0,
+            size: 0,
+            refcount: 1,
+            l3_table_pa: 0,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+
+        assert!(!space.contains_offset(0));
+    }
+
+    #[test]
+    fn revoke_increments_generation() {
+        let space = Space {
+            va_base: 0,
+            size: 4096,
+            refcount: 1,
+            l3_table_pa: 0,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+
+        space
+            .generation
+            .fetch_add(1, core::sync::atomic::Ordering::Release);
+
+        assert_eq!(
+            space.generation.load(core::sync::atomic::Ordering::Acquire),
+            1
+        );
+    }
+
+    #[test]
+    fn split_then_merge_restores_original_size() {
+        let page_size = 4096;
+        let mut space = Space {
+            va_base: 0,
+            size: 4 * page_size,
+            refcount: 1,
+            l3_table_pa: 0,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let original_size = space.size;
+        let (new_va, new_size) = space.split(page_size, page_size).unwrap();
+        let split_off = Space {
+            va_base: new_va,
+            size: new_size,
+            refcount: 1,
+            l3_table_pa: 0,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+
+        space.merge(&split_off).unwrap();
+
+        assert_eq!(space.size, original_size);
+    }
 }

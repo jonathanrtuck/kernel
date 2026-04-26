@@ -94,8 +94,10 @@ Documented here rather than guessed at in code:
   `CascadeContinuation` in `CoreState`, driven by `continue_cascade()` in
   `handle_timer`. Destroyer is blocked while cascade runs; unblocked with return
   Space cap on completion.
-- **Boot/init sequence.** Root Observer creation, initial Space/Time pool setup,
-  per-core scheduler initialization. Partially unsettled (D31, D46).
+- ~~**Boot/init sequence.**~~ Root Observer cap table allocated and populated
+  (self-cap at slot 2, root Space at slot 3, freelist from slot 4). Root Space
+  created in arena from usable memory. clock_access enabled. Per-core scheduler
+  initialization remains unsettled for SMP (D46).
 - **Badge tracking map.** D17 opt-in per-badge refcount tracking on Fields. The
   `badge_tracking: bool` flag exists; the internal map data structure is
   deferred.

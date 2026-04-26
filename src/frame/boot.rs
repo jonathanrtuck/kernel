@@ -13,6 +13,8 @@
 #[cfg(target_os = "none")]
 use crate::arena::AllocError;
 #[cfg(target_os = "none")]
+use crate::capability::{self, Badge, ObjectType, Rights, SlotTag};
+#[cfg(target_os = "none")]
 use crate::core_manager::{CoreState, MAX_DEADLINES_PER_CORE};
 #[cfg(target_os = "none")]
 use crate::frame::arch::mmu;
@@ -102,7 +104,7 @@ const FALLBACK_BINARY: &[u8] = &{
 
 /// Allocate `count` pages from SpaceManager, zeroed. Returns the physical address.
 #[cfg(target_os = "none")]
-fn alloc_zeroed_pages(ks: &KernelState, count: usize) -> Result<usize, AllocError> {
+pub(super) fn alloc_zeroed_pages(ks: &KernelState, count: usize) -> Result<usize, AllocError> {
     let mut sm = ks.space_manager.acquire();
     let page_size = sm.root_pool.page_size;
     let pa = sm.allocate_pages(count)?;
@@ -321,6 +323,97 @@ fn set_current_observer(observer_ptr: NonNull<Observer>) {
     }
 }
 
+// ── Cap table setup (Phase 5) ────────────────────────────────────
+
+/// Capacity of the root Observer's cap table.
+///
+/// 16 entries: slots 0–2 reserved (fault handler, reply, self-cap),
+/// slot 3 = root Space cap, slots 4–15 = free. Matches the test helper
+/// convention in frame/capabilities.rs.
+#[cfg(target_os = "none")]
+const ROOT_CAP_TABLE_CAPACITY: u32 = 16;
+
+/// Allocate a cap table page and initialize it for the root Observer.
+///
+/// Returns `(entries_ptr, capacity)`. The page is zeroed first, then:
+/// - Freelist initialized from slot 4 (SLOT_USER_START + 1) to capacity-1.
+/// - Slot 2 (SLOT_SELF): self-cap pointing to the Observer.
+/// - Slot 3 (first user slot): root Space cap with full rights.
+///
+/// The cap table page comes from the physical allocator (identity-mapped).
+/// A 16 KiB page fits `16384 / size_of::<Entry>()` entries; we use 16.
+#[cfg(target_os = "none")]
+fn setup_root_cap_table(
+    ks: &KernelState,
+    observer_id: crate::arena::ObjectId,
+    root_space_id: crate::arena::ObjectId,
+) -> Result<NonNull<capability::Entry>, AllocError> {
+    let cap_page_pa = alloc_zeroed_pages(ks, 1)?;
+    // cap_page_pa is a valid physical address returned by alloc_zeroed_pages,
+    // zeroed, and exclusively ours. Identity mapping: PA = VA. NonNull::new
+    // is safe — it checks for null (which alloc_zeroed_pages never returns).
+    let entries =
+        NonNull::new(cap_page_pa as *mut capability::Entry).expect("cap_page_pa must be non-null");
+    let first_free = capability::SLOT_USER_START + 1;
+
+    crate::frame::capabilities::init_freelist(entries, ROOT_CAP_TABLE_CAPACITY, first_free);
+
+    // Slot 2 (SLOT_SELF): self-cap with full Observer rights.
+    crate::frame::capabilities::write_entry(
+        entries,
+        ROOT_CAP_TABLE_CAPACITY,
+        capability::SLOT_SELF,
+        capability::Entry {
+            object: Some((ObjectType::Observer, observer_id)),
+            rights: Rights::OBSERVER_ALL,
+            badge: Badge(0),
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        },
+    );
+    // Slot 3 (first user slot): root Space cap with full Space rights.
+    crate::frame::capabilities::write_entry(
+        entries,
+        ROOT_CAP_TABLE_CAPACITY,
+        capability::SLOT_USER_START,
+        capability::Entry {
+            object: Some((ObjectType::Space, root_space_id)),
+            rights: Rights::SPACE_ALL,
+            badge: Badge(0),
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        },
+    );
+
+    Ok(entries)
+}
+
+/// Create the root Space in the Space arena representing usable memory.
+///
+/// The root Space's va_base and size correspond to the remaining usable
+/// physical memory after boot allocations. This Space is what typed
+/// syscalls (CreateField, CreateObserver, SpaceSplit) consume.
+#[cfg(target_os = "none")]
+fn create_root_space(ks: &KernelState) -> Result<crate::arena::ObjectId, AllocError> {
+    let (va_base, size) = {
+        let sm = ks.space_manager.acquire();
+
+        (sm.next_va_base, sm.root_pool.free_bytes)
+    };
+    let mut spaces = ks.spaces.acquire();
+    let (space_id, space) = spaces.allocate()?;
+
+    space.va_base = va_base;
+    space.size = size;
+    space.l3_table_pa = 0;
+    space.refcount = 1;
+    space.generation = AtomicU64::new(0);
+
+    Ok(space_id)
+}
+
 // ── Public boot entry point ──────────────────────────────────────
 
 /// Boot the kernel into EL0 with a test Observer (D94, D102).
@@ -372,8 +465,30 @@ pub fn enter_first_observer(ks: &KernelState) -> ! {
     let asid = crate::frame::cores::allocate_asid(ks);
     let l1_root_pa = mmu::ttbr_base_address(mmu::current_ttbr0());
     let page_table_root = mmu::make_ttbr0(asid, l1_root_pa);
-    let (_obs_id, obs_ptr) =
+    let (obs_id, obs_ptr) =
         create_root_observer(ks, rs_pa, page_table_root, asid).expect("create root observer");
+    // ── Root Space and cap table setup (Phase 5) ────────────────
+    let root_space_id = create_root_space(ks).expect("create root space");
+    let cap_entries =
+        setup_root_cap_table(ks, obs_id, root_space_id).expect("setup root cap table");
+
+    // SAFETY: obs_ptr was just created above and is exclusively ours.
+    // Single-threaded BSP boot — no concurrent access. The &mut is
+    // safe because no other references to this Observer exist.
+    unsafe {
+        let obs = &mut *obs_ptr.as_ptr();
+
+        obs.cap_table = cap_entries;
+        obs.cap_table_capacity = ROOT_CAP_TABLE_CAPACITY;
+        obs.cap_table_free_head = Some(capability::SLOT_USER_START + 1);
+        obs.cap_table_count = 2;
+        obs.clock_access = true;
+    }
+
+    crate::println!(
+        "boot: cap_table capacity={} installed=2 (self + root space)",
+        ROOT_CAP_TABLE_CAPACITY,
+    );
 
     init_bsp_per_core_data(rs_pa as *mut RegisterState);
     set_current_observer(obs_ptr);
@@ -387,8 +502,9 @@ pub fn enter_first_observer(ks: &KernelState) -> ! {
     // SAFETY: rs_ptr points to a valid, fully initialized RegisterState
     // (setup_register_state wrote PC/SP/pstate). pt_root is the current
     // TTBR0 value (identity map with user pages installed). clock_access
-    // is 0 (no EL0 counter access). IRQs are currently masked (hardware
-    // default from boot). PerCoreData is initialized above.
+    // is 1 (EL0 counter access enabled for benchmarks). IRQs are
+    // currently masked (hardware default from boot). PerCoreData is
+    // initialized above.
     unsafe {
         crate::frame::arch::exception::__restore_observer(rs_ptr, pt_root, clock_access);
     }

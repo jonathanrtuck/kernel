@@ -271,4 +271,52 @@ mod tests {
 
         assert_eq!(*guard, 20);
     }
+
+    #[test]
+    fn lock_order_comparisons() {
+        assert!(LockOrder::Field.is_ordered());
+        assert!(LockOrder::Observer.is_ordered());
+        assert!(LockOrder::Pulsar.is_ordered());
+        assert!(!LockOrder::Space.is_ordered());
+        assert!(!LockOrder::Time.is_ordered());
+        assert!(!LockOrder::SpaceManager.is_ordered());
+        assert!(!LockOrder::IrqRouting.is_ordered());
+        assert!(!LockOrder::AsidAllocator.is_ordered());
+    }
+
+    #[test]
+    fn lock_order_field_lt_observer_lt_pulsar() {
+        assert!((LockOrder::Field as u8) < (LockOrder::Observer as u8));
+        assert!((LockOrder::Observer as u8) < (LockOrder::Pulsar as u8));
+    }
+
+    #[test]
+    fn lock_preserves_initial_value() {
+        let lock: Lock<u64> = Lock::new(LockOrder::Space, 0xDEAD_BEEF);
+        let guard = lock.acquire();
+
+        assert_eq!(*guard, 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn lock_reports_order() {
+        let lock: Lock<u32> = Lock::new(LockOrder::Time, 0);
+
+        assert_eq!(lock.order(), LockOrder::Time);
+    }
+
+    #[test]
+    fn multiple_mutations_accumulate() {
+        let lock: Lock<u32> = Lock::new(LockOrder::Field, 0);
+
+        for i in 0..10u32 {
+            let mut guard = lock.acquire();
+
+            *guard += i;
+        }
+
+        let guard = lock.acquire();
+
+        assert_eq!(*guard, 45);
+    }
 }

@@ -412,4 +412,98 @@ mod tests {
             "lower queue depth must score higher"
         );
     }
+
+    #[test]
+    fn score_core_zero_queue_max_score_possible() {
+        let s = make_snapshot(0, true, 0, 100);
+        let score = score_core(&s);
+
+        assert!(score > 0);
+    }
+
+    #[test]
+    fn score_core_full_queue_lower_than_empty() {
+        let empty = make_snapshot(0, false, 0, 100);
+        let full = make_snapshot(0, false, 32, 100);
+
+        assert!(score_core(&empty) > score_core(&full));
+    }
+
+    #[test]
+    fn place_single_core_always_local() {
+        let placement = ScoredPlacement::new();
+        let obs = make_observer();
+        let snapshots = [make_snapshot(0, false, 5, 100)];
+        let result = placement.place(&obs, &snapshots);
+
+        assert!(matches!(result, PlacementDecision::Local));
+    }
+
+    #[test]
+    fn place_two_cores_picks_better() {
+        let placement = ScoredPlacement::new();
+        let obs = make_observer();
+        let snapshots = [
+            make_snapshot(0, false, 10, 100),
+            make_snapshot(1, true, 0, 100),
+        ];
+        let result = placement.place(&obs, &snapshots);
+
+        match result {
+            PlacementDecision::Remote(id) => assert_eq!(id, CoreId(1)),
+            PlacementDecision::Local => panic!("idle remote should win"),
+        }
+    }
+
+    #[test]
+    fn place_all_equal_picks_local() {
+        let placement = ScoredPlacement::new();
+        let obs = make_observer();
+        let snapshots = [
+            make_snapshot(0, false, 3, 100),
+            make_snapshot(1, false, 3, 100),
+            make_snapshot(2, false, 3, 100),
+        ];
+        let result = placement.place(&obs, &snapshots);
+
+        assert!(matches!(result, PlacementDecision::Local));
+    }
+
+    #[test]
+    fn place_empty_snapshots_returns_local() {
+        let placement = ScoredPlacement::new();
+        let obs = make_observer();
+        let snapshots: [CoreSnapshot; 0] = [];
+        let result = placement.place(&obs, &snapshots);
+
+        assert!(matches!(result, PlacementDecision::Local));
+    }
+
+    #[test]
+    fn score_monotonically_decreases_with_queue_depth() {
+        let mut prev_score = i64::MAX;
+
+        for depth in 0..32u32 {
+            let s = make_snapshot(0, false, depth, 100);
+            let score = score_core(&s);
+
+            assert!(
+                score <= prev_score,
+                "score must decrease with depth: depth={depth}"
+            );
+
+            prev_score = score;
+        }
+    }
+
+    #[test]
+    fn idle_bonus_exceeds_queue_penalty() {
+        let idle_full = make_snapshot(0, true, 31, 100);
+        let busy_empty = make_snapshot(1, false, 0, 100);
+
+        assert!(
+            score_core(&idle_full) > score_core(&busy_empty),
+            "idle bonus must outweigh queue penalty"
+        );
+    }
 }

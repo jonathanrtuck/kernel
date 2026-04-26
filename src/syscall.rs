@@ -359,4 +359,115 @@ mod tests {
         assert!(TypedOperation::Close.target_type().is_none());
         assert!(TypedOperation::Mint.target_type().is_none());
     }
+
+    #[test]
+    fn from_svc_boundary_values() {
+        assert!(IpcOperation::from_svc(u16::MAX).is_none());
+        assert!(IpcOperation::from_svc(100).is_none());
+    }
+
+    #[test]
+    fn from_code_boundary_values() {
+        assert!(TypedOperation::from_code(u16::MAX).is_none());
+        assert!(TypedOperation::from_code(100).is_none());
+        assert!(TypedOperation::from_code(20).is_none());
+    }
+
+    #[test]
+    fn space_ops_target_space_type() {
+        use crate::capability::ObjectType;
+
+        assert_eq!(
+            TypedOperation::SpaceSplit.target_type(),
+            Some(ObjectType::Space)
+        );
+        assert_eq!(
+            TypedOperation::SpaceMerge.target_type(),
+            Some(ObjectType::Space)
+        );
+    }
+
+    #[test]
+    fn creation_ops_have_no_fixed_target_type() {
+        assert!(TypedOperation::CreateField.target_type().is_none());
+        assert!(TypedOperation::CreateObserver.target_type().is_none());
+        assert!(TypedOperation::CreatePulsar.target_type().is_none());
+    }
+
+    #[test]
+    fn clock_read_targets_none() {
+        assert!(TypedOperation::ClockRead.target_type().is_none());
+    }
+
+    #[test]
+    fn resource_request_targets_none() {
+        assert!(TypedOperation::ResourceRequest.target_type().is_none());
+    }
+
+    #[test]
+    fn field_split_targets_field() {
+        use crate::capability::ObjectType;
+
+        assert_eq!(
+            TypedOperation::FieldSplit.target_type(),
+            Some(ObjectType::Field)
+        );
+    }
+
+    #[test]
+    fn time_split_targets_time() {
+        use crate::capability::ObjectType;
+
+        assert_eq!(
+            TypedOperation::TimeSplit.target_type(),
+            Some(ObjectType::Time)
+        );
+    }
+
+    #[test]
+    fn all_observer_ops_target_observer() {
+        use crate::capability::ObjectType;
+
+        let observer_ops = [
+            TypedOperation::ObserverResume,
+            TypedOperation::ObserverInstallCap,
+            TypedOperation::ObserverWriteRegisters,
+            TypedOperation::ObserverReadRegisters,
+            TypedOperation::ObserverSuspend,
+            TypedOperation::ObserverChangeHandler,
+            TypedOperation::ObserverSetScheduling,
+        ];
+
+        for op in observer_ops {
+            assert_eq!(op.target_type(), Some(ObjectType::Observer));
+        }
+    }
+
+    #[test]
+    fn syscall_error_values_are_distinct() {
+        let errors = [
+            SyscallError::InvalidCap,
+            SyscallError::NoRight,
+            SyscallError::StaleCap,
+            SyscallError::WrongType,
+            SyscallError::TableFull,
+            SyscallError::InvalidState,
+            SyscallError::InsufficientResource,
+            SyscallError::AlreadyConsumed,
+            SyscallError::CloneForbidden,
+            SyscallError::QueueFull,
+            SyscallError::InvalidProfile,
+            SyscallError::ZeroSize,
+            SyscallError::NotAdjacent,
+        ];
+
+        for i in 0..errors.len() {
+            for j in (i + 1)..errors.len() {
+                assert_ne!(
+                    errors[i] as u64, errors[j] as u64,
+                    "error codes must be distinct"
+                );
+            }
+        }
+    }
 }
