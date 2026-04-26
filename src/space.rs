@@ -32,6 +32,14 @@ pub struct Space {
     /// Number of capability references to this Space (D11).
     pub refcount: u32,
 
+    /// Physical address of the L3 page table for this Space (D89/D92).
+    /// One L3 table per 32 MiB of content (with 16 KiB granule: 2048
+    /// entries * 16 KiB = 32 MiB coverage). Set at Space creation,
+    /// immutable thereafter. Split does not alter the parent's
+    /// l3_table_pa — the child gets its own L3 table allocated from
+    /// the conversion overhead budget (D92).
+    pub l3_table_pa: u64,
+
     /// Revocation generation counter (D67). Bumped atomically on
     /// explicit revocation; capability entries store the value at
     /// creation. AtomicU64 per D67: hot-path cap checks may read
@@ -142,7 +150,7 @@ mod tests {
 
     #[test]
     fn space_layout() {
-        assert_eq!(core::mem::size_of::<Space>(), 32);
+        assert_eq!(core::mem::size_of::<Space>(), 40);
     }
 
     #[test]
@@ -151,6 +159,7 @@ mod tests {
             va_base: 0x1000,
             size: 0x4000,
             refcount: 1,
+            l3_table_pa: 0xDEAD_0000,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
         let (new_va, rounded) = space.split(100, 4096).unwrap();
@@ -166,6 +175,7 @@ mod tests {
             va_base: 0,
             size: 4096,
             refcount: 1,
+            l3_table_pa: 0,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
 
@@ -178,6 +188,7 @@ mod tests {
             va_base: 0,
             size: 4096,
             refcount: 1,
+            l3_table_pa: 0,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
 
@@ -190,18 +201,21 @@ mod tests {
             va_base: 0x1000,
             size: 0x2000,
             refcount: 1,
+            l3_table_pa: 0xAAAA_0000,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
         let adjacent = Space {
             va_base: 0x3000,
             size: 0x1000,
             refcount: 1,
+            l3_table_pa: 0xBBBB_0000,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
         let nonadjacent = Space {
             va_base: 0x5000,
             size: 0x1000,
             refcount: 1,
+            l3_table_pa: 0xCCCC_0000,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
 
@@ -216,11 +230,238 @@ mod tests {
             va_base: 0,
             size: 4096,
             refcount: 1,
+            l3_table_pa: 0,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
 
         assert!(space.contains_offset(0));
         assert!(space.contains_offset(4095));
         assert!(!space.contains_offset(4096));
+    }
+
+    // ── D89 — L3 table PA preserved through topology operations ───────
+
+    /// D89: split does not alter the parent Space's l3_table_pa.
+    /// The L3 table PA is set at creation and immutable for the Space's
+    /// lifetime. Split creates a new Space (with its own L3 table); the
+    /// parent keeps its original.
+    #[test]
+    fn d89_split_preserves_parent_l3_table_pa() {
+        let original_l3_pa: u64 = 0xDEAD_BEEF_0000;
+        let mut space = Space {
+            va_base: 0x1000,
+            size: 4 * 16384, // 4 pages of 16 KiB
+            refcount: 1,
+            l3_table_pa: original_l3_pa,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let _result = space.split(16384, 16384).expect("split must succeed");
+
+        assert_eq!(
+            space.l3_table_pa, original_l3_pa,
+            "split must not alter parent's l3_table_pa \
+             (expected {original_l3_pa:#x}, got {:#x})",
+            space.l3_table_pa
+        );
+    }
+
+    /// D89: multiple sequential splits preserve l3_table_pa every time.
+    #[test]
+    fn d89_multiple_splits_preserve_l3_table_pa() {
+        let original_l3_pa: u64 = 0xCAFE_0000;
+        let mut space = Space {
+            va_base: 0x0,
+            size: 8 * 4096, // 8 pages of 4 KiB
+            refcount: 1,
+            l3_table_pa: original_l3_pa,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+
+        // Split off three times; l3_table_pa must remain unchanged each time.
+        for i in 0..3 {
+            let _result = space.split(4096, 4096).expect("split must succeed");
+
+            assert_eq!(
+                space.l3_table_pa, original_l3_pa,
+                "split #{i}: parent l3_table_pa must be unchanged"
+            );
+        }
+    }
+
+    /// D89: merge does not alter the target Space's l3_table_pa.
+    /// When absorbing a source Space, the target keeps its own L3 table
+    /// PA. The source's L3 table is freed separately (by the caller).
+    #[test]
+    fn d89_merge_preserves_target_l3_table_pa() {
+        let target_l3_pa: u64 = 0xAAAA_0000;
+        let source_l3_pa: u64 = 0xBBBB_0000;
+        let mut target = Space {
+            va_base: 0x1000,
+            size: 0x2000,
+            refcount: 1,
+            l3_table_pa: target_l3_pa,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let source = Space {
+            va_base: 0x3000,
+            size: 0x1000,
+            refcount: 1,
+            l3_table_pa: source_l3_pa,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+
+        target.merge(&source).expect("merge must succeed");
+
+        assert_eq!(
+            target.l3_table_pa, target_l3_pa,
+            "merge must not alter target's l3_table_pa \
+             (expected {target_l3_pa:#x}, got {:#x})",
+            target.l3_table_pa
+        );
+    }
+
+    /// D89: l3_table_pa is independent between target and source.
+    /// After merge, target's l3_table_pa is still its own, not the source's.
+    #[test]
+    fn d89_merge_does_not_adopt_source_l3_table_pa() {
+        let mut target = Space {
+            va_base: 0x0,
+            size: 0x4000,
+            refcount: 1,
+            l3_table_pa: 0x1111_0000,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let source = Space {
+            va_base: 0x4000,
+            size: 0x4000,
+            refcount: 1,
+            l3_table_pa: 0x2222_0000,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+
+        target.merge(&source).expect("merge must succeed");
+
+        assert_ne!(
+            target.l3_table_pa, source.l3_table_pa,
+            "target must keep its own l3_table_pa, not adopt source's"
+        );
+        assert_eq!(target.l3_table_pa, 0x1111_0000);
+    }
+
+    // ── D90 — page_count with real hardware granule ───────────────────
+
+    /// D90: page_count with 16 KiB pages (ARM64 hardware granule).
+    /// A Space of exactly N * 16 KiB must report N pages.
+    #[test]
+    fn d90_page_count_16kib_exact_pages() {
+        let page_size = 16384;
+        let space = Space {
+            va_base: 0,
+            size: 4 * page_size,
+            refcount: 1,
+            l3_table_pa: 0,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+
+        assert_eq!(
+            space.page_count(page_size),
+            4,
+            "4 * 16 KiB Space must report 4 pages"
+        );
+    }
+
+    /// D90: page_count with 16 KiB pages — single page (minimum Space).
+    #[test]
+    fn d90_page_count_16kib_single_page() {
+        let page_size = 16384;
+        let space = Space {
+            va_base: 0,
+            size: page_size,
+            refcount: 1,
+            l3_table_pa: 0,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+
+        assert_eq!(
+            space.page_count(page_size),
+            1,
+            "single 16 KiB page Space must report 1 page"
+        );
+    }
+
+    /// D90: page_count with 16 KiB pages — large Space (2048 pages = 32 MiB).
+    /// This is the coverage of one L3 table with 16 KiB granule.
+    #[test]
+    fn d90_page_count_16kib_one_l3_table_coverage() {
+        let page_size = 16384;
+        let space = Space {
+            va_base: 0,
+            size: 2048 * page_size, // 32 MiB
+            refcount: 1,
+            l3_table_pa: 0,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+
+        assert_eq!(
+            space.page_count(page_size),
+            2048,
+            "32 MiB Space with 16 KiB pages must report 2048 pages"
+        );
+    }
+
+    /// D90: page_count with 16 KiB pages — just over one L3 table.
+    #[test]
+    fn d90_page_count_16kib_over_one_l3_table() {
+        let page_size = 16384;
+        let space = Space {
+            va_base: 0,
+            size: 2049 * page_size,
+            refcount: 1,
+            l3_table_pa: 0,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+
+        assert_eq!(
+            space.page_count(page_size),
+            2049,
+            "2049 * 16 KiB Space must report 2049 pages"
+        );
+    }
+
+    /// D90: page_count with 4 KiB pages (alternate granule).
+    #[test]
+    fn d90_page_count_4kib_pages() {
+        let page_size = 4096;
+        let space = Space {
+            va_base: 0,
+            size: 10 * page_size,
+            refcount: 1,
+            l3_table_pa: 0,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+
+        assert_eq!(
+            space.page_count(page_size),
+            10,
+            "10 * 4 KiB Space must report 10 pages"
+        );
+    }
+
+    /// D90: page_count of zero-size Space is zero.
+    #[test]
+    fn d90_page_count_zero_size() {
+        let space = Space {
+            va_base: 0,
+            size: 0,
+            refcount: 1,
+            l3_table_pa: 0,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+
+        assert_eq!(
+            space.page_count(16384),
+            0,
+            "zero-size Space must report 0 pages"
+        );
     }
 }

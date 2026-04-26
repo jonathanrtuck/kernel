@@ -130,31 +130,46 @@ impl SpaceManager {
             .min(self.root_pool.total_bytes);
     }
 
-    /// Assign a VA base for a new Space (D26).
+    /// Assign a VA base for a new Space (D26, D89).
     ///
     /// D26: kernel-assigned, stable for the Space's lifetime. The
     /// policy for choosing VA bases is kernel-internal — this method
     /// encapsulates it.
     ///
+    /// D89: the `alignment` parameter controls VA base alignment.
+    /// For L3-table-based mapping, Spaces are 32 MiB aligned (with
+    /// 16 KiB granule). Zero alignment is treated as page_size
+    /// (defensive default). Alignment must be a power of two
+    /// (`debug_assert` in debug builds).
+    ///
     /// D41: merge may fail if no adjacent VA space is available. The
     /// assignment policy should minimize this by leaving headroom.
-    pub fn assign_va(&mut self, size: usize) -> Result<VaAssignment, AllocError> {
-        let page_mask = self.root_pool.page_size - 1;
+    pub fn assign_va(&mut self, size: usize, alignment: usize) -> Result<VaAssignment, AllocError> {
+        let page_size = self.root_pool.page_size;
+        let effective_alignment = if alignment == 0 { page_size } else { alignment };
+        debug_assert!(
+            effective_alignment.is_power_of_two(),
+            "alignment must be a power of two, got {effective_alignment}"
+        );
+        let align_mask = effective_alignment - 1;
+        let page_mask = page_size - 1;
         // Round up to page boundary; overflow means the request is impossibly large.
         let aligned_size = size.checked_add(page_mask).ok_or(AllocError::OutOfMemory)? & !page_mask;
         // A zero-size request still consumes one page of VA space.
         let consume = if aligned_size == 0 {
-            self.root_pool.page_size
+            page_size
         } else {
             aligned_size
         };
-        // VA budget: physical memory size, starting from page_size.
-        let va_limit = self
-            .root_pool
-            .page_size
-            .saturating_add(self.root_pool.total_bytes);
-        let next = self
+        // Round up the cursor to the requested alignment.
+        let aligned_cursor = self
             .next_va_base
+            .checked_add(align_mask)
+            .ok_or(AllocError::OutOfMemory)?
+            & !align_mask;
+        // VA budget: physical memory size, starting from page_size.
+        let va_limit = page_size.saturating_add(self.root_pool.total_bytes);
+        let next = aligned_cursor
             .checked_add(consume)
             .ok_or(AllocError::OutOfMemory)?;
 
@@ -162,19 +177,22 @@ impl SpaceManager {
             return Err(AllocError::OutOfMemory);
         }
 
-        let va_base = self.next_va_base;
-
         self.next_va_base = next;
 
-        Ok(VaAssignment { va_base })
+        Ok(VaAssignment {
+            va_base: aligned_cursor,
+        })
     }
 
     /// Compute the overhead of type conversion for a given Space size.
     ///
     /// D32: at split time, the parent shrinks by `child_size + overhead`.
-    /// Overhead covers the page table subtree entries needed to map the
-    /// new Space. First holder populates from reserved capacity;
-    /// subsequent holders increment the reference count.
+    /// D92: only L3 tables are charged to the Space. L1/L2 tables are
+    /// per-Observer costs charged elsewhere (L1 to consumed Space at
+    /// Observer creation, L2 to kernel root pool on demand).
+    ///
+    /// Formula: `ceil(page_count / entries_per_table) * page_size`.
+    /// One L3 table per `entries_per_table` pages (2048 for 16 KiB granule).
     pub fn type_conversion_overhead(&self, space_size: usize) -> usize {
         if space_size == 0 {
             return 0;
@@ -182,26 +200,13 @@ impl SpaceManager {
 
         let page_size = self.root_pool.page_size;
         let page_count = space_size.saturating_add(page_size - 1) / page_size;
-        // Each page table entry is 8 bytes; entries per table page = page_size / 8.
         let entries_per_table = page_size / 8;
 
         debug_assert!(entries_per_table > 0, "page_size must be >= 8");
 
-        let mut tables: usize = 0;
-        let mut remaining = page_count;
+        let l3_tables = page_count.saturating_add(entries_per_table - 1) / entries_per_table;
 
-        while remaining > 0 {
-            let level_tables = remaining.saturating_add(entries_per_table - 1) / entries_per_table;
-
-            tables = tables.saturating_add(level_tables);
-            if level_tables <= 1 {
-                break;
-            }
-
-            remaining = level_tables;
-        }
-
-        tables.saturating_mul(page_size)
+        l3_tables.saturating_mul(page_size)
     }
 }
 
@@ -466,7 +471,7 @@ mod tests {
         let mut sm = make_space_manager();
         let page_size = sm.root_pool.page_size;
         let assignment = sm
-            .assign_va(page_size)
+            .assign_va(page_size, page_size)
             .expect("assign_va must succeed on a fresh SpaceManager");
 
         assert_ne!(
@@ -489,10 +494,10 @@ mod tests {
         let mut sm = make_space_manager();
         let page_size = sm.root_pool.page_size;
         let a = sm
-            .assign_va(page_size)
+            .assign_va(page_size, page_size)
             .expect("first assign_va must succeed");
         let b = sm
-            .assign_va(page_size)
+            .assign_va(page_size, page_size)
             .expect("second assign_va must succeed");
 
         assert_ne!(
@@ -526,7 +531,7 @@ mod tests {
         let mut got_error = false;
 
         for _ in 0..10_000 {
-            match sm.assign_va(page_size) {
+            match sm.assign_va(page_size, page_size) {
                 Ok(_) => {
                     assigned += 1;
                 }
@@ -786,7 +791,7 @@ mod tests {
     fn test_adversarial_sm_assign_va_zero_size_no_panic() {
         let mut sm = make_space_manager();
 
-        match sm.assign_va(0) {
+        match sm.assign_va(0, 0) {
             Ok(assignment) => {
                 // If a zero-size VA is accepted, the base must still be
                 // page-aligned (alignment is unconditional).
@@ -815,7 +820,7 @@ mod tests {
 
         // Expect OutOfMemory (no VA range of size usize::MAX exists), but
         // must not panic regardless.
-        match sm.assign_va(usize::MAX) {
+        match sm.assign_va(usize::MAX, 4096) {
             Ok(_) => {
                 // Unexpected success is a logic error in the implementation,
                 // but the test records it without panicking so the failure
@@ -1009,7 +1014,7 @@ mod tests {
         ];
 
         for (i, &size) in sizes.iter().enumerate() {
-            match sm.assign_va(size) {
+            match sm.assign_va(size, page_size) {
                 Ok(assignment) => {
                     assert_eq!(
                         assignment.va_base % page_size,
@@ -1029,6 +1034,374 @@ mod tests {
                     break;
                 }
             }
+        }
+    }
+
+    // ── D89 — VA alignment ────────────────────────────────────────────
+
+    /// D89: 32 MiB alignment. With 16 KiB pages, one L3 table covers
+    /// 2048 * 16 KiB = 32 MiB. VA bases must be 32 MiB aligned for
+    /// L3-table-aligned mapping.
+    #[test]
+    fn d89_assign_va_32mib_alignment() {
+        const PAGE_16K: usize = 16384;
+        const ALIGN_32M: usize = 32 * 1024 * 1024;
+        // Need enough VA space: pool must be larger than alignment.
+        // 4096 pages * 16 KiB = 64 MiB total.
+        let mut sm = make_space_manager_with(4096, PAGE_16K);
+        let assignment = sm
+            .assign_va(PAGE_16K, ALIGN_32M)
+            .expect("32 MiB aligned assign_va must succeed");
+
+        assert_eq!(
+            assignment.va_base % ALIGN_32M,
+            0,
+            "VA base must be 32 MiB aligned (va_base={:#x}, remainder={:#x})",
+            assignment.va_base,
+            assignment.va_base % ALIGN_32M
+        );
+    }
+
+    /// D89: two consecutive 32 MiB aligned assignments must be non-overlapping
+    /// and both aligned.
+    #[test]
+    fn d89_assign_va_32mib_multiple_aligned_non_overlapping() {
+        const PAGE_16K: usize = 16384;
+        const ALIGN_32M: usize = 32 * 1024 * 1024;
+        // Need at least 3 * 32 MiB of VA space: initial cursor at page_size
+        // wastes up to 32 MiB aligning, then two 32 MiB regions.
+        // 8192 pages * 16 KiB = 128 MiB.
+        let mut sm = make_space_manager_with(8192, PAGE_16K);
+        let a = sm
+            .assign_va(ALIGN_32M, ALIGN_32M)
+            .expect("first 32 MiB aligned assign must succeed");
+        let b = sm
+            .assign_va(ALIGN_32M, ALIGN_32M)
+            .expect("second 32 MiB aligned assign must succeed");
+
+        // Both must be 32 MiB aligned.
+        assert_eq!(
+            a.va_base % ALIGN_32M,
+            0,
+            "first VA base must be 32 MiB aligned (va_base={:#x})",
+            a.va_base
+        );
+        assert_eq!(
+            b.va_base % ALIGN_32M,
+            0,
+            "second VA base must be 32 MiB aligned (va_base={:#x})",
+            b.va_base
+        );
+
+        // Must not overlap.
+        let a_end = a.va_base + ALIGN_32M;
+
+        assert!(
+            b.va_base >= a_end,
+            "second assignment must not overlap first \
+             (a=[{:#x}, {:#x}), b.va_base={:#x})",
+            a.va_base,
+            a_end,
+            b.va_base
+        );
+    }
+
+    /// D89: alignment with a pool smaller than the alignment.
+    /// If the total VA budget cannot satisfy the alignment, assign_va
+    /// must return OutOfMemory.
+    #[test]
+    fn d89_assign_va_alignment_exceeds_pool() {
+        const PAGE_16K: usize = 16384;
+        const ALIGN_32M: usize = 32 * 1024 * 1024;
+        // Only 2 pages * 16 KiB = 32 KiB total. The VA budget is far
+        // smaller than 32 MiB, so alignment cannot be satisfied.
+        let mut sm = make_space_manager_with(2, PAGE_16K);
+        let result = sm.assign_va(PAGE_16K, ALIGN_32M);
+
+        assert_eq!(
+            result.err(),
+            Some(AllocError::OutOfMemory),
+            "assign_va with alignment exceeding VA budget must return OutOfMemory"
+        );
+    }
+
+    /// D89: page-size alignment behaves identically to the original
+    /// assign_va behavior (backward compatibility).
+    #[test]
+    fn d89_assign_va_page_size_alignment_backward_compatible() {
+        const PAGE_16K: usize = 16384;
+        let mut sm = make_space_manager_with(16, PAGE_16K);
+        let page_size = sm.root_pool.page_size;
+        let assignment = sm
+            .assign_va(page_size, page_size)
+            .expect("page-aligned assign_va must succeed");
+
+        assert_eq!(
+            assignment.va_base % page_size,
+            0,
+            "page-size aligned VA base must be page-aligned"
+        );
+        assert_ne!(assignment.va_base, 0, "VA base must not be zero");
+    }
+
+    /// D89: zero alignment is treated as page_size (defensive default).
+    #[test]
+    fn d89_assign_va_zero_alignment_defaults_to_page_size() {
+        const PAGE_16K: usize = 16384;
+        let mut sm = make_space_manager_with(16, PAGE_16K);
+        let page_size = sm.root_pool.page_size;
+        let assignment = sm
+            .assign_va(page_size, 0)
+            .expect("zero-alignment assign_va must succeed");
+
+        assert_eq!(
+            assignment.va_base % page_size,
+            0,
+            "zero alignment must default to page-size alignment"
+        );
+        assert_ne!(assignment.va_base, 0, "VA base must not be zero");
+    }
+
+    /// D89: alignment with 16 KiB pages and various alignment values.
+    /// Each returned VA must satisfy the requested alignment.
+    #[test]
+    fn d89_assign_va_various_alignments() {
+        const PAGE_16K: usize = 16384;
+        // Test power-of-two alignments from page_size up to 1 MiB.
+        let alignments = [PAGE_16K, 2 * PAGE_16K, 64 * 1024, 256 * 1024, 1024 * 1024];
+
+        for &alignment in &alignments {
+            // Need enough VA space for alignment waste + the allocation.
+            let pages_needed = (2 * alignment) / PAGE_16K + 1;
+            let mut sm = make_space_manager_with(pages_needed, PAGE_16K);
+            let assignment = sm
+                .assign_va(PAGE_16K, alignment)
+                .expect("aligned assign_va must succeed");
+
+            assert_eq!(
+                assignment.va_base % alignment,
+                0,
+                "VA base must be {alignment}-byte aligned (va_base={:#x})",
+                assignment.va_base
+            );
+        }
+    }
+
+    /// D89: multiple aligned assignments are all aligned AND non-overlapping.
+    /// Uses 64 KiB alignment with 16 KiB pages.
+    #[test]
+    fn d89_assign_va_multiple_aligned_all_non_overlapping() {
+        const PAGE_16K: usize = 16384;
+        const ALIGNMENT: usize = 64 * 1024; // 64 KiB
+        const ALLOC_SIZE: usize = 2 * PAGE_16K; // 32 KiB per allocation
+        const MAX_ASSIGNMENTS: usize = 8;
+        // 64 pages * 16 KiB = 1 MiB total.
+        let mut sm = make_space_manager_with(64, PAGE_16K);
+        let mut bases = [0usize; MAX_ASSIGNMENTS];
+        let mut count = 0usize;
+
+        for _ in 0..MAX_ASSIGNMENTS {
+            match sm.assign_va(ALLOC_SIZE, ALIGNMENT) {
+                Ok(a) => {
+                    assert_eq!(
+                        a.va_base % ALIGNMENT,
+                        0,
+                        "VA base must be {ALIGNMENT}-byte aligned (va_base={:#x})",
+                        a.va_base
+                    );
+                    bases[count] = a.va_base;
+                    count += 1;
+                }
+                Err(AllocError::OutOfMemory) => break,
+            }
+        }
+
+        // Verify no overlaps among all assignments.
+        for i in 0..count {
+            for j in (i + 1)..count {
+                let a_base = bases[i];
+                let b_base = bases[j];
+                let a_end = a_base + ALLOC_SIZE;
+                let b_end = b_base + ALLOC_SIZE;
+                let overlaps = a_base < b_end && b_base < a_end;
+
+                assert!(
+                    !overlaps,
+                    "assignments {i} and {j} overlap: \
+                     [{a_base:#x}, {a_end:#x}) and [{b_base:#x}, {b_end:#x})"
+                );
+            }
+        }
+
+        assert!(
+            count >= 2,
+            "must have at least 2 successful aligned assignments for overlap check"
+        );
+    }
+
+    // ── D92 — L3 table overhead accounting ────────────────────────────
+
+    /// D92: zero-size Space has zero overhead.
+    #[test]
+    fn d92_type_conversion_overhead_zero_size() {
+        let sm = make_space_manager_with(16, 16384);
+
+        assert_eq!(
+            sm.type_conversion_overhead(0),
+            0,
+            "zero-size Space must have zero overhead"
+        );
+    }
+
+    /// D92: 1 page Space with 16 KiB granule requires 1 L3 table = 16 KiB overhead.
+    /// entries_per_table = 16384 / 8 = 2048. ceil(1 / 2048) = 1 table.
+    #[test]
+    fn d92_type_conversion_overhead_one_page_16kib() {
+        let sm = make_space_manager_with(16, 16384);
+        let page_size = sm.root_pool.page_size;
+        let overhead = sm.type_conversion_overhead(page_size);
+
+        assert_eq!(
+            overhead, page_size,
+            "1-page Space must need 1 L3 table = {page_size} bytes overhead \
+             (got {overhead})"
+        );
+    }
+
+    /// D92: 2048 page Space with 16 KiB granule requires 1 L3 table = 16 KiB.
+    /// entries_per_table = 2048. ceil(2048 / 2048) = 1 table.
+    /// This is the maximum Space that fits in a single L3 table.
+    #[test]
+    fn d92_type_conversion_overhead_2048_pages_16kib() {
+        let sm = make_space_manager_with(4096, 16384);
+        let page_size = sm.root_pool.page_size;
+        let space_size = 2048 * page_size; // 32 MiB
+        let overhead = sm.type_conversion_overhead(space_size);
+
+        assert_eq!(
+            overhead, page_size,
+            "2048-page Space must need 1 L3 table = {page_size} bytes overhead \
+             (got {overhead})"
+        );
+    }
+
+    /// D92: 2049 page Space with 16 KiB granule requires 2 L3 tables = 32 KiB.
+    /// entries_per_table = 2048. ceil(2049 / 2048) = 2 L3 tables.
+    /// D92: only L3 tables charged to Space. L2 is per-Observer (root pool).
+    #[test]
+    fn d92_type_conversion_overhead_2049_pages_16kib() {
+        let sm = make_space_manager_with(4096, 16384);
+        let page_size = sm.root_pool.page_size;
+        let space_size = 2049 * page_size;
+        let overhead = sm.type_conversion_overhead(space_size);
+
+        assert_eq!(
+            overhead,
+            2 * page_size,
+            "2049 pages = 2 L3 tables (D92: L3 only, no L2 charged to Space)"
+        );
+    }
+
+    /// D92: exact boundary — entries_per_table pages fits in 1 L3 table.
+    /// With 16 KiB pages: entries_per_table = 2048.
+    #[test]
+    fn d92_type_conversion_overhead_exact_boundary_16kib() {
+        let sm = make_space_manager_with(4096, 16384);
+        let page_size = sm.root_pool.page_size;
+        let entries_per_table = page_size / 8; // 2048
+        // Exactly entries_per_table pages: 1 L3 table.
+        let overhead_exact = sm.type_conversion_overhead(entries_per_table * page_size);
+
+        assert_eq!(
+            overhead_exact, page_size,
+            "exactly {entries_per_table} pages must need 1 L3 table"
+        );
+
+        // entries_per_table + 1 pages: 2 L3 tables (D92: L3 only).
+        let overhead_plus_one = sm.type_conversion_overhead((entries_per_table + 1) * page_size);
+
+        assert!(
+            overhead_plus_one > overhead_exact,
+            "overhead for {0} pages ({overhead_plus_one}) must exceed \
+             overhead for {entries_per_table} pages ({overhead_exact})",
+            entries_per_table + 1
+        );
+    }
+
+    /// D92: overhead scales monotonically — more pages never means less overhead.
+    #[test]
+    fn d92_type_conversion_overhead_monotonic_16kib() {
+        let sm = make_space_manager_with(65536, 16384);
+        let page_size = sm.root_pool.page_size;
+        let mut prev_overhead = 0usize;
+        // Sample points: 1, 512, 1024, 2048, 2049, 4096, 8192 pages.
+        let page_counts = [1, 512, 1024, 2048, 2049, 4096, 8192];
+
+        for &count in &page_counts {
+            let overhead = sm.type_conversion_overhead(count * page_size);
+
+            assert!(
+                overhead >= prev_overhead,
+                "overhead must be non-decreasing: {count} pages gave \
+                 {overhead}, but previous was {prev_overhead}"
+            );
+            prev_overhead = overhead;
+        }
+    }
+
+    /// D92: overhead with 4 KiB pages (existing granule) — verify
+    /// D92 L3-only formula works with different page sizes.
+    /// entries_per_table = 4096/8 = 512.
+    /// 1 page: ceil(1/512) = 1 L3 table = 4096.
+    /// 512 pages: ceil(512/512) = 1 L3 table = 4096.
+    #[test]
+    fn d92_type_conversion_overhead_4kib_compatibility() {
+        let sm = make_space_manager_with(1024, 4096);
+        let page_size = sm.root_pool.page_size;
+        let overhead_1 = sm.type_conversion_overhead(page_size);
+
+        assert_eq!(
+            overhead_1, page_size,
+            "1-page Space with 4 KiB pages: 1 L3 table"
+        );
+
+        let overhead_512 = sm.type_conversion_overhead(512 * page_size);
+
+        assert_eq!(
+            overhead_512, page_size,
+            "512-page Space with 4 KiB pages: 1 L3 table"
+        );
+    }
+
+    /// D92: sub-page size input rounds up to 1 page, requiring 1 L3 table.
+    #[test]
+    fn d92_type_conversion_overhead_sub_page_rounds_up_16kib() {
+        let sm = make_space_manager_with(16, 16384);
+        let page_size = sm.root_pool.page_size;
+        let overhead = sm.type_conversion_overhead(1); // 1 byte
+
+        assert_eq!(
+            overhead, page_size,
+            "sub-page Space rounds up to 1 page, needing 1 L3 table = {page_size} bytes"
+        );
+    }
+
+    /// D92: overhead for exactly 1 L3 table of pages equals exactly 1 page.
+    /// This verifies the formula: ceil(N / entries_per_table) * page_size.
+    #[test]
+    fn d92_type_conversion_overhead_formula_verification() {
+        let sm = make_space_manager_with(65536, 16384);
+        let page_size = sm.root_pool.page_size;
+        let entries_per_table = page_size / 8;
+
+        // Single L3 table cases: 1 to entries_per_table pages.
+        for &count in &[1usize, entries_per_table / 2, entries_per_table] {
+            let overhead = sm.type_conversion_overhead(count * page_size);
+
+            assert_eq!(
+                overhead, page_size,
+                "{count} pages (within single L3 table) must need exactly 1 table"
+            );
         }
     }
 }

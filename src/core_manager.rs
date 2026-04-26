@@ -1175,12 +1175,14 @@ impl<S: Scheduler> CoreState<S> {
                 drop(spaces);
 
                 // Phase 2: merge using a temporary Space value.
-                // Construct a temporary Space with the source's fields for
-                // the adjacency check. merge() only reads va_base and size.
+                // Surrogate for adjacency check only. merge() reads only
+                // va_base and size. l3_table_pa, refcount, and generation
+                // are fabricated — never read by merge().
                 let source_snapshot = crate::space::Space {
                     va_base: source_va_base,
                     size: source_size,
                     refcount: 0,
+                    l3_table_pa: 0,
                     generation: core::sync::atomic::AtomicU64::new(0),
                 };
                 let mut spaces = kernel_state.spaces.acquire();
