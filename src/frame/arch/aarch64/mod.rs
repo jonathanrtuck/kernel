@@ -12,6 +12,7 @@ pub mod gic;
 pub use gic as interrupts;
 mod mmio;
 pub mod mmu;
+pub mod page_table;
 pub mod platform;
 pub mod psci;
 pub mod register_state;

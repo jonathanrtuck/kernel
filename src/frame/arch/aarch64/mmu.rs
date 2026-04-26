@@ -50,14 +50,38 @@ const MAIR_NORMAL_WB: u64 = 0xFF; // Inner/Outer Write-Back, Write-Allocate
 // Page geometry — 16 KiB granule (Apple Silicon native). These stay private
 // to the MMU module; the page size does not leak into the kernel interface.
 const PAGE_SIZE: usize = 16 * 1024;
-// TODO: remove
-#[allow(dead_code)]
 const PAGE_SHIFT: usize = 14;
 
 // L2 geometry
 const L2_BLOCK_SHIFT: usize = 25;
 const L2_BLOCK_SIZE: usize = 1 << L2_BLOCK_SHIFT;
 const ENTRIES_PER_TABLE: usize = PAGE_SIZE / 8;
+
+// ── TTBR split contract (D88) ─────────────────────────────────────
+//
+// Kernel in TTBR1 (upper half), per-Observer user in TTBR0 (lower half).
+// Asymmetric VA sizes: user T0SZ=17 (47-bit, 128 TiB, 3-level L1→L2→L3),
+// kernel T1SZ=28 (36-bit, 64 GiB, 2-level L2→L3).
+
+/// Kernel virtual address offset (D88).
+///
+/// The TTBR1 linear map: `VA = PA + KERNEL_VIRT_OFFSET`.
+/// With T1SZ=28 the TTBR1 base is `0xFFFF_FFF0_0000_0000`.
+pub const KERNEL_VIRT_OFFSET: usize = 0xFFFF_FFF0_0000_0000;
+
+/// Maximum user virtual address (exclusive).
+///
+/// TTBR0 range with T0SZ=17: 0 to 2^47 − 1 = 128 TiB.
+/// 3-level walk (L1→L2→L3) enables D26's shared L3 subtrees with
+/// 32 MiB VA alignment per Space (~4 million Space slots).
+pub const USER_VA_END: usize = 1 << 47;
+
+/// Mask for extracting the page table physical address from a TTBR value.
+///
+/// 16 KiB granule: table must be 16 KiB aligned (bits\[13:0\] = 0).
+/// TTBR BADDR occupies bits\[47:14\]. Bits\[63:48\] hold the ASID,
+/// bit\[0\] is CnP. This mask isolates the PA.
+const TTBR_BADDR_MASK: u64 = 0x0000_FFFF_FFFF_C000;
 
 // ---------------------------------------------------------------------------
 // Static page tables
@@ -95,7 +119,6 @@ fn l2_index(va: usize) -> usize {
     (va >> L2_BLOCK_SHIFT) & (ENTRIES_PER_TABLE - 1)
 }
 
-// TODO: remove
 #[allow(dead_code)]
 #[inline]
 fn l3_index(va: usize) -> usize {
@@ -183,6 +206,77 @@ fn build_l3(table: &mut [u64; ENTRIES_PER_TABLE], block_base: usize, layout: &Ke
             table[i] = l3_page(pa, attrs);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// TTBR split helpers (D88)
+// ---------------------------------------------------------------------------
+
+/// Convert a physical address to a kernel virtual address.
+///
+/// D88: the TTBR1 linear map is `PA + KERNEL_VIRT_OFFSET`. Single-instruction
+/// operation — no page table walk.
+#[inline(always)]
+pub const fn phys_to_virt(pa: usize) -> usize {
+    pa.wrapping_add(KERNEL_VIRT_OFFSET)
+}
+
+/// Convert a kernel virtual address to a physical address.
+///
+/// Inverse of [`phys_to_virt`]. Only valid for addresses in the TTBR1 range.
+#[inline(always)]
+pub const fn virt_to_phys(va: usize) -> usize {
+    va.wrapping_sub(KERNEL_VIRT_OFFSET)
+}
+
+/// Construct a TTBR0 value from an ASID and L1 root physical address.
+///
+/// TTBR0\_EL1 format for 16 KiB granule (D88):
+/// - Bits\[63:48\]: ASID (when `TCR_EL1.A1=0`)
+/// - Bits\[47:14\]: L1 root table PA (with T0SZ=17, root is L1)
+/// - Bits\[13:1\]: RES0 (16 KiB alignment)
+/// - Bit\[0\]: CnP = 0 (per-Observer, not shared across cores)
+#[inline(always)]
+pub const fn make_ttbr0(asid: u16, l1_root_pa: u64) -> u64 {
+    ((asid as u64) << 48) | (l1_root_pa & TTBR_BADDR_MASK)
+}
+
+/// Construct a TTBR1 value for the kernel page table.
+///
+/// D88: `CnP=1` because all cores share the same kernel tables. No ASID —
+/// `TCR_EL1.A1=0` means the ASID comes from TTBR0, not TTBR1.
+#[inline(always)]
+pub const fn make_ttbr1(l2_root_pa: u64) -> u64 {
+    (l2_root_pa & TTBR_BADDR_MASK) | 1
+}
+
+/// Build the TCR\_EL1 value for the TTBR0/TTBR1 split (D88).
+///
+/// Asymmetric VA sizes: user T0SZ=17 (47-bit, 3-level L1→L2→L3),
+/// kernel T1SZ=28 (36-bit, 2-level L2→L3). `EPD1=0` enables TTBR1
+/// walks; `E0PD1=1` provides Meltdown mitigation.
+#[allow(clippy::identity_op)]
+pub const fn build_tcr_split(pa_range: u64) -> u64 {
+    (17 << 0) // T0SZ = 17: 47-bit VA (128 TiB) for TTBR0 — 3-level walk
+        | (0b01 << 8) // IRGN0: Inner Write-Back Write-Allocate
+        | (0b01 << 10) // ORGN0: Outer Write-Back Write-Allocate
+        | (0b11 << 12) // SH0: Inner Shareable
+        | (0b10 << 14) // TG0: 16 KiB granule
+        | (28 << 16) // T1SZ = 28: 36-bit VA (64 GiB) for TTBR1 — 2-level walk
+        // EPD1 (bit 23) = 0: enable TTBR1 walks
+        | (0b01 << 24) // IRGN1: Inner Write-Back Write-Allocate
+        | (0b01 << 26) // ORGN1: Outer Write-Back Write-Allocate
+        | (0b11 << 28) // SH1: Inner Shareable
+        | (0b01 << 30) // TG1: 16 KiB granule
+        | (pa_range << 32) // IPS: from hardware
+        | (1 << 56) // E0PD1: prevent EL0 speculative access to TTBR1
+}
+
+/// Detect ASID width from `ID_AA64MMFR0_EL1`.
+///
+/// ARM ARM: `ASIDBits` at bits\[7:4\]. `0b0000` = 8-bit, `0b0010` = 16-bit.
+pub const fn asid_width_from_mmfr0(mmfr0: u64) -> u8 {
+    if ((mmfr0 >> 4) & 0xF) >= 2 { 16 } else { 8 }
 }
 
 // ---------------------------------------------------------------------------
@@ -454,5 +548,147 @@ mod tests {
 
         assert_ne!(entry & TABLE, 0);
         assert_ne!(entry & VALID, 0);
+    }
+
+    // -- D88: TTBR split contract --
+
+    #[test]
+    fn d88_phys_to_virt_roundtrip() {
+        let pa = 0x4008_0000usize;
+        let va = phys_to_virt(pa);
+
+        assert_eq!(virt_to_phys(va), pa);
+    }
+
+    #[test]
+    fn d88_phys_to_virt_known_addresses() {
+        assert_eq!(phys_to_virt(0x0800_0000), 0xFFFF_FFF0_0800_0000);
+        assert_eq!(phys_to_virt(0x4000_0000), 0xFFFF_FFF0_4000_0000);
+        assert_eq!(phys_to_virt(0x4008_0000), 0xFFFF_FFF0_4008_0000);
+    }
+
+    #[test]
+    fn d88_kernel_and_user_ranges_disjoint() {
+        let user_max = USER_VA_END - 1;
+        let kernel_min = KERNEL_VIRT_OFFSET;
+
+        assert!(
+            user_max < kernel_min,
+            "user range [{:#x}] must not overlap kernel range [{:#x}]",
+            user_max,
+            kernel_min
+        );
+    }
+
+    #[test]
+    fn d88_make_ttbr0_asid_in_upper_bits() {
+        let ttbr = make_ttbr0(42, 0x4_0000);
+
+        assert_eq!(ttbr >> 48, 42);
+    }
+
+    #[test]
+    fn d88_make_ttbr0_pa_in_baddr_field() {
+        let pa: u64 = 0x4_0000;
+        let ttbr = make_ttbr0(0, pa);
+
+        assert_eq!(ttbr & TTBR_BADDR_MASK, pa);
+    }
+
+    #[test]
+    fn d88_make_ttbr0_cnp_is_zero() {
+        let ttbr = make_ttbr0(1, 0x4_0000);
+
+        assert_eq!(ttbr & 1, 0, "TTBR0 CnP must be 0 (per-Observer)");
+    }
+
+    #[test]
+    fn d88_make_ttbr0_masks_unaligned_bits() {
+        let ttbr = make_ttbr0(0, 0x4_1234);
+
+        assert_eq!(
+            ttbr & TTBR_BADDR_MASK,
+            0x4_0000,
+            "unaligned PA bits must be masked"
+        );
+    }
+
+    #[test]
+    fn d88_make_ttbr1_cnp_is_one() {
+        let ttbr = make_ttbr1(0x4_0000);
+
+        assert_eq!(ttbr & 1, 1, "TTBR1 CnP must be 1 (shared kernel tables)");
+    }
+
+    #[test]
+    fn d88_make_ttbr1_pa_preserved() {
+        let pa: u64 = 0x4_0000;
+        let ttbr = make_ttbr1(pa);
+
+        assert_eq!(ttbr & TTBR_BADDR_MASK, pa);
+    }
+
+    #[test]
+    fn d88_tcr_split_epd1_clear() {
+        let tcr = build_tcr_split(0);
+
+        assert_eq!(tcr & (1 << 23), 0, "EPD1 must be 0 to enable TTBR1 walks");
+    }
+
+    #[test]
+    fn d88_tcr_split_e0pd1_set() {
+        let tcr = build_tcr_split(0);
+
+        assert_ne!(
+            tcr & (1 << 56),
+            0,
+            "E0PD1 must be 1 for Meltdown mitigation"
+        );
+    }
+
+    #[test]
+    fn d88_tcr_split_granule_16k() {
+        let tcr = build_tcr_split(0);
+
+        assert_eq!((tcr >> 14) & 0b11, 0b10, "TG0 must encode 16 KiB");
+        assert_eq!((tcr >> 30) & 0b11, 0b01, "TG1 must encode 16 KiB");
+    }
+
+    #[test]
+    fn d88_tcr_split_asymmetric_va_sizes() {
+        let tcr = build_tcr_split(0);
+
+        assert_eq!(tcr & 0x3F, 17, "T0SZ must be 17 (47-bit user VA, 3-level)");
+        assert_eq!(
+            (tcr >> 16) & 0x3F,
+            28,
+            "T1SZ must be 28 (36-bit kernel VA, 2-level)"
+        );
+    }
+
+    #[test]
+    fn d88_tcr_split_pa_range_propagated() {
+        let tcr = build_tcr_split(0b0101);
+
+        assert_eq!((tcr >> 32) & 0x7, 0b101, "IPS must carry pa_range");
+    }
+
+    #[test]
+    fn d88_asid_width_8bit() {
+        let mmfr0 = 0u64;
+
+        assert_eq!(asid_width_from_mmfr0(mmfr0), 8);
+    }
+
+    #[test]
+    fn d88_asid_width_16bit() {
+        let mmfr0 = 0x2u64 << 4;
+
+        assert_eq!(asid_width_from_mmfr0(mmfr0), 16);
+    }
+
+    #[test]
+    fn d88_user_va_end_is_128_tib() {
+        assert_eq!(USER_VA_END, 128 * 1024 * 1024 * 1024 * 1024);
     }
 }
