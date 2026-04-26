@@ -11,6 +11,8 @@ pub mod cores;
 pub mod fields;
 pub mod firmware;
 pub mod lock;
+#[cfg(any(target_os = "none", test))]
+pub mod mapping;
 pub mod slab;
 
 // ── Global KernelState (D75, D82) ────────────────────────────────

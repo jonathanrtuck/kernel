@@ -238,7 +238,7 @@ pub const fn virt_to_phys(va: usize) -> usize {
 /// - Bit\[0\]: CnP = 0 (per-Observer, not shared across cores)
 #[inline(always)]
 pub const fn make_ttbr0(asid: u16, l1_root_pa: u64) -> u64 {
-    ((asid as u64) << 48) | (l1_root_pa & TTBR_BADDR_MASK)
+    asid_field(asid) | (l1_root_pa & TTBR_BADDR_MASK)
 }
 
 /// Construct a TTBR1 value for the kernel page table.
@@ -248,6 +248,18 @@ pub const fn make_ttbr0(asid: u16, l1_root_pa: u64) -> u64 {
 #[inline(always)]
 pub const fn make_ttbr1(l2_root_pa: u64) -> u64 {
     (l2_root_pa & TTBR_BADDR_MASK) | 1
+}
+
+/// Place an ASID into bits\[63:48\] for TTBR or TLBI operand encoding.
+#[inline(always)]
+pub const fn asid_field(asid: u16) -> u64 {
+    (asid as u64) << 48
+}
+
+/// Extract the base physical address from a TTBR value (strip ASID and CnP).
+#[inline(always)]
+pub const fn ttbr_base_address(ttbr: u64) -> u64 {
+    ttbr & TTBR_BADDR_MASK
 }
 
 /// Build the TCR\_EL1 value for the TTBR0/TTBR1 split (D88).
@@ -411,6 +423,49 @@ fn configure_and_enable() {
     // invalidated. The identity map ensures VA == PA, so the trampoline can
     // return after enabling.
     unsafe { __mmu_enable(sctlr) };
+}
+
+// ── D91: TLB invalidation sequences ──────────────────────────────
+
+/// Invalidate TLB entries for a Space's pages after unmap (D91).
+///
+/// Uses per-VA invalidation (`TLBI VAE1IS`) for each page, followed by
+/// `DSB ISH; ISB` to ensure completion. The IS suffix broadcasts across
+/// all cores in the inner-shareable domain (SMP correctness).
+///
+/// ARM ARM D5.10.2: TLBI by VA requires the VA shifted right by 12 and
+/// the ASID in bits[63:48]. For 16 KiB granule, pages are 16 KiB aligned
+/// so `VA >> 12` gives bits[47:12] >> 12 = bits[35:0].
+///
+/// D91: prefer per-VA over per-ASID (`TLBI ASIDE1IS`) when page count is
+/// small. For bulk removal, the caller may use `tlbi_aside1is` instead.
+#[cfg(target_os = "none")]
+pub fn tlb_invalidate_space_pages(asid: u16, va_base: usize, page_count: usize) {
+    let asid_bits = asid_field(asid);
+
+    sysreg::dsb_ishst();
+
+    for i in 0..page_count {
+        let va = va_base + i * PAGE_SIZE;
+        let va_shifted = (va >> 12) as u64;
+
+        sysreg::tlbi_vae1is(asid_bits | va_shifted);
+    }
+
+    sysreg::dsb_ish();
+    sysreg::isb();
+}
+
+/// Invalidate all TLB entries for a given ASID (D91 bulk unmap, D89 destroy).
+///
+/// Used when destroying an Observer's page table — invalidates all user
+/// mappings for that ASID in one operation.
+#[cfg(target_os = "none")]
+pub fn tlb_invalidate_asid(asid: u16) {
+    sysreg::dsb_ishst();
+    sysreg::tlbi_aside1is(asid_field(asid));
+    sysreg::dsb_ish();
+    sysreg::isb();
 }
 
 #[cfg(test)]

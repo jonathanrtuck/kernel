@@ -168,6 +168,36 @@ pub fn tlbi_vmalle1is() {
     }
 }
 
+/// TLB Invalidate by VA — EL1, inner-shareable (D91 per-page invalidation).
+///
+/// Invalidates TLB entries matching the given VA and ASID across all cores.
+/// `va_asid` encoding: bits[63:48] = ASID, bits[47:12] = VA[55:12] >> 12.
+/// For 16 KiB granule: VA must be 16 KiB aligned, shifted right by 12.
+///
+/// ARM ARM: TLBI VAE1IS invalidates by VA+ASID in the inner-shareable domain.
+#[inline(always)]
+pub fn tlbi_vae1is(va_asid: u64) {
+    // SAFETY: TLBI invalidates cached translations. Affects the memory system.
+    // No `nomem` — LLVM must not reorder memory accesses past this.
+    unsafe {
+        core::arch::asm!("tlbi vae1is, {0}", in(reg) va_asid, options(nostack));
+    }
+}
+
+/// TLB Invalidate by ASID — EL1, inner-shareable (D91 bulk invalidation).
+///
+/// Invalidates all TLB entries for the given ASID across all cores.
+/// `asid_val` encoding: bits[63:48] = ASID, other bits reserved (zero).
+///
+/// ARM ARM: TLBI ASIDE1IS invalidates by ASID only in inner-shareable domain.
+#[inline(always)]
+pub fn tlbi_aside1is(asid_val: u64) {
+    // SAFETY: TLBI invalidates cached translations. Affects the memory system.
+    unsafe {
+        core::arch::asm!("tlbi aside1is, {0}", in(reg) asid_val, options(nostack));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Immutable registers (read-only at EL1, nomem safe)
 // ---------------------------------------------------------------------------
