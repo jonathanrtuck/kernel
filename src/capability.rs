@@ -366,6 +366,91 @@ pub struct CascadeState {
     pub complete: bool,
 }
 
+// ── Cascade continuation (D98) ────────────────────────────────────
+
+/// Maximum nesting depth for cascade continuations (D98).
+///
+/// Each level represents an exclusively-held Observer chain. In practice
+/// depth is 1-2; 4 is a generous upper bound. 4 levels * 12 bytes = 48
+/// bytes — fits comfortably in CoreState without dynamic allocation.
+pub const MAX_CASCADE_DEPTH: usize = 4;
+
+/// Per-level cascade state: which object is being cleaned up and where
+/// the iteration cursor is (D98).
+#[derive(Clone, Copy)]
+pub struct CascadeLevel {
+    /// Arena identity of the object whose cap table is being iterated.
+    pub object_id: crate::arena::ObjectId,
+    /// Current slot cursor in the cap table.
+    pub slot_cursor: u32,
+}
+
+/// Preemptible cascade continuation state (D98).
+///
+/// Saved in CoreState between timer preemptions. The stack supports
+/// nested cascades: closing a cap may trigger a secondary destroy when
+/// the closed object's refcount reaches zero, pushing a new level.
+///
+/// D98: the destroyer is blocked while its cascade is in progress (D39).
+/// Other Observers on the same core CAN run between cascade batches.
+pub struct CascadeContinuation {
+    /// Stack of active cascade levels. Index 0 = outermost destroy.
+    pub levels: [Option<CascadeLevel>; MAX_CASCADE_DEPTH],
+    /// Number of active levels (0 = cascade complete).
+    pub depth: usize,
+}
+
+impl Default for CascadeContinuation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CascadeContinuation {
+    pub const fn new() -> CascadeContinuation {
+        CascadeContinuation {
+            levels: [None; MAX_CASCADE_DEPTH],
+            depth: 0,
+        }
+    }
+
+    pub fn push(&mut self, object_id: crate::arena::ObjectId) -> bool {
+        if self.depth >= MAX_CASCADE_DEPTH {
+            return false;
+        }
+
+        self.levels[self.depth] = Some(CascadeLevel {
+            object_id,
+            slot_cursor: 0,
+        });
+        self.depth += 1;
+
+        true
+    }
+
+    pub fn pop(&mut self) -> Option<CascadeLevel> {
+        if self.depth == 0 {
+            return None;
+        }
+
+        self.depth -= 1;
+
+        self.levels[self.depth].take()
+    }
+
+    pub fn current_mut(&mut self) -> Option<&mut CascadeLevel> {
+        if self.depth == 0 {
+            return None;
+        }
+
+        self.levels[self.depth - 1].as_mut()
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.depth == 0
+    }
+}
+
 // ── Entry methods ──────────────────────────────────────────────────
 
 impl Entry {

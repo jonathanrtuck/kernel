@@ -44,6 +44,13 @@ pub struct Pulsar {
     /// delivery Field is full and re-arm is deferred.
     pub overrun_count: u32,
 
+    /// D32/D98: VA base of the Space consumed at creation.
+    /// Used by Destroy to reconstruct the Space cap (reverse type conversion).
+    pub backing_va_base: usize,
+
+    /// D32/D98: size in bytes of the Space consumed at creation.
+    pub backing_size: usize,
+
     /// Outstanding capability references (D11).
     pub refcount: u32,
 
@@ -85,6 +92,8 @@ impl Pulsar {
             period_ns,
             next_deadline_ticks: now_ticks + duration_ticks,
             overrun_count: 0,
+            backing_va_base: 0,
+            backing_size: 0,
             refcount: 1,
             generation: AtomicU64::new(0),
         }

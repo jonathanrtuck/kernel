@@ -633,6 +633,14 @@ pub fn observer_write_cap_at(
     }
 }
 
+/// D98: check whether an Observer's cap table has at least one free slot.
+/// Used by Destroy's upfront table-full check before marking the target dead.
+#[cfg(any(target_os = "none", test))]
+pub fn observer_has_free_slot(observer_ptr: NonNull<Observer>) -> bool {
+    // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy.
+    unsafe { (*observer_ptr.as_ptr()).cap_table_free_head.is_some() }
+}
+
 // ── Observer restore helpers for EL0 exception exit ─────────────
 
 /// Extract the restore parameters for an Observer (D74, D76).
@@ -854,6 +862,8 @@ mod tests {
             throughput: DEFAULT_THROUGHPUT,
             clock_access: false,
             wait_state: WaitState::None,
+            backing_va_base: 0,
+            backing_size: 0,
             refcount: 1,
             generation: AtomicU64::new(0),
         };
@@ -898,6 +908,8 @@ mod tests {
             throughput: DEFAULT_THROUGHPUT,
             clock_access: false,
             wait_state: WaitState::None,
+            backing_va_base: 0,
+            backing_size: 0,
             refcount: 1,
             generation: AtomicU64::new(0),
         };
@@ -927,6 +939,8 @@ mod tests {
             throughput: DEFAULT_THROUGHPUT,
             clock_access: false,
             wait_state: WaitState::None,
+            backing_va_base: 0,
+            backing_size: 0,
             refcount: 1,
             generation: AtomicU64::new(0),
         }

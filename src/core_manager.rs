@@ -139,6 +139,13 @@ pub struct CoreState<S: Scheduler> {
     /// Invariant: `deadlines[0..deadline_count]` are all `Some`.
     /// Invariant: `deadlines[deadline_count..]` are all `None`.
     pub deadline_count: usize,
+
+    /// D98: preemptible cascade continuation state.
+    ///
+    /// Some when a destroy cascade is in progress and was preempted by
+    /// the timer. None when no cascade is active. The destroying Observer
+    /// is blocked while this is Some (D39).
+    pub cascade_continuation: Option<crate::capability::CascadeContinuation>,
 }
 
 // ── Dispatch outcomes ──────────────────────────────────────────────
@@ -1160,95 +1167,221 @@ impl<S: Scheduler> CoreState<S> {
 
             // ── Generic operations ──────────────────────────────────
             TypedOperation::Destroy => {
-                // D11/D33: bump generation for revocation, then free.
+                // D98: destroy cascade and return.
+                //
+                // Observer: table-full check → revoke → cascade → return Space.
+                // Field/Pulsar: revoke → return Space (reverse type conversion).
+                // Space: revoke → free → return pages to root pool.
+                // Time: revoke → free (no Space involved).
                 match object_type {
                     ObjectType::Observer => {
-                        let observers = kernel_state.observers.acquire();
-
-                        if let Some(observer) = observers.get(object_id) {
+                        let (live_gen, cap_capacity_target, backing_va, backing_sz) = {
+                            let observers = kernel_state.observers.acquire();
+                            let observer = match observers.get(object_id) {
+                                Some(o) => o,
+                                None => return typed_error(SyscallError::InvalidCap),
+                            };
                             let live_gen = observer.generation.load(Ordering::Acquire);
 
-                            if !entry.check_generation(live_gen) {
-                                return typed_error(SyscallError::StaleCap);
-                            }
+                            (
+                                live_gen,
+                                observer.cap_table_capacity,
+                                observer.backing_va_base,
+                                observer.backing_size,
+                            )
+                        };
 
-                            observer.revoke();
-                            drop(observers);
-
-                            // TODO: destroy cascade (D33) — close all caps in the
-                            // Observer's cap table. Currently just revokes generation.
-                            typed_ok(0)
-                        } else {
-                            typed_error(SyscallError::InvalidCap)
+                        if !entry.check_generation(live_gen) {
+                            return typed_error(SyscallError::StaleCap);
                         }
-                    }
-                    ObjectType::Space => {
-                        let spaces = kernel_state.spaces.acquire();
 
-                        if let Some(space) = spaces.get(object_id) {
-                            let live_gen = space.generation.load(Ordering::Acquire);
+                        // D98: table-full check BEFORE marking dead. Need a free
+                        // slot for the return Space cap (if backing exists).
+                        if backing_sz > 0 {
+                            let has_free = crate::frame::cores::observer_has_free_slot(sender_ptr);
 
-                            if !entry.check_generation(live_gen) {
-                                return typed_error(SyscallError::StaleCap);
+                            if !has_free {
+                                return typed_error(SyscallError::TableFull);
                             }
-
-                            space.generation.fetch_add(1, Ordering::Release);
-
-                            typed_ok(0)
-                        } else {
-                            typed_error(SyscallError::InvalidCap)
                         }
-                    }
-                    ObjectType::Time => {
-                        let times = kernel_state.times.acquire();
 
-                        if let Some(time) = times.get(object_id) {
-                            let live_gen = time.generation.load(Ordering::Acquire);
+                        {
+                            let observers = kernel_state.observers.acquire();
 
-                            if !entry.check_generation(live_gen) {
-                                return typed_error(SyscallError::StaleCap);
+                            if let Some(observer) = observers.get(object_id) {
+                                observer.revoke();
                             }
-
-                            time.revoke();
-
-                            typed_ok(0)
-                        } else {
-                            typed_error(SyscallError::InvalidCap)
                         }
+
+                        // D33/D98: cascade — close all caps in the target's table.
+                        let target_ptr =
+                            crate::frame::cores::observer_ptr_from_arena(kernel_state, object_id);
+
+                        if let Some(ptr) = target_ptr {
+                            for slot in 0..cap_capacity_target {
+                                crate::frame::cores::observer_close_cap(ptr, slot);
+                            }
+                        }
+
+                        {
+                            let mut observers = kernel_state.observers.acquire();
+
+                            observers.free(object_id);
+                        }
+
+                        typed_ok(return_backing_space(
+                            kernel_state,
+                            sender_ptr,
+                            backing_va,
+                            backing_sz,
+                        ))
                     }
                     ObjectType::Field => {
-                        let fields = kernel_state.fields.acquire();
-
-                        if let Some(field) = fields.get(object_id) {
+                        let (live_gen, backing_va, backing_sz) = {
+                            let fields = kernel_state.fields.acquire();
+                            let field = match fields.get(object_id) {
+                                Some(f) => f,
+                                None => return typed_error(SyscallError::InvalidCap),
+                            };
                             let live_gen = field.generation.load(Ordering::Acquire);
 
-                            if !entry.check_generation(live_gen) {
-                                return typed_error(SyscallError::StaleCap);
+                            (live_gen, field.backing_va_base, field.backing_size)
+                        };
+
+                        if !entry.check_generation(live_gen) {
+                            return typed_error(SyscallError::StaleCap);
+                        }
+
+                        if backing_sz > 0 {
+                            let has_free = crate::frame::cores::observer_has_free_slot(sender_ptr);
+
+                            if !has_free {
+                                return typed_error(SyscallError::TableFull);
+                            }
+                        }
+
+                        {
+                            let mut fields = kernel_state.fields.acquire();
+
+                            if let Some(field) = fields.get(object_id) {
+                                field.revoke();
                             }
 
-                            field.revoke();
-
-                            typed_ok(0)
-                        } else {
-                            typed_error(SyscallError::InvalidCap)
+                            fields.free(object_id);
                         }
+
+                        typed_ok(return_backing_space(
+                            kernel_state,
+                            sender_ptr,
+                            backing_va,
+                            backing_sz,
+                        ))
                     }
                     ObjectType::Pulsar => {
-                        let pulsars = kernel_state.pulsars.acquire();
-
-                        if let Some(pulsar) = pulsars.get(object_id) {
+                        let (live_gen, backing_va, backing_sz) = {
+                            let pulsars = kernel_state.pulsars.acquire();
+                            let pulsar = match pulsars.get(object_id) {
+                                Some(p) => p,
+                                None => return typed_error(SyscallError::InvalidCap),
+                            };
                             let live_gen = pulsar.generation.load(Ordering::Acquire);
 
-                            if !entry.check_generation(live_gen) {
-                                return typed_error(SyscallError::StaleCap);
+                            (live_gen, pulsar.backing_va_base, pulsar.backing_size)
+                        };
+
+                        if !entry.check_generation(live_gen) {
+                            return typed_error(SyscallError::StaleCap);
+                        }
+
+                        if backing_sz > 0 {
+                            let has_free = crate::frame::cores::observer_has_free_slot(sender_ptr);
+
+                            if !has_free {
+                                return typed_error(SyscallError::TableFull);
+                            }
+                        }
+
+                        // D99: remove Pulsar from per-core deadline array.
+                        for i in (0..self.deadline_count).rev() {
+                            if let Some(de) = &self.deadlines[i]
+                                && de.pulsar_id == object_id
+                            {
+                                self.deadline_count -= 1;
+
+                                if i < self.deadline_count {
+                                    self.deadlines[i] = self.deadlines[self.deadline_count].take();
+                                } else {
+                                    self.deadlines[i] = None;
+                                }
+
+                                break;
+                            }
+                        }
+
+                        {
+                            let mut pulsars = kernel_state.pulsars.acquire();
+
+                            if let Some(pulsar) = pulsars.get(object_id) {
+                                pulsar.revoke();
                             }
 
-                            pulsar.revoke();
-
-                            typed_ok(0)
-                        } else {
-                            typed_error(SyscallError::InvalidCap)
+                            pulsars.free(object_id);
                         }
+
+                        typed_ok(return_backing_space(
+                            kernel_state,
+                            sender_ptr,
+                            backing_va,
+                            backing_sz,
+                        ))
+                    }
+                    ObjectType::Space => {
+                        let (live_gen, size) = {
+                            let spaces = kernel_state.spaces.acquire();
+                            let space = match spaces.get(object_id) {
+                                Some(s) => s,
+                                None => return typed_error(SyscallError::InvalidCap),
+                            };
+                            let live_gen = space.generation.load(Ordering::Acquire);
+
+                            (live_gen, space.size)
+                        };
+
+                        if !entry.check_generation(live_gen) {
+                            return typed_error(SyscallError::StaleCap);
+                        }
+
+                        {
+                            let mut sm = kernel_state.space_manager.acquire();
+                            let page_count = size / sm.root_pool.page_size.max(1);
+
+                            if page_count > 0 {
+                                sm.return_pages(0, page_count);
+                            }
+                        }
+
+                        consume_space(kernel_state, object_id);
+
+                        typed_ok(0)
+                    }
+                    ObjectType::Time => {
+                        // D98: Time is asymmetric — no Space involved.
+                        // Revoke and free. Compute returns to per-core pool.
+                        let mut times = kernel_state.times.acquire();
+                        let time = match times.get(object_id) {
+                            Some(t) => t,
+                            None => return typed_error(SyscallError::InvalidCap),
+                        };
+                        let live_gen = time.generation.load(Ordering::Acquire);
+
+                        if !entry.check_generation(live_gen) {
+                            return typed_error(SyscallError::StaleCap);
+                        }
+
+                        time.revoke();
+                        times.free(object_id);
+
+                        typed_ok(0)
                     }
                 }
             }
@@ -1257,6 +1390,7 @@ impl<S: Scheduler> CoreState<S> {
                 if object_type == ObjectType::Time {
                     return typed_error(SyscallError::CloneForbidden);
                 }
+
                 // D97: duplicate entry in caller's own cap table.
                 // No generation check needed — Clone is a cap-table
                 // operation. The stored_generation is copied; validation
@@ -1457,9 +1591,9 @@ impl<S: Scheduler> CoreState<S> {
                     return typed_error(SyscallError::WrongType);
                 }
 
-                let space_size =
+                let (backing_va, space_size) =
                     match verify_space(kernel_state, object_id, entry_stored_generation) {
-                        Ok(size) => size,
+                        Ok(pair) => pair,
                         Err(e) => return typed_error(e),
                     };
                 let queue_capacity = space_size / core::mem::size_of::<crate::field::Message>();
@@ -1493,6 +1627,8 @@ impl<S: Scheduler> CoreState<S> {
                     new_field.pending_head = None;
                     new_field.badge_tracking = false;
                     new_field.back_pointer_head = None;
+                    new_field.backing_va_base = backing_va;
+                    new_field.backing_size = space_size;
                     new_field.refcount = 1;
                     new_field.generation = core::sync::atomic::AtomicU64::new(0);
 
@@ -1558,10 +1694,11 @@ impl<S: Scheduler> CoreState<S> {
                     return typed_error(SyscallError::WrongType);
                 }
 
-                if let Err(e) = verify_space(kernel_state, object_id, entry_stored_generation) {
-                    return typed_error(e);
-                }
-
+                let (backing_va, backing_size) =
+                    match verify_space(kernel_state, object_id, entry_stored_generation) {
+                        Ok(pair) => pair,
+                        Err(e) => return typed_error(e),
+                    };
                 let (delivery_field_id, _) = match resolve_field_argument(
                     regs.args[0],
                     cap_entries,
@@ -1598,6 +1735,8 @@ impl<S: Scheduler> CoreState<S> {
                         counter_freq,
                         now_ticks,
                     );
+                    pulsar.backing_va_base = backing_va;
+                    pulsar.backing_size = backing_size;
                     (id, pulsar.next_deadline_ticks)
                 };
                 let idx = self.deadline_count;
@@ -1639,9 +1778,9 @@ impl<S: Scheduler> CoreState<S> {
                     return typed_error(SyscallError::WrongType);
                 }
 
-                let space_size =
+                let (backing_va, space_size) =
                     match verify_space(kernel_state, object_id, entry_stored_generation) {
-                        Ok(size) => size,
+                        Ok(pair) => pair,
                         Err(e) => return typed_error(e),
                     };
                 let (handler_field_id, handler_stored_gen) = match resolve_field_argument(
@@ -1705,6 +1844,8 @@ impl<S: Scheduler> CoreState<S> {
                     obs.throughput = crate::observer::DEFAULT_THROUGHPUT;
                     obs.clock_access = false;
                     obs.wait_state = crate::observer::WaitState::None;
+                    obs.backing_va_base = backing_va;
+                    obs.backing_size = space_size;
                     obs.refcount = 1;
                     obs.generation = core::sync::atomic::AtomicU64::new(0);
 
@@ -1970,15 +2111,16 @@ impl<S: Scheduler> CoreState<S> {
 
 // ── Creation-path helpers (D95, D32) ────────────────────────────────
 
-/// Verify a Space's generation and return its size.
+/// Verify a Space's generation and return its backing address and size.
 ///
 /// Shared by CreateField, CreatePulsar, and CreateObserver — all three
 /// creation operations require a valid, non-stale Space as their target.
+#[cfg(any(target_os = "none", test))]
 fn verify_space(
     kernel_state: &KernelState,
     space_id: ObjectId,
     stored_gen: u64,
-) -> Result<usize, crate::syscall::SyscallError> {
+) -> Result<(usize, usize), crate::syscall::SyscallError> {
     let spaces = kernel_state.spaces.acquire();
     let space = spaces
         .get(space_id)
@@ -1989,13 +2131,14 @@ fn verify_space(
         return Err(crate::syscall::SyscallError::StaleCap);
     }
 
-    Ok(space.size)
+    Ok((space.va_base, space.size))
 }
 
 /// Consume a Space: bump generation (revoke all caps) and free the slot.
 ///
 /// D32 type conversion: the Space's backing memory is repurposed for the
 /// new object type. Generation bump invalidates all outstanding caps.
+#[cfg(any(target_os = "none", test))]
 fn consume_space(kernel_state: &KernelState, space_id: ObjectId) {
     let mut spaces = kernel_state.spaces.acquire();
 
@@ -2004,6 +2147,47 @@ fn consume_space(kernel_state: &KernelState, space_id: ObjectId) {
     }
 
     spaces.free(space_id);
+}
+
+/// D98 reverse type conversion: allocate a Space from the freed backing
+/// memory and install it in the sender's cap table. Returns the encoded
+/// handle, or 0 if backing_size is zero or allocation/install fails.
+#[cfg(any(target_os = "none", test))]
+fn return_backing_space(
+    kernel_state: &KernelState,
+    sender_ptr: NonNull<Observer>,
+    backing_va: usize,
+    backing_size: usize,
+) -> u64 {
+    if backing_size == 0 {
+        return 0;
+    }
+
+    let return_space_id = {
+        let mut spaces = kernel_state.spaces.acquire();
+
+        match spaces.allocate() {
+            Ok((id, space)) => {
+                space.va_base = backing_va;
+                space.size = backing_size;
+                space.l3_table_pa = 0;
+                space.refcount = 1;
+                space.generation = core::sync::atomic::AtomicU64::new(0);
+                id
+            }
+            Err(_) => return 0,
+        }
+    };
+
+    let tcap = crate::capability::TransferredCap {
+        object_type: crate::capability::ObjectType::Space,
+        object_id: return_space_id,
+        rights: crate::capability::Rights::SPACE_ALL,
+        badge: crate::capability::Badge(0),
+        send_once: false,
+        stored_generation: 0,
+    };
+    crate::frame::cores::observer_install_transferred_cap(sender_ptr, &tcap).unwrap_or_default()
 }
 
 /// Resolve a secondary Field cap argument, verify type/rights/generation.
@@ -2065,6 +2249,7 @@ mod tests {
             scheduler: RoundRobin::new(),
             deadlines: [None; MAX_DEADLINES_PER_CORE],
             deadline_count: 0,
+            cascade_continuation: None,
         }
     }
 
@@ -3239,6 +3424,8 @@ mod tests {
             throughput: crate::observer::DEFAULT_THROUGHPUT,
             clock_access: false,
             wait_state: crate::observer::WaitState::None,
+            backing_va_base: 0,
+            backing_size: 0,
             refcount: 1,
             generation: core::sync::atomic::AtomicU64::new(0),
         }
@@ -4059,6 +4246,8 @@ mod tests {
             throughput: crate::observer::DEFAULT_THROUGHPUT,
             clock_access: false,
             wait_state: crate::observer::WaitState::None,
+            backing_va_base: 0,
+            backing_size: 0,
             refcount: 1,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -4705,14 +4894,357 @@ mod tests {
 
         let x0 = read_typed_result(sender_ptr);
 
-        assert_eq!(x0, 0, "Destroy must succeed");
+        assert_eq!(
+            x0, 0,
+            "D98: Space Destroy must succeed with 0 (no return cap)"
+        );
 
-        // Verify generation was bumped.
+        // D98: arena slot must be freed after Destroy.
         let spaces = ks.spaces.acquire();
-        let space = spaces.get(space_id).expect("space must exist");
-        let live_gen = space.generation.load(Ordering::Acquire);
 
-        assert_eq!(live_gen, 1, "Destroy must bump generation from 0 to 1");
+        assert!(
+            spaces.get(space_id).is_none(),
+            "D98: Space arena slot must be freed after Destroy"
+        );
+    }
+
+    /// D98: Observer Destroy runs cascade — closes all caps in target table.
+    #[test]
+    fn test_d98_observer_destroy_cascades_cap_table() {
+        let ks = make_kernel_state();
+        // Create a target Observer with caps in its table.
+        let target_id = {
+            let mut observers = ks.observers.acquire();
+            let (id, obs) = observers.allocate().expect("allocate target");
+            let rs = crate::frame::cores::alloc_test_register_state();
+            let entries = crate::frame::capabilities::alloc_test_entries(8);
+
+            crate::frame::capabilities::init_freelist(
+                entries,
+                8,
+                crate::capability::SLOT_USER_START,
+            );
+
+            obs.register_state = crate::observer::RegisterStateHandle::new(rs);
+            obs.page_table_root = 0;
+            obs.cap_table = entries;
+            obs.cap_table_capacity = 8;
+            obs.cap_table_free_head = Some(crate::capability::SLOT_USER_START);
+            obs.cap_table_count = 0;
+            obs.state = crate::observer::PrimaryState::Inert;
+            obs.suspended = false;
+            obs.compute_aggregate = 0;
+            obs.responsiveness = crate::observer::DEFAULT_RESPONSIVENESS;
+            obs.throughput = crate::observer::DEFAULT_THROUGHPUT;
+            obs.clock_access = false;
+            obs.wait_state = crate::observer::WaitState::None;
+            obs.backing_va_base = 0x2000;
+            obs.backing_size = 0x4000;
+            obs.refcount = 1;
+            obs.generation = core::sync::atomic::AtomicU64::new(0);
+
+            // Install a Space cap at slot 3 (user slot).
+            let space_id = {
+                let mut spaces = ks.spaces.acquire();
+                let (sid, space) = spaces.allocate().expect("allocate space");
+                space.va_base = 0x8000;
+                space.size = 0x1000;
+                space.l3_table_pa = 0;
+                space.refcount = 1;
+                space.generation = core::sync::atomic::AtomicU64::new(0);
+                sid
+            };
+
+            crate::frame::capabilities::write_entry(
+                entries,
+                8,
+                crate::capability::SLOT_USER_START,
+                crate::capability::Entry {
+                    object: Some((crate::capability::ObjectType::Space, space_id)),
+                    rights: crate::capability::Rights::SPACE_ALL,
+                    badge: crate::capability::Badge(0),
+                    slot_tag: crate::capability::SlotTag(0),
+                    send_once: false,
+                    stored_generation: 0,
+                },
+            );
+
+            obs.cap_table_count = 1;
+            obs.cap_table_free_head = Some(crate::capability::SLOT_USER_START + 1);
+
+            id
+        };
+        // Sender holds a Destroy cap to the target Observer.
+        let (mut sender, _entries) = make_sender_with_cap(
+            crate::capability::ObjectType::Observer,
+            target_id,
+            crate::capability::Rights::DESTROY,
+            Badge(0),
+            0,
+        );
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        setup_typed_regs(sender_ptr, TypedOperation::Destroy as u16, handle, [0; 4]);
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::Destroy, &ks);
+
+        let x0 = read_typed_result(sender_ptr);
+
+        // D98: backing_size > 0, so return value is an encoded Space cap handle.
+        assert_ne!(
+            x0 as i64,
+            crate::syscall::SyscallError::InvalidCap.error_code() as i64,
+            "D98: Observer Destroy must not return InvalidCap"
+        );
+
+        // D98: target Observer arena slot must be freed.
+        let observers = ks.observers.acquire();
+
+        assert!(
+            observers.get(target_id).is_none(),
+            "D98: Observer arena slot must be freed after cascade"
+        );
+    }
+
+    /// D98: Time Destroy frees arena slot — no Space return.
+    #[test]
+    fn test_d98_time_destroy_frees_arena() {
+        let ks = make_kernel_state();
+        let time_id = {
+            let mut times = ks.times.acquire();
+            let (id, time) = times.allocate().expect("allocate time");
+
+            time.compute_units = 100;
+            time.refcount = 1;
+            time.generation = core::sync::atomic::AtomicU64::new(0);
+
+            id
+        };
+        let (mut sender, _entries) = make_sender_with_cap(
+            crate::capability::ObjectType::Time,
+            time_id,
+            crate::capability::Rights::TIME_ALL,
+            Badge(0),
+            0,
+        );
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        setup_typed_regs(sender_ptr, TypedOperation::Destroy as u16, handle, [0; 4]);
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::Destroy, &ks);
+
+        let x0 = read_typed_result(sender_ptr);
+
+        assert_eq!(x0, 0, "D98: Time Destroy returns 0 (no Space return)");
+
+        // Arena slot must be freed.
+        let times = ks.times.acquire();
+
+        assert!(
+            times.get(time_id).is_none(),
+            "D98: Time arena slot must be freed after Destroy"
+        );
+    }
+
+    /// D98: Pulsar Destroy removes deadline entry from per-core array.
+    #[test]
+    fn test_d98_pulsar_destroy_removes_deadline() {
+        let ks = make_kernel_state();
+        // Create delivery field (required for Pulsar).
+        let field_id = {
+            let mut fields = ks.fields.acquire();
+            let (id, field) = fields.allocate().expect("allocate field");
+            let queue_ptr = crate::frame::fields::allocate_field_queue(4).unwrap();
+
+            field.queue = queue_ptr;
+            field.queue_capacity = 4;
+            field.queue_length = 0;
+            field.queue_head = 0;
+            field.waiters_head = None;
+            field.waiters_tail = None;
+            field.routing_table = None;
+            field.pending_head = None;
+            field.badge_tracking = false;
+            field.back_pointer_head = None;
+            field.backing_va_base = 0;
+            field.backing_size = 0;
+            field.refcount = 1;
+            field.generation = core::sync::atomic::AtomicU64::new(0);
+
+            id
+        };
+        let pulsar_id = {
+            let mut pulsars = ks.pulsars.acquire();
+            let (id, pulsar) = pulsars.allocate().expect("allocate pulsar");
+
+            *pulsar = crate::pulsar::Pulsar::new(
+                field_id,
+                crate::capability::Badge(42),
+                1_000_000,
+                0,
+                24_000_000,
+                0,
+            );
+            pulsar.backing_va_base = 0;
+            pulsar.backing_size = 0;
+
+            id
+        };
+        let (mut sender, _entries) = make_sender_with_cap(
+            crate::capability::ObjectType::Pulsar,
+            pulsar_id,
+            crate::capability::Rights::PULSAR_ALL,
+            Badge(0),
+            0,
+        );
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        setup_typed_regs(sender_ptr, TypedOperation::Destroy as u16, handle, [0; 4]);
+
+        let mut core = make_core_state();
+
+        // Install deadline entry for the Pulsar.
+        core.deadlines[0] = Some(DeadlineEntry {
+            deadline_ticks: 1000,
+            pulsar_id,
+            field_id,
+        });
+        core.deadline_count = 1;
+        core.current = Some(sender_ptr);
+
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::Destroy, &ks);
+
+        let x0 = read_typed_result(sender_ptr);
+
+        assert_eq!(x0, 0, "D98: Pulsar Destroy with no backing returns 0");
+        // D98/D99: deadline entry must be removed.
+        assert_eq!(
+            core.deadline_count, 0,
+            "D98: Pulsar Destroy must remove deadline entry"
+        );
+        assert!(
+            core.deadlines[0].is_none(),
+            "D98: deadline slot must be None after removal"
+        );
+
+        // Arena slot must be freed.
+        let pulsars = ks.pulsars.acquire();
+
+        assert!(
+            pulsars.get(pulsar_id).is_none(),
+            "D98: Pulsar arena slot must be freed after Destroy"
+        );
+    }
+
+    /// D98: Field Destroy with backing returns Space cap.
+    #[test]
+    fn test_d98_field_destroy_returns_space() {
+        let ks = make_kernel_state();
+        let field_id = {
+            let mut fields = ks.fields.acquire();
+            let (id, field) = fields.allocate().expect("allocate field");
+            let queue_ptr = crate::frame::fields::allocate_field_queue(4).unwrap();
+
+            field.queue = queue_ptr;
+            field.queue_capacity = 4;
+            field.queue_length = 0;
+            field.queue_head = 0;
+            field.waiters_head = None;
+            field.waiters_tail = None;
+            field.routing_table = None;
+            field.pending_head = None;
+            field.badge_tracking = false;
+            field.back_pointer_head = None;
+            field.backing_va_base = 0x5000;
+            field.backing_size = 0x4000;
+            field.refcount = 1;
+            field.generation = core::sync::atomic::AtomicU64::new(0);
+
+            id
+        };
+        let (mut sender, _entries) = make_sender_with_cap(
+            crate::capability::ObjectType::Field,
+            field_id,
+            crate::capability::Rights::FIELD_ALL,
+            Badge(0),
+            0,
+        );
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        setup_typed_regs(sender_ptr, TypedOperation::Destroy as u16, handle, [0; 4]);
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::Destroy, &ks);
+
+        let x0 = read_typed_result(sender_ptr);
+        // D98: return value is an encoded handle to the new Space cap.
+        let returned_handle = crate::capability::Handle::decode(x0);
+
+        assert!(
+            returned_handle.index >= crate::capability::SLOT_USER_START,
+            "D98: returned Space cap must be in a user slot"
+        );
+
+        // Verify the Space was created in the arena with the backing info.
+        let spaces = ks.spaces.acquire();
+        // The new Space should exist — iterate to find one with matching va_base.
+        let mut found = false;
+
+        for i in 0..32 {
+            if let Some(space) = spaces.get(ObjectId(i)) {
+                if space.va_base == 0x5000 && space.size == 0x4000 {
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        assert!(
+            found,
+            "D98: returned Space must have the backing VA and size"
+        );
+
+        // Field arena slot must be freed.
+        drop(spaces);
+
+        let fields = ks.fields.acquire();
+
+        assert!(
+            fields.get(field_id).is_none(),
+            "D98: Field arena slot must be freed after Destroy"
+        );
     }
 
     /// dispatch_typed Clone on Time returns CloneForbidden (D38 linear).
@@ -5680,7 +6212,6 @@ mod tests {
         let handler_field_id = make_field_in_arena(&ks, 16);
         let (mut sender, entries) =
             make_sender_with_cap(ObjectType::Space, space_id, Rights::SPACE_ALL, Badge(0), 0);
-
         let field_entry = crate::frame::capabilities::entry_mut(entries, 16, 1).unwrap();
 
         *field_entry = crate::capability::Entry {
@@ -5781,12 +6312,15 @@ mod tests {
         // Slot 2: self-reference.
         let obs_cap_table;
         let obs_cap_capacity;
+
         {
             let observers = ks.observers.acquire();
             let obs = observers.get(observer_id).unwrap();
+
             obs_cap_table = obs.cap_table;
             obs_cap_capacity = obs.cap_table_capacity;
         }
+
         let slot2 = crate::frame::capabilities::entry_ref(
             obs_cap_table,
             obs_cap_capacity,
@@ -5943,6 +6477,8 @@ mod tests {
             throughput: crate::observer::DEFAULT_THROUGHPUT,
             clock_access: false,
             wait_state: crate::observer::WaitState::None,
+            backing_va_base: 0,
+            backing_size: 0,
             refcount: 1,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -6004,6 +6540,8 @@ mod tests {
             throughput: crate::observer::DEFAULT_THROUGHPUT,
             clock_access: false,
             wait_state: crate::observer::WaitState::None,
+            backing_va_base: 0,
+            backing_size: 0,
             refcount: 1,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -6047,6 +6585,8 @@ mod tests {
             throughput: crate::observer::DEFAULT_THROUGHPUT,
             clock_access: false,
             wait_state: crate::observer::WaitState::None,
+            backing_va_base: 0,
+            backing_size: 0,
             refcount: 1,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -6063,7 +6603,6 @@ mod tests {
         let handle_raw =
             crate::frame::cores::observer_install_transferred_cap(receiver_ptr, &reply_transferred)
                 .expect("install must succeed");
-
         let handle = crate::capability::Handle::decode(handle_raw);
         let entry = crate::frame::capabilities::entry_ref(entries, 16, handle.index).unwrap();
 
@@ -6094,6 +6633,8 @@ mod tests {
             throughput: crate::observer::DEFAULT_THROUGHPUT,
             clock_access: false,
             wait_state: crate::observer::WaitState::None,
+            backing_va_base: 0,
+            backing_size: 0,
             refcount: 1,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -6128,7 +6669,6 @@ mod tests {
         assert_eq!(regs.data, [0xAA, 0xBB, 0xCC, 0xDD], "D96: data preserved");
         assert_eq!(regs.label, 0xFACE, "D96: label preserved");
         assert_eq!(regs.handle_or_badge, 0xBEEF, "D96: badge preserved");
-
         // x6 and x7 must NOT be CAP_ABSENT — caps were installed.
         assert_ne!(
             regs.user_cap,
@@ -6192,6 +6732,8 @@ mod tests {
             throughput: crate::observer::DEFAULT_THROUGHPUT,
             clock_access: false,
             wait_state: crate::observer::WaitState::None,
+            backing_va_base: 0,
+            backing_size: 0,
             refcount: 1,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -6256,6 +6798,8 @@ mod tests {
             throughput: crate::observer::DEFAULT_THROUGHPUT,
             clock_access: false,
             wait_state: crate::observer::WaitState::None,
+            backing_va_base: 0,
+            backing_size: 0,
             refcount: 1,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -6312,6 +6856,8 @@ mod tests {
             throughput: crate::observer::DEFAULT_THROUGHPUT,
             clock_access: false,
             wait_state: crate::observer::WaitState::None,
+            backing_va_base: 0,
+            backing_size: 0,
             refcount: 1,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -6331,6 +6877,8 @@ mod tests {
             throughput: crate::observer::DEFAULT_THROUGHPUT,
             clock_access: false,
             wait_state: crate::observer::WaitState::None,
+            backing_va_base: 0,
+            backing_size: 0,
             refcount: 1,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -6420,6 +6968,8 @@ mod tests {
             throughput: crate::observer::DEFAULT_THROUGHPUT,
             clock_access: false,
             wait_state: crate::observer::WaitState::None,
+            backing_va_base: 0,
+            backing_size: 0,
             refcount: 1,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -6439,6 +6989,8 @@ mod tests {
             throughput: crate::observer::DEFAULT_THROUGHPUT,
             clock_access: false,
             wait_state: crate::observer::WaitState::None,
+            backing_va_base: 0,
+            backing_size: 0,
             refcount: 1,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -6519,6 +7071,8 @@ mod tests {
             throughput: crate::observer::DEFAULT_THROUGHPUT,
             clock_access: false,
             wait_state: crate::observer::WaitState::None,
+            backing_va_base: 0,
+            backing_size: 0,
             refcount: 1,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -6704,6 +7258,8 @@ mod tests {
             throughput: crate::observer::DEFAULT_THROUGHPUT,
             clock_access: false,
             wait_state: crate::observer::WaitState::None,
+            backing_va_base: 0,
+            backing_size: 0,
             refcount: 1,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -6880,6 +7436,8 @@ mod tests {
             throughput: crate::observer::DEFAULT_THROUGHPUT,
             clock_access: false,
             wait_state: crate::observer::WaitState::None,
+            backing_va_base: 0,
+            backing_size: 0,
             refcount: 1,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -7137,6 +7695,8 @@ mod tests {
             throughput: crate::observer::DEFAULT_THROUGHPUT,
             clock_access: false,
             wait_state: crate::observer::WaitState::None,
+            backing_va_base: 0,
+            backing_size: 0,
             refcount: 1,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -7284,6 +7844,8 @@ mod tests {
             throughput: crate::observer::DEFAULT_THROUGHPUT,
             clock_access: false,
             wait_state: crate::observer::WaitState::None,
+            backing_va_base: 0,
+            backing_size: 0,
             refcount: 1,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -7416,6 +7978,8 @@ mod tests {
             throughput: crate::observer::DEFAULT_THROUGHPUT,
             clock_access: false,
             wait_state: crate::observer::WaitState::None,
+            backing_va_base: 0,
+            backing_size: 0,
             refcount: 1,
             generation: core::sync::atomic::AtomicU64::new(0),
         };

@@ -224,6 +224,7 @@ static mut BSP_CORE_STATE: CoreState<RoundRobin> = CoreState {
     scheduler: RoundRobin::new(),
     deadlines: [None; MAX_DEADLINES_PER_CORE],
     deadline_count: 0,
+    cascade_continuation: None,
 };
 
 // Linker symbol for the BSP boot stack top (link.ld).
@@ -253,6 +254,7 @@ fn init_bsp_per_core_data(rs_ptr: *mut RegisterState) {
                 scheduler: RoundRobin::new(),
                 deadlines: [None; MAX_DEADLINES_PER_CORE],
                 deadline_count: 0,
+                cascade_continuation: None,
             },
         );
 

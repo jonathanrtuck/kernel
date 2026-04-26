@@ -160,6 +160,13 @@ pub struct Field {
     /// None when no sources route here.
     pub back_pointer_head: Option<NonNull<RoutingEntry>>,
 
+    /// D32/D98: VA base of the Space consumed at creation.
+    /// Used by Destroy to reconstruct the Space cap (reverse type conversion).
+    pub backing_va_base: usize,
+
+    /// D32/D98: size in bytes of the Space consumed at creation.
+    pub backing_size: usize,
+
     /// Outstanding capability references (D11).
     pub refcount: u32,
 
@@ -393,7 +400,7 @@ mod tests {
 
     #[test]
     fn field_layout() {
-        assert_eq!(core::mem::size_of::<Field>(), 80);
+        assert_eq!(core::mem::size_of::<Field>(), 96);
     }
 
     #[test]
@@ -480,6 +487,8 @@ mod tests {
             back_pointer_head: None,
             refcount: 1,
             generation: AtomicU64::new(0),
+            backing_va_base: 0,
+            backing_size: 0,
         }
     }
 

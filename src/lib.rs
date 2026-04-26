@@ -97,6 +97,8 @@ mod integration_tests {
             back_pointer_head: None,
             refcount: 1,
             generation: AtomicU64::new(0),
+            backing_va_base: 0,
+            backing_size: 0,
         }
     }
 
@@ -1367,6 +1369,7 @@ mod integration_tests {
             scheduler: RoundRobin::new(),
             deadlines: [None; MAX_DEADLINES_PER_CORE],
             deadline_count: 0,
+            cascade_continuation: None,
         };
         let mut obs_a = make_observer_for_scheduler();
         let mut obs_b = make_observer_for_scheduler();
@@ -1471,6 +1474,7 @@ mod integration_tests {
             scheduler: RoundRobin::new(),
             deadlines: [None; MAX_DEADLINES_PER_CORE],
             deadline_count: 0,
+            cascade_continuation: None,
         };
 
         // No observers enqueued — empty queue.

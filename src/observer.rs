@@ -198,6 +198,13 @@ pub struct Observer {
     /// Wait-state linkage for blocked/pending states (D18/D19).
     pub wait_state: WaitState,
 
+    /// D32/D98: VA base of the Space consumed at creation.
+    /// Used by Destroy to reconstruct the Space cap (reverse type conversion).
+    pub backing_va_base: usize,
+
+    /// D32/D98: size in bytes of the Space consumed at creation.
+    pub backing_size: usize,
+
     /// Outstanding capability references to this Observer (D11/D33).
     /// Decremented on cap close; object eligible for destruction at zero.
     pub refcount: u32,
@@ -431,6 +438,8 @@ impl Observer {
             wait_state: WaitState::None,
             refcount: 1,
             generation: AtomicU64::new(0),
+            backing_va_base: 0,
+            backing_size: 0,
         }
     }
 }
@@ -441,7 +450,7 @@ mod tests {
 
     #[test]
     fn observer_layout() {
-        assert_eq!(core::mem::size_of::<Observer>(), 104);
+        assert_eq!(core::mem::size_of::<Observer>(), 120);
     }
 
     #[test]
@@ -473,6 +482,8 @@ mod tests {
             wait_state: WaitState::None,
             refcount: 1,
             generation: AtomicU64::new(0),
+            backing_va_base: 0,
+            backing_size: 0,
         };
 
         assert_eq!(observer.precision(), 42);
@@ -496,6 +507,8 @@ mod tests {
             wait_state: WaitState::None,
             refcount: 1,
             generation: AtomicU64::new(0),
+            backing_va_base: 0,
+            backing_size: 0,
         };
 
         assert!(observer.resume().is_ok());
@@ -520,6 +533,8 @@ mod tests {
             wait_state: WaitState::None,
             refcount: 1,
             generation: AtomicU64::new(0),
+            backing_va_base: 0,
+            backing_size: 0,
         };
 
         assert!(observer.resume().is_err());
@@ -543,6 +558,8 @@ mod tests {
             wait_state: WaitState::None,
             refcount: 1,
             generation: AtomicU64::new(0),
+            backing_va_base: 0,
+            backing_size: 0,
         };
 
         observer.add_compute(100);
@@ -573,6 +590,8 @@ mod tests {
             wait_state: WaitState::None,
             refcount: 1,
             generation: AtomicU64::new(0),
+            backing_va_base: 0,
+            backing_size: 0,
         };
         let should_enqueue = observer.unblock().unwrap();
 
@@ -599,6 +618,8 @@ mod tests {
             wait_state: WaitState::None,
             refcount: 1,
             generation: AtomicU64::new(0),
+            backing_va_base: 0,
+            backing_size: 0,
         };
         let should_enqueue = observer.unblock().unwrap();
 

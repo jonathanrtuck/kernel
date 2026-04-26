@@ -342,6 +342,8 @@ mod tests {
             back_pointer_head: None,
             refcount: 1,
             generation: AtomicU64::new(0),
+            backing_va_base: 0,
+            backing_size: 0,
         }
     }
 
