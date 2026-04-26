@@ -247,6 +247,7 @@ pub struct Entry {
 /// When a message carries a cap, the cap is removed from the sender's
 /// table and stored in the Field queue until the receiver picks it up.
 /// Contains the information needed to install in the receiver's table.
+#[derive(Clone, Copy)]
 pub struct TransferredCap {
     pub object_type: ObjectType,
     pub object_id: ObjectId,
@@ -269,7 +270,7 @@ pub struct TransferredCap {
 /// - 1: reply Field (D43)
 /// - 2: self-cap (D57)
 /// - 3+: user slots
-const FREELIST_END: u64 = u64::MAX;
+pub(crate) const FREELIST_END: u64 = u64::MAX;
 
 pub struct Table {
     /// Always valid — the table is allocated at Observer creation.
@@ -693,6 +694,69 @@ impl Table {
         self.install_at(index, entry);
 
         Ok(index)
+    }
+
+    /// D96: extract a capability from the table (move semantics for IPC
+    /// cap transfer). Reads the entry, captures it as a TransferredCap,
+    /// then frees the slot (D11 slot tag bump). Returns None if the index
+    /// is out of bounds or the slot is empty.
+    pub fn extract_cap(&mut self, index: u32) -> Option<TransferredCap> {
+        let entry = crate::frame::capabilities::entry_ref(self.entries, self.capacity, index)?;
+        let (object_type, object_id) = entry.object?;
+        let transferred = TransferredCap {
+            object_type,
+            object_id,
+            rights: entry.rights,
+            badge: entry.badge,
+            send_once: entry.send_once,
+            stored_generation: entry.stored_generation,
+        };
+
+        self.free_slot(index);
+
+        Some(transferred)
+    }
+
+    /// D96: install a transferred capability at the next free slot and
+    /// return the encoded handle (D77: index | slot_tag << 32).
+    ///
+    /// Preserves the slot's existing slot_tag (set by the last free_slot
+    /// that released it) so the returned handle is valid for resolution.
+    /// Returns TableFull if no free slots exist.
+    pub fn install_transferred_cap(
+        &mut self,
+        transferred: &TransferredCap,
+    ) -> Result<u64, CapError> {
+        let index = self.allocate_slot()?;
+        let slot_tag = crate::frame::capabilities::entry_ref(self.entries, self.capacity, index)
+            .map(|e| e.slot_tag)
+            .unwrap_or(SlotTag(0));
+
+        self.install_at(
+            index,
+            Entry {
+                object: Some((transferred.object_type, transferred.object_id)),
+                rights: transferred.rights,
+                badge: transferred.badge,
+                slot_tag,
+                send_once: transferred.send_once,
+                stored_generation: transferred.stored_generation,
+            },
+        );
+
+        Ok(Handle { index, slot_tag }.encode())
+    }
+
+    /// Read a cap table entry's core fields without modifying the table.
+    ///
+    /// Used for reading the reply Field entry at SLOT_REPLY_FIELD (slot 1)
+    /// during Call to mint the reply cap (D96, D43). Returns None if the
+    /// slot is empty or out of bounds.
+    pub fn read_entry(&self, index: u32) -> Option<(ObjectType, crate::arena::ObjectId, u64)> {
+        let entry = crate::frame::capabilities::entry_ref(self.entries, self.capacity, index)?;
+        let (object_type, object_id) = entry.object?;
+
+        Some((object_type, object_id, entry.stored_generation))
     }
 
     /// Close a capability slot, returning the outcome.

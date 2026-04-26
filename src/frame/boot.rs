@@ -184,6 +184,8 @@ fn create_root_observer(
     obs.page_table_root = page_table_root;
     obs.cap_table = NonNull::dangling();
     obs.cap_table_capacity = 0;
+    obs.cap_table_free_head = None;
+    obs.cap_table_count = 0;
     obs.state = PrimaryState::Runnable;
     obs.suspended = false;
     obs.compute_aggregate = 100;

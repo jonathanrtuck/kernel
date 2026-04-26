@@ -158,6 +158,17 @@ pub struct Observer {
     /// table growth (D8 table-full fault handler provides more Space).
     pub cap_table_capacity: u32,
 
+    /// Head of the intrusive freelist through empty cap table entries (D8, D96).
+    ///
+    /// Empty entries store the next-free index in `stored_generation`.
+    /// None when all user slots are occupied — triggers table-full fault (D40).
+    /// Updated on cap extraction (move out → freed slot enters list) and
+    /// cap installation (incoming cap → slot removed from list).
+    pub cap_table_free_head: Option<u32>,
+
+    /// Number of occupied entries in the cap table (D8).
+    pub cap_table_count: u32,
+
     /// Primary lifecycle state (D39).
     pub state: PrimaryState,
 
@@ -372,6 +383,27 @@ impl Observer {
         self.compute_aggregate = self.compute_aggregate.saturating_sub(units);
     }
 
+    /// Construct a temporary Table from this Observer's raw cap-table
+    /// fields, run `f`, and write back the mutable fields (free_head,
+    /// count). Hot-path cap resolution bypasses this — it reads entries
+    /// and capacity directly (D77). Cold-path operations (D96 cap
+    /// transfer, D11 close, D33 cascade) use this to delegate to Table
+    /// methods without reimplementing freelist logic.
+    pub fn with_cap_table<R>(&mut self, f: impl FnOnce(&mut capability::Table) -> R) -> R {
+        let mut table = capability::Table {
+            entries: self.cap_table,
+            capacity: self.cap_table_capacity,
+            free_head: self.cap_table_free_head,
+            count: self.cap_table_count,
+        };
+        let result = f(&mut table);
+
+        self.cap_table_free_head = table.free_head;
+        self.cap_table_count = table.count;
+
+        result
+    }
+
     /// D67: atomically increment the generation counter, revoking all
     /// capabilities that stored the previous generation value.
     pub fn revoke(&self) {
@@ -388,6 +420,8 @@ impl Observer {
             page_table_root: 0,
             cap_table: NonNull::dangling(),
             cap_table_capacity: 0,
+            cap_table_free_head: None,
+            cap_table_count: 0,
             state: PrimaryState::Runnable,
             suspended: false,
             compute_aggregate: 100,
@@ -407,7 +441,7 @@ mod tests {
 
     #[test]
     fn observer_layout() {
-        assert_eq!(core::mem::size_of::<Observer>(), 96);
+        assert_eq!(core::mem::size_of::<Observer>(), 104);
     }
 
     #[test]
@@ -428,6 +462,8 @@ mod tests {
             page_table_root: 0,
             cap_table: NonNull::dangling(),
             cap_table_capacity: 0,
+            cap_table_free_head: None,
+            cap_table_count: 0,
             state: PrimaryState::Inert,
             suspended: false,
             compute_aggregate: 0,
@@ -449,6 +485,8 @@ mod tests {
             page_table_root: 0,
             cap_table: NonNull::dangling(),
             cap_table_capacity: 0,
+            cap_table_free_head: None,
+            cap_table_count: 0,
             state: PrimaryState::Inert,
             suspended: false,
             compute_aggregate: 0,
@@ -471,6 +509,8 @@ mod tests {
             page_table_root: 0,
             cap_table: NonNull::dangling(),
             cap_table_capacity: 0,
+            cap_table_free_head: None,
+            cap_table_count: 0,
             state: PrimaryState::Runnable,
             suspended: false,
             compute_aggregate: 0,
@@ -492,6 +532,8 @@ mod tests {
             page_table_root: 0,
             cap_table: NonNull::dangling(),
             cap_table_capacity: 0,
+            cap_table_free_head: None,
+            cap_table_count: 0,
             state: PrimaryState::Inert,
             suspended: false,
             compute_aggregate: 0,
@@ -520,6 +562,8 @@ mod tests {
             page_table_root: 0,
             cap_table: NonNull::dangling(),
             cap_table_capacity: 0,
+            cap_table_free_head: None,
+            cap_table_count: 0,
             state: PrimaryState::Blocked,
             suspended: true,
             compute_aggregate: 0,
@@ -544,6 +588,8 @@ mod tests {
             page_table_root: 0,
             cap_table: NonNull::dangling(),
             cap_table_capacity: 0,
+            cap_table_free_head: None,
+            cap_table_count: 0,
             state: PrimaryState::Blocked,
             suspended: false,
             compute_aggregate: 0,

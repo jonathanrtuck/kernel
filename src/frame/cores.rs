@@ -518,6 +518,48 @@ pub fn observer_unblock(
     }
 }
 
+// ── Cap transfer helpers (D96) ────────────────────────────────────
+//
+// Unsafe pointer wrappers for D96 IPC cap transfer. These dereference
+// the Observer pointer (the only unsafe part) and delegate to Table
+// methods via Observer::with_cap_table for freelist operations.
+
+/// Extract a capability from an Observer's cap table (D96 move semantics).
+/// Delegates to Table::extract_cap. Returns None if out of bounds or empty.
+#[cfg(any(target_os = "none", test))]
+pub fn observer_extract_cap(
+    observer_ptr: NonNull<Observer>,
+    index: u32,
+) -> Option<crate::capability::TransferredCap> {
+    // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy.
+    unsafe { (*observer_ptr.as_ptr()).with_cap_table(|table| table.extract_cap(index)) }
+}
+
+/// Install a transferred capability into an Observer's cap table (D96).
+/// Delegates to Table::install_transferred_cap. Returns the encoded handle
+/// or Err(TableFull).
+#[cfg(any(target_os = "none", test))]
+pub fn observer_install_transferred_cap(
+    observer_ptr: NonNull<Observer>,
+    transferred: &crate::capability::TransferredCap,
+) -> Result<u64, crate::capability::CapError> {
+    // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy.
+    unsafe {
+        (*observer_ptr.as_ptr()).with_cap_table(|table| table.install_transferred_cap(transferred))
+    }
+}
+
+/// Read a specific cap table entry from an Observer (D96, D43).
+/// Delegates to Table::read_entry. Returns None if empty or out of bounds.
+#[cfg(any(target_os = "none", test))]
+pub fn observer_read_cap_entry(
+    observer_ptr: NonNull<Observer>,
+    index: u32,
+) -> Option<(crate::capability::ObjectType, crate::arena::ObjectId, u64)> {
+    // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy.
+    unsafe { (*observer_ptr.as_ptr()).with_cap_table(|table| table.read_entry(index)) }
+}
+
 // ── Observer restore helpers for EL0 exception exit ─────────────
 
 /// Extract the restore parameters for an Observer (D74, D76).
@@ -730,6 +772,8 @@ mod tests {
             page_table_root: 0,
             cap_table: NonNull::dangling(),
             cap_table_capacity: 0,
+            cap_table_free_head: None,
+            cap_table_count: 0,
             state: PrimaryState::Runnable,
             suspended: false,
             compute_aggregate: 0,
@@ -772,6 +816,8 @@ mod tests {
             page_table_root: 0,
             cap_table: NonNull::dangling(),
             cap_table_capacity: 0,
+            cap_table_free_head: None,
+            cap_table_count: 0,
             state: PrimaryState::Runnable,
             suspended: false,
             compute_aggregate: 0,
@@ -799,6 +845,8 @@ mod tests {
             page_table_root: 0,
             cap_table: NonNull::dangling(),
             cap_table_capacity: 0,
+            cap_table_free_head: None,
+            cap_table_count: 0,
             state: PrimaryState::Runnable,
             suspended: false,
             compute_aggregate: 0,

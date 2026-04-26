@@ -196,16 +196,50 @@ impl<S: Scheduler> CoreState<S> {
         }
     }
 
+    /// D96: install an optional transferred cap, returning the encoded
+    /// handle or CAP_ABSENT. Table-full silently produces CAP_ABSENT
+    /// (D40 fault delivery is wired in D100).
+    #[cfg(any(target_os = "none", test))]
+    fn install_cap_or_absent(
+        observer_ptr: NonNull<Observer>,
+        cap: Option<&crate::capability::TransferredCap>,
+    ) -> u64 {
+        cap.map_or(crate::capability::CAP_ABSENT, |tc| {
+            crate::frame::cores::observer_install_transferred_cap(observer_ptr, tc)
+                .unwrap_or(crate::capability::CAP_ABSENT)
+        })
+    }
+
+    /// D96: decode a user-cap handle and extract the cap from the sender's
+    /// table (move semantics). Returns Ok(None) for CAP_ABSENT, Ok(Some)
+    /// for a valid cap, or Err(()) if the slot is empty/invalid.
+    #[cfg(any(target_os = "none", test))]
+    fn try_extract_user_cap(
+        sender_ptr: NonNull<Observer>,
+        user_cap_raw: u64,
+    ) -> Result<Option<crate::capability::TransferredCap>, ()> {
+        if user_cap_raw == crate::capability::CAP_ABSENT {
+            return Ok(None);
+        }
+
+        let handle = crate::capability::Handle::decode(user_cap_raw);
+
+        crate::frame::cores::observer_extract_cap(sender_ptr, handle.index)
+            .map(Some)
+            .ok_or(())
+    }
+
     /// Write a message to an Observer's saved registers and clear its IPC carry flag.
     ///
-    /// D76: slow-path delivery — writes all x0–x7 registers.
-    /// Consolidates the write_message_to_registers + clear_ipc_carry pattern.
+    /// D76/D96: slow-path delivery — writes all x0–x7 registers.
+    /// If the message carries transferred caps (user_cap, reply_cap), they
+    /// are installed into the receiver's cap table and the encoded handles
+    /// written to x6/x7. If the receiver's table is full, the cap slot is
+    /// written as CAP_ABSENT (D40 fault delivery is wired in D100).
     #[cfg(any(target_os = "none", test))]
     fn deliver_message(observer_ptr: NonNull<Observer>, message: &field::Message) {
-        // D76: user_cap and reply_cap slots are sentinel (u64::MAX) until
-        // cap installation is wired.
-        let user_cap_slot = u64::MAX; // TODO: install user_cap into receiver's table
-        let reply_cap_slot = u64::MAX; // TODO: install reply_cap into receiver's table
+        let user_cap_slot = Self::install_cap_or_absent(observer_ptr, message.user_cap.as_ref());
+        let reply_cap_slot = Self::install_cap_or_absent(observer_ptr, message.reply_cap.as_ref());
 
         crate::frame::cores::write_message_to_registers(
             observer_ptr,
@@ -364,13 +398,27 @@ impl<S: Scheduler> CoreState<S> {
         // ── Dispatch per operation ──────────────────────────────────
         match operation {
             crate::syscall::IpcOperation::Send => {
+                // D96: extract user cap from sender's table (move semantics).
+                let user_cap = match Self::try_extract_user_cap(sender_ptr, ipc_regs.user_cap) {
+                    Ok(cap) => cap,
+                    Err(()) => {
+                        drop(fields_guard);
+
+                        crate::frame::cores::write_ipc_error(
+                            sender_ptr,
+                            crate::syscall::SyscallError::InvalidCap,
+                        );
+
+                        return DispatchResult::Resume(sender_ptr);
+                    }
+                };
+
                 // Step 6: construct Message from IPC registers.
                 let message = crate::field::Message {
                     data: ipc_regs.data,
                     label: ipc_regs.label,
                     badge,
-                    // Cap transfer not yet wired — treat u64::MAX as None.
-                    user_cap: None,
+                    user_cap,
                     reply_cap: None,
                 };
                 // Step 7: call send.
@@ -426,17 +474,46 @@ impl<S: Scheduler> CoreState<S> {
             }
 
             crate::syscall::IpcOperation::Call => {
-                // Construct Message from IPC registers.
+                // D96: extract user cap from sender's table (move semantics).
+                let user_cap = match Self::try_extract_user_cap(sender_ptr, ipc_regs.user_cap) {
+                    Ok(cap) => cap,
+                    Err(()) => {
+                        drop(fields_guard);
+
+                        crate::frame::cores::write_ipc_error(
+                            sender_ptr,
+                            crate::syscall::SyscallError::InvalidCap,
+                        );
+
+                        return DispatchResult::Resume(sender_ptr);
+                    }
+                };
+                // D96: mint reply cap from sender's SLOT_REPLY_FIELD (slot 1).
+                // reply_badge from x7 (D65).
+                let reply_badge = crate::capability::Badge(ipc_regs.reply_info);
+                let reply_cap = crate::frame::cores::observer_read_cap_entry(
+                    sender_ptr,
+                    crate::capability::SLOT_REPLY_FIELD,
+                )
+                .map(|(object_type, object_id, stored_generation)| {
+                    crate::capability::TransferredCap {
+                        object_type,
+                        object_id,
+                        rights: crate::capability::Rights::SEND
+                            .union(crate::capability::Rights::DESTROY)
+                            .union(crate::capability::Rights::CLONE),
+                        badge: reply_badge,
+                        send_once: true,
+                        stored_generation,
+                    }
+                });
                 let message = crate::field::Message {
                     data: ipc_regs.data,
                     label: ipc_regs.label,
                     badge,
-                    user_cap: None,
-                    reply_cap: None,
+                    user_cap,
+                    reply_cap,
                 };
-
-                // reply_badge from x7 (D65).
-                let reply_badge = crate::capability::Badge(ipc_regs.reply_info);
                 let outcome = match crate::communication::call(target_field, message, reply_badge) {
                     Ok(outcome) => outcome,
                     Err(crate::field::FieldError::QueueFull) => {
@@ -463,12 +540,13 @@ impl<S: Scheduler> CoreState<S> {
 
                 drop(fields_guard);
 
-                // Pass label and badge for fast-path metadata write.
+                // Pass label, badge, and reply_cap for outcome handling.
                 self.dispatch_call_outcome_with_metadata(
                     sender_ptr,
                     outcome,
                     ipc_regs.label,
                     badge.0,
+                    reply_cap,
                 )
             }
 
@@ -691,93 +769,40 @@ impl<S: Scheduler> CoreState<S> {
     #[cfg(any(target_os = "none", test))]
     /// D79 Row 5-7: Handle Call outcome — caller always blocks.
     ///
-    /// Row 5 (Enqueued): message in queue, caller blocks on reply field.
-    /// Row 6 (DirectSwitch): D50 fast path — scheduler consulted.
-    /// Row 7 (WokeReceiverSlowPath): waiter found but user cap present.
+    /// Convenience wrapper without label/badge/reply_cap. Used by tests
+    /// that exercise scheduling behavior without cap transfer. Delegates
+    /// to dispatch_call_outcome_with_metadata with zero metadata and no caps.
     pub fn dispatch_call_outcome(
         &mut self,
         sender_ptr: NonNull<Observer>,
         outcome: crate::communication::CallOutcome,
     ) -> DispatchResult {
-        // D16: caller always blocks on Call, regardless of outcome.
-        // TODO: call sender.block() when we have mutable arena access.
-
-        match outcome {
-            crate::communication::CallOutcome::Enqueued => {
-                // Row 5: message in queue, no receiver woken. Caller blocks.
-                self.scheduler.dequeue(sender_ptr);
-                self.schedule_next()
-            }
-            crate::communication::CallOutcome::DirectSwitch(receiver_ptr) => {
-                // Row 6: D50 fast path. Consult scheduler.
-                if self.scheduler.should_switch_to(receiver_ptr) {
-                    // Approved: direct-switch to receiver.
-                    // D74: x0-x3 pass through in physical registers.
-                    // Write only x4-x7 metadata.
-                    let label = 0; // TODO: from IPC registers
-                    let badge = 0; // TODO: from cap entry
-                    let user_cap_slot = u64::MAX; // D50: no user cap (0-cap gate)
-                    let reply_cap_slot = u64::MAX; // TODO: install reply cap
-
-                    crate::frame::cores::write_metadata_to_registers(
-                        receiver_ptr,
-                        label,
-                        badge,
-                        user_cap_slot,
-                        reply_cap_slot,
-                    );
-
-                    // Dequeue sender (it's blocking). Receiver bypasses queue.
-                    self.scheduler.dequeue(sender_ptr);
-
-                    // TODO: unblock receiver via arena access.
-
-                    DispatchResult::ResumeFastPath(receiver_ptr)
-                } else {
-                    // Denied: fall back to slow path.
-                    self.scheduler.dequeue(sender_ptr);
-                    // TODO: write full message to receiver registers via
-                    // write_message_to_registers, then clear_ipc_carry.
-                    // Cannot do this yet — DirectSwitch doesn't carry the
-                    // message (D78: data passes through physical registers
-                    // on the fast path). The slow-path fallback needs the
-                    // message, which requires changing CallOutcome to carry
-                    // it in the DirectSwitch variant for the denial case.
-
-                    // TODO: unblock receiver via arena access.
-                    self.scheduler.enqueue(receiver_ptr);
-                    self.schedule_next()
-                }
-            }
-            crate::communication::CallOutcome::WokeReceiverSlowPath(receiver_ptr, message) => {
-                // Row 7: waiter found but user cap forces slow path.
-                self.scheduler.dequeue(sender_ptr);
-                Self::deliver_message(receiver_ptr, &message);
-                // TODO: unblock receiver via arena access.
-                self.scheduler.enqueue(receiver_ptr);
-                self.schedule_next()
-            }
-        }
+        self.dispatch_call_outcome_with_metadata(sender_ptr, outcome, 0, 0, None)
     }
 
     #[cfg(any(target_os = "none", test))]
-    /// D79 Row 5-7 with metadata: Handle Call outcome with label and badge
-    /// from the resolved cap entry.
+    /// D79 Row 5-7 with metadata and D96 cap transfer.
     ///
-    /// Same as dispatch_call_outcome but passes the actual label and badge
-    /// values for the fast-path metadata write (D50, D76), instead of zeros.
+    /// Handles Call outcome with label, badge, and reply cap from the
+    /// dispatch path. The reply_cap (minted from sender's SLOT_REPLY_FIELD)
+    /// is installed into the receiver's table on all delivery paths.
+    ///
+    /// D96 DirectSwitch denial: reads sender's saved registers, constructs
+    /// a Message, and delivers via slow path — no enum change needed.
     pub fn dispatch_call_outcome_with_metadata(
         &mut self,
         sender_ptr: NonNull<Observer>,
         outcome: crate::communication::CallOutcome,
         label: u64,
         badge: u64,
+        reply_cap: Option<crate::capability::TransferredCap>,
     ) -> DispatchResult {
         // D16: caller always blocks on Call, regardless of outcome.
 
         match outcome {
             crate::communication::CallOutcome::Enqueued => {
                 // Row 5: message in queue, no receiver woken. Caller blocks.
+                // The reply_cap was already in the Message (installed on dequeue).
                 let _ = crate::frame::cores::observer_set_blocked(sender_ptr);
 
                 self.scheduler.dequeue(sender_ptr);
@@ -788,9 +813,10 @@ impl<S: Scheduler> CoreState<S> {
                 if self.scheduler.should_switch_to(receiver_ptr) {
                     // Approved: direct-switch to receiver.
                     // D74: x0-x3 pass through in physical registers.
-                    // Write only x4-x7 metadata with actual values.
-                    let user_cap_slot = u64::MAX; // D50: no user cap (0-cap gate)
-                    let reply_cap_slot = u64::MAX; // TODO: install reply cap
+                    // D50: no user cap (0-cap gate).
+                    let user_cap_slot = crate::capability::CAP_ABSENT;
+                    let reply_cap_slot =
+                        Self::install_cap_or_absent(receiver_ptr, reply_cap.as_ref());
 
                     crate::frame::cores::write_metadata_to_registers(
                         receiver_ptr,
@@ -810,10 +836,22 @@ impl<S: Scheduler> CoreState<S> {
 
                     DispatchResult::ResumeFastPath(receiver_ptr)
                 } else {
-                    // Denied: fall back to slow path.
+                    // D96: DirectSwitch denied — fall back to slow path.
+                    // Read sender's data words; label and badge are already
+                    // available as function parameters.
+                    let sender_regs = crate::frame::cores::read_ipc_registers(sender_ptr);
+                    let denial_message = crate::field::Message {
+                        data: sender_regs.data,
+                        label,
+                        badge: crate::capability::Badge(badge),
+                        user_cap: None, // D50: 0-cap gate, no user cap
+                        reply_cap,
+                    };
                     let _ = crate::frame::cores::observer_set_blocked(sender_ptr);
 
                     self.scheduler.dequeue(sender_ptr);
+                    // Deliver via slow path (installs reply cap in receiver's table).
+                    Self::deliver_message(receiver_ptr, &denial_message);
 
                     // Unblock receiver and enqueue it.
                     let _ = crate::frame::cores::observer_unblock(receiver_ptr);
@@ -824,6 +862,7 @@ impl<S: Scheduler> CoreState<S> {
             }
             crate::communication::CallOutcome::WokeReceiverSlowPath(receiver_ptr, message) => {
                 // Row 7: waiter found but user cap forces slow path.
+                // Message already carries user_cap and reply_cap.
                 let _ = crate::frame::cores::observer_set_blocked(sender_ptr);
 
                 self.scheduler.dequeue(sender_ptr);
@@ -1506,6 +1545,8 @@ impl<S: Scheduler> CoreState<S> {
                     obs.page_table_root = 0;
                     obs.cap_table = cap_entries_new;
                     obs.cap_table_capacity = cap_capacity_new;
+                    obs.cap_table_free_head = Some(crate::capability::SLOT_USER_START);
+                    obs.cap_table_count = 0;
                     obs.state = crate::observer::PrimaryState::Inert;
                     obs.suspended = false;
                     obs.compute_aggregate = 0;
@@ -3038,6 +3079,8 @@ mod tests {
             page_table_root: 0,
             cap_table: NonNull::dangling(),
             cap_table_capacity: 0,
+            cap_table_free_head: None,
+            cap_table_count: 0,
             state: crate::observer::PrimaryState::Runnable,
             suspended: false,
             compute_aggregate: 100,
@@ -3836,6 +3879,10 @@ mod tests {
 
         let rs_ptr = crate::frame::cores::alloc_test_register_state();
         let entries = crate::frame::capabilities::alloc_test_entries(16);
+
+        // Initialize freelist for user slots (3..16).
+        crate::frame::capabilities::init_freelist(entries, 16, crate::capability::SLOT_USER_START);
+
         let entry = crate::frame::capabilities::entry_mut(entries, 16, 0).unwrap();
 
         *entry = Entry {
@@ -3852,6 +3899,8 @@ mod tests {
             page_table_root: 0,
             cap_table: entries,
             cap_table_capacity: 16,
+            cap_table_free_head: Some(crate::capability::SLOT_USER_START),
+            cap_table_count: 1,
             state: crate::observer::PrimaryState::Runnable,
             suspended: false,
             compute_aggregate: 100,
@@ -5663,5 +5712,746 @@ mod tests {
             x0 < 0,
             "D95: Space too small for RegisterState + L1 must fail"
         );
+    }
+
+    // ── D96: IPC cap transfer mechanics ───────────────────────────────
+
+    /// D96: observer_extract_cap moves a cap out of the sender's table.
+    /// The slot becomes empty and reenters the freelist.
+    #[test]
+    fn test_d96_extract_cap_moves_out_of_sender() {
+        let (mut sender, entries) = make_sender_with_cap(
+            ObjectType::Field,
+            ObjectId(42),
+            Rights::SEND,
+            Badge(0xBEEF),
+            7,
+        );
+        let sender_ptr = NonNull::from(&mut sender);
+        let transferred = crate::frame::cores::observer_extract_cap(sender_ptr, 0)
+            .expect("extract must succeed for occupied slot");
+
+        assert_eq!(transferred.object_type, ObjectType::Field);
+        assert_eq!(transferred.object_id, ObjectId(42));
+        assert_eq!(transferred.rights, Rights::SEND);
+        assert_eq!(transferred.badge, Badge(0xBEEF));
+        assert_eq!(transferred.stored_generation, 7);
+
+        // Slot 0 must now be empty.
+        let slot = crate::frame::capabilities::entry_ref(entries, 16, 0).unwrap();
+
+        assert!(
+            !slot.is_occupied(),
+            "D96: slot must be empty after extract (move semantics)"
+        );
+        // Sender's count must have decreased.
+        assert_eq!(sender.cap_table_count, 0, "D96: count must decrease");
+        // Slot must be in the freelist (free_head points to it).
+        assert_eq!(
+            sender.cap_table_free_head,
+            Some(0),
+            "D96: extracted slot must be at freelist head"
+        );
+    }
+
+    /// D96: extract from empty slot returns None.
+    #[test]
+    fn test_d96_extract_cap_empty_slot_returns_none() {
+        let (mut sender, _entries) =
+            make_sender_with_cap(ObjectType::Field, ObjectId(1), Rights::SEND, Badge(0), 0);
+        let sender_ptr = NonNull::from(&mut sender);
+        // Slot 5 is empty (not in the test entry).
+        let result = crate::frame::cores::observer_extract_cap(sender_ptr, 5);
+
+        assert!(
+            result.is_none(),
+            "D96: extract from empty slot must be None"
+        );
+    }
+
+    /// D96: observer_install_transferred_cap installs a cap into the
+    /// receiver's table, returns the encoded handle.
+    #[test]
+    fn test_d96_install_transferred_cap_in_receiver() {
+        let rs_ptr = crate::frame::cores::alloc_test_register_state();
+        let entries = crate::frame::capabilities::alloc_test_entries(16);
+
+        crate::frame::capabilities::init_freelist(entries, 16, crate::capability::SLOT_USER_START);
+
+        let mut receiver = Observer {
+            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
+            page_table_root: 0,
+            cap_table: entries,
+            cap_table_capacity: 16,
+            cap_table_free_head: Some(crate::capability::SLOT_USER_START),
+            cap_table_count: 0,
+            state: crate::observer::PrimaryState::Runnable,
+            suspended: false,
+            compute_aggregate: 100,
+            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
+            throughput: crate::observer::DEFAULT_THROUGHPUT,
+            clock_access: false,
+            wait_state: crate::observer::WaitState::None,
+            refcount: 1,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let receiver_ptr = NonNull::from(&mut receiver);
+        let transferred = crate::capability::TransferredCap {
+            object_type: ObjectType::Field,
+            object_id: ObjectId(99),
+            rights: Rights::SEND,
+            badge: Badge(0xCAFE),
+            send_once: false,
+            stored_generation: 3,
+        };
+        let handle_raw =
+            crate::frame::cores::observer_install_transferred_cap(receiver_ptr, &transferred)
+                .expect("install must succeed with free slots");
+
+        // D77: decode the handle to verify slot index.
+        let handle = crate::capability::Handle::decode(handle_raw);
+
+        assert_eq!(
+            handle.index,
+            crate::capability::SLOT_USER_START,
+            "D96: first install must use SLOT_USER_START"
+        );
+
+        // Verify the entry was written correctly.
+        let entry = crate::frame::capabilities::entry_ref(entries, 16, handle.index).unwrap();
+
+        assert!(entry.is_occupied(), "D96: installed slot must be occupied");
+
+        let (obj_type, obj_id) = entry.object.unwrap();
+
+        assert_eq!(obj_type, ObjectType::Field);
+        assert_eq!(obj_id, ObjectId(99));
+        assert_eq!(entry.rights, Rights::SEND);
+        assert_eq!(entry.badge, Badge(0xCAFE));
+        assert!(!entry.send_once);
+        assert_eq!(entry.stored_generation, 3);
+        assert_eq!(receiver.cap_table_count, 1, "D96: count must increase");
+    }
+
+    /// D96: install into a full table returns TableFull.
+    #[test]
+    fn test_d96_install_cap_table_full_returns_error() {
+        let rs_ptr = crate::frame::cores::alloc_test_register_state();
+        let entries = crate::frame::capabilities::alloc_test_entries(4);
+        // No freelist initialized — free_head is None.
+        let mut receiver = Observer {
+            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
+            page_table_root: 0,
+            cap_table: entries,
+            cap_table_capacity: 4,
+            cap_table_free_head: None,
+            cap_table_count: 4,
+            state: crate::observer::PrimaryState::Runnable,
+            suspended: false,
+            compute_aggregate: 0,
+            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
+            throughput: crate::observer::DEFAULT_THROUGHPUT,
+            clock_access: false,
+            wait_state: crate::observer::WaitState::None,
+            refcount: 1,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let receiver_ptr = NonNull::from(&mut receiver);
+        let transferred = crate::capability::TransferredCap {
+            object_type: ObjectType::Space,
+            object_id: ObjectId(1),
+            rights: Rights::SPACE_ALL,
+            badge: Badge(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+        let result =
+            crate::frame::cores::observer_install_transferred_cap(receiver_ptr, &transferred);
+
+        assert!(
+            matches!(result, Err(crate::capability::CapError::TableFull)),
+            "D96/D40: install into full table must return TableFull"
+        );
+    }
+
+    /// D96: reply cap is send-once — the transferred cap carries the flag.
+    #[test]
+    fn test_d96_reply_cap_is_send_once() {
+        let rs_ptr = crate::frame::cores::alloc_test_register_state();
+        let entries = crate::frame::capabilities::alloc_test_entries(16);
+
+        crate::frame::capabilities::init_freelist(entries, 16, crate::capability::SLOT_USER_START);
+
+        let mut receiver = Observer {
+            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
+            page_table_root: 0,
+            cap_table: entries,
+            cap_table_capacity: 16,
+            cap_table_free_head: Some(crate::capability::SLOT_USER_START),
+            cap_table_count: 0,
+            state: crate::observer::PrimaryState::Runnable,
+            suspended: false,
+            compute_aggregate: 100,
+            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
+            throughput: crate::observer::DEFAULT_THROUGHPUT,
+            clock_access: false,
+            wait_state: crate::observer::WaitState::None,
+            refcount: 1,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let receiver_ptr = NonNull::from(&mut receiver);
+        // Simulate a reply cap: send-once = true, reply badge embedded.
+        let reply_transferred = crate::capability::TransferredCap {
+            object_type: ObjectType::Field,
+            object_id: ObjectId(77),
+            rights: Rights::SEND.union(Rights::DESTROY).union(Rights::CLONE),
+            badge: Badge(0x1234),
+            send_once: true,
+            stored_generation: 5,
+        };
+        let handle_raw =
+            crate::frame::cores::observer_install_transferred_cap(receiver_ptr, &reply_transferred)
+                .expect("install must succeed");
+
+        let handle = crate::capability::Handle::decode(handle_raw);
+        let entry = crate::frame::capabilities::entry_ref(entries, 16, handle.index).unwrap();
+
+        assert!(entry.is_send_once(), "D96/D51: reply cap must be send-once");
+        assert_eq!(entry.badge, Badge(0x1234), "D96/D65: reply badge preserved");
+    }
+
+    /// D96: deliver_message installs user_cap and reply_cap into receiver's
+    /// table. Registers x6 and x7 carry the encoded handles.
+    #[test]
+    fn test_d96_deliver_message_installs_caps() {
+        let rs_ptr = crate::frame::cores::alloc_test_register_state();
+        let entries = crate::frame::capabilities::alloc_test_entries(16);
+
+        crate::frame::capabilities::init_freelist(entries, 16, crate::capability::SLOT_USER_START);
+
+        let mut receiver = Observer {
+            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
+            page_table_root: 0,
+            cap_table: entries,
+            cap_table_capacity: 16,
+            cap_table_free_head: Some(crate::capability::SLOT_USER_START),
+            cap_table_count: 0,
+            state: crate::observer::PrimaryState::Runnable,
+            suspended: false,
+            compute_aggregate: 100,
+            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
+            throughput: crate::observer::DEFAULT_THROUGHPUT,
+            clock_access: false,
+            wait_state: crate::observer::WaitState::None,
+            refcount: 1,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let receiver_ptr = NonNull::from(&mut receiver);
+        let message = crate::field::Message {
+            data: [0xAA, 0xBB, 0xCC, 0xDD],
+            label: 0xFACE,
+            badge: Badge(0xBEEF),
+            user_cap: Some(crate::capability::TransferredCap {
+                object_type: ObjectType::Field,
+                object_id: ObjectId(10),
+                rights: Rights::SEND,
+                badge: Badge(0x111),
+                send_once: false,
+                stored_generation: 1,
+            }),
+            reply_cap: Some(crate::capability::TransferredCap {
+                object_type: ObjectType::Field,
+                object_id: ObjectId(20),
+                rights: Rights::SEND,
+                badge: Badge(0x222),
+                send_once: true,
+                stored_generation: 2,
+            }),
+        };
+
+        CoreState::<RoundRobin>::deliver_message(receiver_ptr, &message);
+
+        // Read receiver's registers to check x6 and x7.
+        let regs = crate::frame::cores::read_ipc_registers(receiver_ptr);
+
+        assert_eq!(regs.data, [0xAA, 0xBB, 0xCC, 0xDD], "D96: data preserved");
+        assert_eq!(regs.label, 0xFACE, "D96: label preserved");
+        assert_eq!(regs.handle_or_badge, 0xBEEF, "D96: badge preserved");
+
+        // x6 and x7 must NOT be CAP_ABSENT — caps were installed.
+        assert_ne!(
+            regs.user_cap,
+            crate::capability::CAP_ABSENT,
+            "D96: user cap must be installed (x6 != CAP_ABSENT)"
+        );
+        assert_ne!(
+            regs.reply_info,
+            crate::capability::CAP_ABSENT,
+            "D96: reply cap must be installed (x7 != CAP_ABSENT)"
+        );
+
+        // Verify the handles decode to valid slot indices.
+        let user_handle = crate::capability::Handle::decode(regs.user_cap);
+        let reply_handle = crate::capability::Handle::decode(regs.reply_info);
+
+        assert_eq!(
+            user_handle.index,
+            crate::capability::SLOT_USER_START,
+            "D96: user cap at first free slot"
+        );
+        assert_eq!(
+            reply_handle.index,
+            crate::capability::SLOT_USER_START + 1,
+            "D96: reply cap at second free slot"
+        );
+
+        // Verify cap table entries.
+        let user_entry =
+            crate::frame::capabilities::entry_ref(entries, 16, user_handle.index).unwrap();
+        let (ut, uid) = user_entry.object.unwrap();
+
+        assert_eq!(ut, ObjectType::Field);
+        assert_eq!(uid, ObjectId(10));
+
+        let reply_entry =
+            crate::frame::capabilities::entry_ref(entries, 16, reply_handle.index).unwrap();
+        let (rt, rid) = reply_entry.object.unwrap();
+
+        assert_eq!(rt, ObjectType::Field);
+        assert_eq!(rid, ObjectId(20));
+        assert!(reply_entry.is_send_once(), "D96: reply cap is send-once");
+        assert_eq!(receiver.cap_table_count, 2, "D96: two caps installed");
+    }
+
+    /// D96: deliver_message with no caps writes CAP_ABSENT to x6 and x7.
+    #[test]
+    fn test_d96_deliver_message_no_caps_writes_absent() {
+        let rs_ptr = crate::frame::cores::alloc_test_register_state();
+        let mut receiver = Observer {
+            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
+            page_table_root: 0,
+            cap_table: NonNull::dangling(),
+            cap_table_capacity: 0,
+            cap_table_free_head: None,
+            cap_table_count: 0,
+            state: crate::observer::PrimaryState::Runnable,
+            suspended: false,
+            compute_aggregate: 0,
+            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
+            throughput: crate::observer::DEFAULT_THROUGHPUT,
+            clock_access: false,
+            wait_state: crate::observer::WaitState::None,
+            refcount: 1,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let receiver_ptr = NonNull::from(&mut receiver);
+        let message = crate::field::Message {
+            data: [1, 2, 3, 4],
+            label: 0xFF,
+            badge: Badge(0),
+            user_cap: None,
+            reply_cap: None,
+        };
+
+        CoreState::<RoundRobin>::deliver_message(receiver_ptr, &message);
+
+        let regs = crate::frame::cores::read_ipc_registers(receiver_ptr);
+
+        assert_eq!(
+            regs.user_cap,
+            crate::capability::CAP_ABSENT,
+            "D96: no user cap → x6 = CAP_ABSENT"
+        );
+        assert_eq!(
+            regs.reply_info,
+            crate::capability::CAP_ABSENT,
+            "D96: no reply cap → x7 = CAP_ABSENT"
+        );
+    }
+
+    /// D96: extract then install round-trips a cap between two Observers.
+    #[test]
+    fn test_d96_cap_move_roundtrip_sender_to_receiver() {
+        // Sender has a Field cap at slot 0.
+        let (mut sender, _sender_entries) = make_sender_with_cap(
+            ObjectType::Field,
+            ObjectId(55),
+            Rights::FIELD_ALL,
+            Badge(0xDEAD),
+            10,
+        );
+        let sender_ptr = NonNull::from(&mut sender);
+        // Receiver has an empty table with freelist.
+        let rs_ptr = crate::frame::cores::alloc_test_register_state();
+        let receiver_entries = crate::frame::capabilities::alloc_test_entries(16);
+
+        crate::frame::capabilities::init_freelist(
+            receiver_entries,
+            16,
+            crate::capability::SLOT_USER_START,
+        );
+
+        let mut receiver = Observer {
+            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
+            page_table_root: 0,
+            cap_table: receiver_entries,
+            cap_table_capacity: 16,
+            cap_table_free_head: Some(crate::capability::SLOT_USER_START),
+            cap_table_count: 0,
+            state: crate::observer::PrimaryState::Runnable,
+            suspended: false,
+            compute_aggregate: 100,
+            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
+            throughput: crate::observer::DEFAULT_THROUGHPUT,
+            clock_access: false,
+            wait_state: crate::observer::WaitState::None,
+            refcount: 1,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let receiver_ptr = NonNull::from(&mut receiver);
+        // D96 §2: move cap from sender to receiver.
+        let transferred =
+            crate::frame::cores::observer_extract_cap(sender_ptr, 0).expect("extract must succeed");
+
+        assert_eq!(sender.cap_table_count, 0, "sender count after extract");
+
+        let handle_raw =
+            crate::frame::cores::observer_install_transferred_cap(receiver_ptr, &transferred)
+                .expect("install must succeed");
+
+        assert_eq!(receiver.cap_table_count, 1, "receiver count after install");
+
+        // Verify the cap arrived intact.
+        let handle = crate::capability::Handle::decode(handle_raw);
+        let entry =
+            crate::frame::capabilities::entry_ref(receiver_entries, 16, handle.index).unwrap();
+        let (obj_type, obj_id) = entry.object.unwrap();
+
+        assert_eq!(obj_type, ObjectType::Field, "D96: object type preserved");
+        assert_eq!(obj_id, ObjectId(55), "D96: object id preserved");
+        assert_eq!(entry.rights, Rights::FIELD_ALL, "D96: rights preserved");
+        assert_eq!(entry.badge, Badge(0xDEAD), "D96: badge preserved");
+        assert_eq!(entry.stored_generation, 10, "D96: generation preserved");
+    }
+
+    /// D96: DirectSwitch approved path installs reply cap in receiver.
+    /// RoundRobin always approves, so this tests the fast-path cap install.
+    #[test]
+    fn test_d96_direct_switch_approved_installs_reply_cap() {
+        let rs_ptr = crate::frame::cores::alloc_test_register_state();
+        let receiver_entries = crate::frame::capabilities::alloc_test_entries(16);
+
+        crate::frame::capabilities::init_freelist(
+            receiver_entries,
+            16,
+            crate::capability::SLOT_USER_START,
+        );
+
+        let mut receiver = Observer {
+            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
+            page_table_root: 0,
+            cap_table: receiver_entries,
+            cap_table_capacity: 16,
+            cap_table_free_head: Some(crate::capability::SLOT_USER_START),
+            cap_table_count: 0,
+            state: crate::observer::PrimaryState::Blocked,
+            suspended: false,
+            compute_aggregate: 100,
+            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
+            throughput: crate::observer::DEFAULT_THROUGHPUT,
+            clock_access: false,
+            wait_state: crate::observer::WaitState::None,
+            refcount: 1,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let receiver_ptr = NonNull::from(&mut receiver);
+        let sender_rs = crate::frame::cores::alloc_test_register_state();
+        let mut sender = Observer {
+            register_state: crate::observer::RegisterStateHandle::new(sender_rs),
+            page_table_root: 0,
+            cap_table: NonNull::dangling(),
+            cap_table_capacity: 0,
+            cap_table_free_head: None,
+            cap_table_count: 0,
+            state: crate::observer::PrimaryState::Runnable,
+            suspended: false,
+            compute_aggregate: 100,
+            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
+            throughput: crate::observer::DEFAULT_THROUGHPUT,
+            clock_access: false,
+            wait_state: crate::observer::WaitState::None,
+            refcount: 1,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let sender_ptr = NonNull::from(&mut sender);
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+
+        let outcome = crate::communication::CallOutcome::DirectSwitch(receiver_ptr);
+        let reply_cap = Some(crate::capability::TransferredCap {
+            object_type: ObjectType::Field,
+            object_id: ObjectId(88),
+            rights: Rights::SEND,
+            badge: Badge(0x4567),
+            send_once: true,
+            stored_generation: 0,
+        });
+        let result = core
+            .dispatch_call_outcome_with_metadata(sender_ptr, outcome, 0x1ABE, 0xBAD6E, reply_cap);
+
+        // RoundRobin approves → fast path.
+        assert!(
+            matches!(result, DispatchResult::ResumeFastPath(_)),
+            "D96: RoundRobin approves DirectSwitch → fast path"
+        );
+
+        // D96: reply cap must be installed in receiver's x7.
+        let recv_regs = crate::frame::cores::read_ipc_registers(receiver_ptr);
+
+        assert_ne!(
+            recv_regs.reply_info,
+            crate::capability::CAP_ABSENT,
+            "D96: reply cap must be installed (x7 != CAP_ABSENT)"
+        );
+
+        // Verify reply cap entry in receiver's table.
+        let reply_handle = crate::capability::Handle::decode(recv_regs.reply_info);
+        let reply_entry =
+            crate::frame::capabilities::entry_ref(receiver_entries, 16, reply_handle.index)
+                .unwrap();
+
+        assert!(
+            reply_entry.is_send_once(),
+            "D96/D51: reply cap must be send-once"
+        );
+        assert_eq!(
+            reply_entry.badge,
+            Badge(0x4567),
+            "D96/D65: reply badge preserved"
+        );
+        assert_eq!(
+            reply_entry.object.unwrap().1,
+            ObjectId(88),
+            "D96: reply Field ObjectId preserved"
+        );
+        // x4 (label) and x5 (badge) must be written for metadata path.
+        assert_eq!(recv_regs.label, 0x1ABE, "D96: label in x4");
+        assert_eq!(recv_regs.handle_or_badge, 0xBAD6E, "D96: badge in x5");
+    }
+
+    /// D96 §4: DirectSwitch denied path constructs Message from sender's
+    /// saved registers and delivers to receiver via slow path with reply cap.
+    /// Uses WokeReceiverSlowPath as a proxy since RoundRobin always approves.
+    #[test]
+    fn test_d96_slow_path_delivers_reply_cap() {
+        let rs_ptr = crate::frame::cores::alloc_test_register_state();
+        let receiver_entries = crate::frame::capabilities::alloc_test_entries(16);
+
+        crate::frame::capabilities::init_freelist(
+            receiver_entries,
+            16,
+            crate::capability::SLOT_USER_START,
+        );
+
+        let mut receiver = Observer {
+            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
+            page_table_root: 0,
+            cap_table: receiver_entries,
+            cap_table_capacity: 16,
+            cap_table_free_head: Some(crate::capability::SLOT_USER_START),
+            cap_table_count: 0,
+            state: crate::observer::PrimaryState::Blocked,
+            suspended: false,
+            compute_aggregate: 100,
+            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
+            throughput: crate::observer::DEFAULT_THROUGHPUT,
+            clock_access: false,
+            wait_state: crate::observer::WaitState::None,
+            refcount: 1,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let receiver_ptr = NonNull::from(&mut receiver);
+        let sender_rs = crate::frame::cores::alloc_test_register_state();
+        let mut sender = Observer {
+            register_state: crate::observer::RegisterStateHandle::new(sender_rs),
+            page_table_root: 0,
+            cap_table: NonNull::dangling(),
+            cap_table_capacity: 0,
+            cap_table_free_head: None,
+            cap_table_count: 0,
+            state: crate::observer::PrimaryState::Runnable,
+            suspended: false,
+            compute_aggregate: 100,
+            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
+            throughput: crate::observer::DEFAULT_THROUGHPUT,
+            clock_access: false,
+            wait_state: crate::observer::WaitState::None,
+            refcount: 1,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let sender_ptr = NonNull::from(&mut sender);
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+
+        // D96 §4 slow path: WokeReceiverSlowPath carries both user and reply cap.
+        let message = crate::field::Message {
+            data: [0xD1, 0xD2, 0xD3, 0xD4],
+            label: 0xFACE,
+            badge: Badge(0xBEEF),
+            user_cap: Some(crate::capability::TransferredCap {
+                object_type: ObjectType::Field,
+                object_id: ObjectId(10),
+                rights: Rights::SEND,
+                badge: Badge(0x111),
+                send_once: false,
+                stored_generation: 1,
+            }),
+            reply_cap: Some(crate::capability::TransferredCap {
+                object_type: ObjectType::Field,
+                object_id: ObjectId(20),
+                rights: Rights::SEND,
+                badge: Badge(0x222),
+                send_once: true,
+                stored_generation: 2,
+            }),
+        };
+        let outcome =
+            crate::communication::CallOutcome::WokeReceiverSlowPath(receiver_ptr, message);
+        let _result = core.dispatch_call_outcome_with_metadata(sender_ptr, outcome, 0, 0, None);
+        // Receiver must have both caps installed.
+        let recv_regs = crate::frame::cores::read_ipc_registers(receiver_ptr);
+
+        assert_ne!(
+            recv_regs.user_cap,
+            crate::capability::CAP_ABSENT,
+            "D96: user cap must be installed on slow path"
+        );
+        assert_ne!(
+            recv_regs.reply_info,
+            crate::capability::CAP_ABSENT,
+            "D96: reply cap must be installed on slow path"
+        );
+
+        // Verify reply cap is send-once.
+        let reply_handle = crate::capability::Handle::decode(recv_regs.reply_info);
+        let reply_entry =
+            crate::frame::capabilities::entry_ref(receiver_entries, 16, reply_handle.index)
+                .unwrap();
+
+        assert!(reply_entry.is_send_once(), "D96: reply cap is send-once");
+        assert_eq!(receiver.cap_table_count, 2, "D96: two caps installed");
+    }
+
+    /// D96: multiple cap installations advance the freelist correctly.
+    #[test]
+    fn test_d96_multiple_installs_advance_freelist() {
+        let rs_ptr = crate::frame::cores::alloc_test_register_state();
+        let entries = crate::frame::capabilities::alloc_test_entries(8);
+
+        crate::frame::capabilities::init_freelist(entries, 8, crate::capability::SLOT_USER_START);
+
+        let mut receiver = Observer {
+            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
+            page_table_root: 0,
+            cap_table: entries,
+            cap_table_capacity: 8,
+            cap_table_free_head: Some(crate::capability::SLOT_USER_START),
+            cap_table_count: 0,
+            state: crate::observer::PrimaryState::Runnable,
+            suspended: false,
+            compute_aggregate: 0,
+            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
+            throughput: crate::observer::DEFAULT_THROUGHPUT,
+            clock_access: false,
+            wait_state: crate::observer::WaitState::None,
+            refcount: 1,
+            generation: core::sync::atomic::AtomicU64::new(0),
+        };
+        let receiver_ptr = NonNull::from(&mut receiver);
+
+        // Install caps until the table is full (slots 3..8 = 5 slots).
+        for i in 0u32..5 {
+            let tc = crate::capability::TransferredCap {
+                object_type: ObjectType::Space,
+                object_id: ObjectId(i),
+                rights: Rights::SPACE_ALL,
+                badge: Badge(i as u64),
+                send_once: false,
+                stored_generation: 0,
+            };
+            let handle_raw =
+                crate::frame::cores::observer_install_transferred_cap(receiver_ptr, &tc)
+                    .expect("install must succeed");
+            let handle = crate::capability::Handle::decode(handle_raw);
+
+            assert_eq!(
+                handle.index,
+                crate::capability::SLOT_USER_START + i,
+                "D96: sequential slot allocation"
+            );
+        }
+
+        assert_eq!(receiver.cap_table_count, 5, "D96: 5 caps installed");
+        assert_eq!(
+            receiver.cap_table_free_head, None,
+            "D96: freelist exhausted after 5 installs"
+        );
+
+        // Next install must fail with TableFull.
+        let overflow = crate::capability::TransferredCap {
+            object_type: ObjectType::Space,
+            object_id: ObjectId(99),
+            rights: Rights::SPACE_ALL,
+            badge: Badge(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+        let result = crate::frame::cores::observer_install_transferred_cap(receiver_ptr, &overflow);
+
+        assert!(
+            matches!(result, Err(crate::capability::CapError::TableFull)),
+            "D96: install after freelist exhausted must return TableFull"
+        );
+    }
+
+    /// D96: extract followed by install reuses the freed slot.
+    #[test]
+    fn test_d96_extract_then_install_reuses_slot() {
+        let (mut sender, entries) =
+            make_sender_with_cap(ObjectType::Field, ObjectId(1), Rights::SEND, Badge(0), 0);
+        let sender_ptr = NonNull::from(&mut sender);
+        // Extract slot 0.
+        let _transferred =
+            crate::frame::cores::observer_extract_cap(sender_ptr, 0).expect("extract must succeed");
+        // Slot 0 is now at freelist head. Install a new cap — should reuse slot 0.
+        let new_cap = crate::capability::TransferredCap {
+            object_type: ObjectType::Space,
+            object_id: ObjectId(999),
+            rights: Rights::SPACE_ALL,
+            badge: Badge(0x42),
+            send_once: false,
+            stored_generation: 5,
+        };
+        let handle_raw =
+            crate::frame::cores::observer_install_transferred_cap(sender_ptr, &new_cap)
+                .expect("install must succeed");
+        let handle = crate::capability::Handle::decode(handle_raw);
+
+        assert_eq!(
+            handle.index, 0,
+            "D96: freed slot 0 must be reused by next install"
+        );
+
+        // Verify new cap is in place.
+        let entry = crate::frame::capabilities::entry_ref(entries, 16, 0).unwrap();
+        let (obj_type, obj_id) = entry.object.unwrap();
+
+        assert_eq!(obj_type, ObjectType::Space);
+        assert_eq!(obj_id, ObjectId(999));
+        assert_eq!(sender.cap_table_count, 1, "count back to 1 after roundtrip");
     }
 }
