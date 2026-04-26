@@ -285,13 +285,25 @@ Page table derivation from ARM64 VMSAv8-64:
 - Space cap → page table mapping/unmapping
 - TTBR0/TTBR1 split
 
-## Phase E: Boot sequence
+## Phase E: Boot sequence and remaining interface gaps (D93–D102)
 
-Initialization order derivation:
+Settled 35 open decisions across 10 derivations. These close all interface gaps
+between the settled D1–D92 chain and a working kernel with userspace tests.
 
-- KernelState creation from DTB-discovered RAM
-- Per-core PerCoreData + CoreState allocation
-- First Observer creation and resume
+| Derivation | Journal | Settles                                                                                                       |
+| ---------- | ------- | ------------------------------------------------------------------------------------------------------------- |
+| D93        | 093     | Slab page source, physical memory partitioning, secondary core handoff, per-core scheduler                    |
+| D94        | 094     | Initial binary (DTB module), root Observer resources/VA/registers, test exit (fault+PSCI), flat binary format |
+| D95        | 095     | CreateObserver/CreateField/CreatePulsar protocols, structural backing, L1 page table source                   |
+| D96        | 096     | Reply cap minting, user cap transfer (move), slot allocation, DirectSwitch denial fallback                    |
+| D97        | 097     | Clone/Close/Mint, ObserverInstallCap→mapping (D24), WriteRegisters/ReadRegisters, ChangeHandler               |
+| D98        | 098     | Preemptible destroy cascade, Space cap return mechanism                                                       |
+| D99        | 099     | IRQ delegation (FieldSplit), EOI protocol, Pulsar deadline installation                                       |
+| D100       | 100     | Fault message register layout, fault Observer cap (5-right), kernel-as-root-handler                           |
+| D101       | 101     | ASID sequential assignment, TLB invalidation scope (per-VA/per-ASID threshold)                                |
+| D102       | 102     | Test binary format (flat), packaging (hypervisor+DTB), multi-Observer bootstrap                               |
+
+All interfaces are now settled. Implementation can proceed mechanically.
 
 ---
 

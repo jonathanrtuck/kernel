@@ -1071,12 +1071,14 @@ is not introduced by D22.
 Does NOT settle: ~~field split semantics~~ (settled by D45: badge-range routing
 with fallback-on-destroy; generalizes beyond IRQ to all badge-range traffic),
 ~~field combine semantics~~ (dissolved by D45: combine decomposes into
-split-to-existing + destroy), boot distribution of IRQ authority, ~~interrupt
-priority exposure~~ (settled by journal 066: flat absorption, forward-compatible
-with future exposure), ~~IRQ routing policy~~ (settled by journal 066:
-kernel-automatic GICD_IROUTER tracking on migration and receive-cap transfer),
-~~userspace timer mechanism~~ (settled by D44), GICv4 forward-compatibility
-(direct virtual injection).
+split-to-existing + destroy), ~~boot distribution of IRQ authority~~ (settled by
+D99: kernel populates IrqRoutingTable at boot with all device INTIDs routing to
+root interrupt Field; delegation via FieldSplit updates routing entries),
+~~interrupt priority exposure~~ (settled by journal 066: flat absorption,
+forward-compatible with future exposure), ~~IRQ routing policy~~ (settled by
+journal 066: kernel-automatic GICD_IROUTER tracking on migration and receive-cap
+transfer), ~~userspace timer mechanism~~ (settled by D44), GICv4
+forward-compatibility (direct virtual injection).
 
 - **Rests on:** A4 (no background interrupt processing; independent path), A3
   (no single interrupt policy; independent path), A5 (net: dispatch interface
@@ -1641,12 +1643,15 @@ authority over it." Factory caps separate authority-to-create from the created
 object — an indirection D4 doesn't require. (Journal 022 rejected the same
 pattern for interrupts.)
 
-Does NOT settle: resource request fault message format (D28 downstream), Space
-"create" right encoding, ~~pager unavailability protocol (chains committed but
-unavailability handling still open)~~ (settled by D68), ~~secondary core
-bring-up mechanism~~ (settled by D46: core lifecycle is kernel-internal; all
-cores activate at boot), Observer creation API config parameters, Time
-parameters, Time clonability.
+Does NOT settle: ~~resource request fault message format~~ (settled by D100:
+four fault types with register-level layout; ResourceRequest uses x0 = resource
+type, x1 = quantity), Space "create" right encoding, ~~pager unavailability
+protocol (chains committed but unavailability handling still open)~~ (settled by
+D68), ~~secondary core bring-up mechanism~~ (settled by D46: core lifecycle is
+kernel-internal; all cores activate at boot), ~~Observer creation API config
+parameters~~ (settled by D95: CreateObserver protocol — space_cap,
+handler_field_cap, badge; composable setup via D35 operations), Time parameters,
+Time clonability.
 
 - **Rests on:** D4 (designation = authority — the pager chain provides
   capability-mediated resource acquisition; factory caps add indirection D4
@@ -2227,11 +2232,14 @@ install_cap + resume is the general-purpose pattern. D35's structural reuse
 holds: the same operations serve Observer creation, resource request resolution,
 and cap-table growth.
 
-Does NOT settle: Observer handle rights in fault message (downstream of fault
-message content question), ~~Space resize (D9 open — would enable transparent
-demand paging)~~ (settled by D41: merge enables demand paging), fault message
-content per type (D28 downstream), ~~pager unavailability protocol (separate
-question)~~ (settled by D68), VA assignment policy details (D26 open).
+Does NOT settle: ~~Observer handle rights in fault message~~ (settled by D100:
+exactly 5 of 9 rights — resume, destroy, install_cap, write_registers,
+read_registers; kernel constructs TransferredCap directly), ~~Space resize (D9
+open — would enable transparent demand paging)~~ (settled by D41: merge enables
+demand paging), ~~fault message content per type~~ (settled by D100:
+register-level layout for all four fault types; D28 downstream discharged),
+~~pager unavailability protocol (separate question)~~ (settled by D68), VA
+assignment policy details (D26 open).
 
 - **Rests on:** D12 (fault delegation — kernel dispatches, doesn't contain
   policy), D14 (resume as typed kernel syscall; Observer handle in fault
@@ -2747,8 +2755,11 @@ management (D9) and VA assignment (D26).
 
 Does NOT settle: specific idle power state policy per platform, interrupt
 routing policy across cores (which core receives a given SPI), per-core
-scheduler algorithm selection policy, boot ordering for secondary cores
-(parallel vs. sequential PSCI CPU_ON), deactivation decision thresholds.
+scheduler algorithm selection policy, ~~boot ordering for secondary cores
+(parallel vs. sequential PSCI CPU_ON)~~ (settled by D93: BSP completes
+init_kernel_state before any PSCI CPU_ON; secondaries activate after global is
+live; existing activate_secondaries pattern preserved), deactivation decision
+thresholds.
 
 - **Rests on:** D31 (core assignment kernel-internal — extends to core
   existence; boot architecture — secondary core bring-up is the remaining
@@ -5283,6 +5294,147 @@ downstream).
   points). Per-core copies not foreclosed but would require reopening D53.
   Consistent with "push complexity to the leaves" and "isolate uncertain
   decisions behind interfaces."
+
+### D93 — Boot memory and multi-core initialization
+
+Arena pages are drawn from the SpaceManager's root pool (D70, D31). Boot
+resolves the circular dependency by sequencing: BSP constructs SpaceManager with
+root pool from DTB-discovered RAM, then empty arenas, bundles into KernelState,
+calls `frame::init_kernel_state()`. Arenas start empty; first allocation
+triggers slab page request. Physical memory partitioning: DTB memory nodes minus
+kernel image, DTB blob, and initial binary = root pool. Secondary cores
+activated via PSCI CPU_ON after KernelState is complete; each initializes
+PerCoreData/CoreState with RoundRobin scheduler and enters idle via WFI.
+
+- **Rests on:** D31, D46, D70, D75, D82, D83, D1, D2, D59, A2, A4.
+- **Status:** settled.
+- **Journal:** `journal/093-boot-memory-and-multicore-init.md`.
+
+### D94 — Root Observer bootstrap protocol
+
+The initial binary is discovered from a DTB module node (not embedded in the
+kernel image — preserves A3 generic). Flat binary format: entry at offset 0, no
+ELF parser in kernel. Root Observer receives modest initial resource allocation;
+kernel retains majority as root pool for arena growth and pager-chain grants.
+Kernel assigns VA bases (D26), creates TTBR0 page table, maps code and stack
+Spaces directly during boot. Initial registers: PC = VA base, SP = stack top, x0
+= initial cap count, x1–x7 = 0. UART device-memory Space cap provided for serial
+debug. Test exit via deliberate fault: D68 chain terminus triggers PSCI
+SYSTEM_OFF with exit code.
+
+- **Rests on:** D31, D26, D32, D35, D46, D68, D88, A3, A4, A5.
+- **Status:** settled.
+- **Journal:** `journal/094-root-observer-bootstrap-protocol.md`.
+
+### D95 — Object creation protocols
+
+CreateObserver: `create_observer(space_cap, handler_field_cap, badge)` →
+observer_cap (inert). Space consumed entirely for structural backing (cap table,
+L1 page table root, RegisterState). Observer metadata from root pool (D32).
+Reserved slots populated: 0 = handler, 1 = reply (empty), 2 = self-cap (D57).
+Composable setup via D35. CreateField: `create_field(space_cap)` → field_cap.
+Queue capacity derived from Space size. CreatePulsar:
+`create_pulsar(space_cap, field_cap, badge, duration_ns, period_ns)` →
+pulsar_cap (armed at creation, D62). Deadline installed in creating Observer's
+current core (D83 array, max 32).
+
+- **Rests on:** D32, D35, D43, D57, D13, D44, D62, D72, D83, D89, D92.
+- **Status:** settled.
+- **Journal:** `journal/095-object-creation-protocols.md`.
+
+### D96 — IPC cap transfer mechanics
+
+Reply cap: kernel creates send-once Entry pointing at caller's reply Field (slot
+1), installs in receiver's table via allocate_slot. User cap: move semantics —
+removed from sender's table, installed in receiver's (D30 over-allocation
+invariant forces move). Cap slot allocation: kernel picks via freelist; table
+full → fault receiver (D40), handler provides Space for growth. DirectSwitch
+denial: no enum change — Message constructed from sender's saved registers at
+the denial point.
+
+- **Rests on:** D16, D28, D30, D37, D43, D47, D50, D51, D74, D78, D8, D40.
+- **Status:** settled.
+- **Journal:** `journal/096-ipc-cap-transfer-mechanics.md`.
+
+### D97 — Cap table self-mutation and mapping bridge
+
+Clone: duplicate Entry via allocate_slot + install_at; Time forbidden (D38).
+Close: Table::close() + D24 mapping bridge (Space cap close triggers
+unmap_space_from_observer + TLB invalidation). Mint: attenuated cap via rights
+intersection + minter-assigned badge (D17). ObserverInstallCap: install source
+cap into target Observer's table; Space caps additionally trigger
+map_space_in_observer (D24 invariant). ObserverWriteRegisters/ReadRegisters:
+batch operation on full 816-byte RegisterState; target must be stopped.
+ObserverChangeHandler: overwrites SLOT_FAULT_HANDLER; old handler NOT
+auto-closed (D4).
+
+- **Rests on:** D4, D8, D11, D17, D21, D24, D26, D33, D35, D38, D39, D51, D91.
+- **Status:** settled.
+- **Journal:** `journal/097-cap-table-self-mutation-and-mapping-bridge.md`.
+
+### D98 — Destroy cascade and return
+
+Preemptible cascade (D33): kernel runs N cascade_step() calls per batch, checks
+for pending timer interrupt between batches. Continuation state saved in
+CoreState: (ObjectId, cursor). Destroying Observer is blocked; other Observers
+on the same core run between batches. Destroy return: structural backing becomes
+new Space cap in destroyer's table (D32 reverse type conversion). Cascade-freed
+objects return backing to kernel root pool (D31).
+
+- **Rests on:** D11, D31, D32, D33, D8, A3, A4.
+- **Status:** settled.
+- **Journal:** `journal/098-destroy-cascade-and-return.md`.
+
+### D99 — Hardware event wiring
+
+IRQ delegation: kernel populates IrqRoutingTable at boot with all device INTIDs
+routing to root interrupt Field (badge = INTID). Delegation via FieldSplit
+(D45): split updates routing table entries for affected badge range. IRQ
+acknowledgment: kernel reads IAR, constructs message, enqueues, writes EOI. No
+userspace ack needed (A5). Pulsar deadline installation: installed in creating
+Observer's current core's deadline array (D83). Array full → CreatePulsar fails.
+
+- **Rests on:** D22, D44, D45, D62, D67, D72, D81, D83, A5.
+- **Status:** settled.
+- **Journal:** `journal/099-hardware-event-wiring.md`.
+
+### D100 — Fault delivery mechanics
+
+Fault message register layout follows D28 + D47: x0–x3 = data words per D61
+fault type, x4 = label, x5 = badge, x6 = fault Observer cap, x7 = CAP_ABSENT.
+Fault Observer cap: kernel constructs TransferredCap with 5-right subset
+(RESUME, DESTROY, INSTALL_CAP, WRITE_REGISTERS, READ_REGISTERS). Installed in
+handler's table. Kernel-as-root-fault-handler (D68 chain terminus): log fault to
+serial, PSCI SYSTEM_OFF.
+
+- **Rests on:** D12, D21, D28, D39, D47, D49, D61, D68, D80, A5.
+- **Status:** settled.
+- **Journal:** `journal/100-fault-delivery-mechanics.md`.
+
+### D101 — ASID assignment and TLB invalidation policy
+
+Sequential ASID assignment from kernel counter; maximum hardware width (16-bit
+where supported). No recycling — sequential avoids ABA on stale TLB entries.
+Wrap triggers full TLB broadcast (TLBI VMALLE1IS) and counter reset. TLB
+invalidation on Space unmap (D24): per-VA (TLBI VAE1IS) when page_count <=
+threshold; per-ASID (TLBI ASIDE1IS) for bulk. Always IS variant for cross-core
+broadcast. DSB ISH for completion.
+
+- **Rests on:** D5, D24, D25, D26, D46, D56, D88, D89, D91.
+- **Status:** settled.
+- **Journal:** `journal/101-asid-assignment-and-tlb-invalidation-policy.md`.
+
+### D102 — Test infrastructure and bootstrap patterns
+
+Flat binary format (entry at offset 0, no ELF). Hypervisor loads test binary
+into guest RAM, describes via DTB module node. Kernel binary unchanged across
+tests. Multi-Observer bootstrap: 5-step D35 composable sequence (SpaceSplit →
+CreateObserver → InstallCap → WriteRegisters → Resume). IPC setup: root creates
+Field, installs send cap in child, keeps receive cap.
+
+- **Rests on:** D24, D26, D31, D32, D35, A3, A5.
+- **Status:** settled.
+- **Journal:** `journal/102-test-infrastructure-and-bootstrap-patterns.md`.
 
 ---
 
