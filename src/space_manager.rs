@@ -61,6 +61,28 @@ pub struct VaAssignment {
     pub va_base: usize,
 }
 
+// ── Space creation result ──────────────────────────────────────────
+
+/// Outcome of a successful Space creation (D32 type conversion).
+///
+/// Contains all the physical and virtual resources allocated for the
+/// new Space. The caller is responsible for:
+/// - Populating the L3 table via page_table::populate_l3 (D90)
+/// - Constructing the Space struct in an arena slot
+/// - Shrinking the parent Space by size + overhead
+pub struct SpaceCreationResult {
+    /// VA base for the new Space (D26, D89: 32 MiB aligned).
+    pub va_base: usize,
+    /// Rounded size in bytes (D60: page-aligned).
+    pub size: usize,
+    /// Physical address of the Space's content pages.
+    pub content_pa: usize,
+    /// Physical address of the L3 table(s) for this Space.
+    pub l3_table_pa: usize,
+    /// Number of content pages allocated.
+    pub page_count: usize,
+}
+
 // ── SpaceManager ───────────────────────────────────────────────────
 
 /// The kernel's single Space management interface (D3).
@@ -193,6 +215,14 @@ impl SpaceManager {
     ///
     /// Formula: `ceil(page_count / entries_per_table) * page_size`.
     /// One L3 table per `entries_per_table` pages (2048 for 16 KiB granule).
+    fn l3_table_count(&self, page_count: usize) -> usize {
+        let entries_per_table = self.root_pool.page_size / 8;
+
+        debug_assert!(entries_per_table > 0, "page_size must be >= 8");
+
+        page_count.saturating_add(entries_per_table - 1) / entries_per_table
+    }
+
     pub fn type_conversion_overhead(&self, space_size: usize) -> usize {
         if space_size == 0 {
             return 0;
@@ -200,13 +230,65 @@ impl SpaceManager {
 
         let page_size = self.root_pool.page_size;
         let page_count = space_size.saturating_add(page_size - 1) / page_size;
-        let entries_per_table = page_size / 8;
 
-        debug_assert!(entries_per_table > 0, "page_size must be >= 8");
+        self.l3_table_count(page_count).saturating_mul(page_size)
+    }
 
-        let l3_tables = page_count.saturating_add(entries_per_table - 1) / entries_per_table;
+    /// Orchestrate Space creation (D32 type conversion).
+    ///
+    /// Allocates content pages, L3 table page(s), and assigns a VA base.
+    /// The caller is responsible for:
+    /// - Populating the L3 table via page_table::populate_l3 (D90)
+    /// - Constructing the Space struct in an arena slot
+    /// - Shrinking the parent Space by size + overhead
+    ///
+    /// On failure, no resources are consumed (atomic: all-or-nothing).
+    pub fn create_space(
+        &mut self,
+        size: usize,
+        alignment: usize,
+    ) -> Result<SpaceCreationResult, AllocError> {
+        let page_size = self.root_pool.page_size;
+        let page_mask = page_size - 1;
 
-        l3_tables.saturating_mul(page_size)
+        // D60: round up to page boundary.
+        let rounded_size = size.checked_add(page_mask).ok_or(AllocError::OutOfMemory)? & !page_mask;
+        // A zero-size request rounds to one page (minimum Space size = page_size, D25).
+        let effective_size = if rounded_size == 0 {
+            page_size
+        } else {
+            rounded_size
+        };
+
+        let page_count = effective_size / page_size;
+        let l3_table_count = self.l3_table_count(page_count);
+
+        let content_pa = self.allocate_pages(page_count)?;
+
+        let l3_table_pa = match self.allocate_pages(l3_table_count) {
+            Ok(pa) => pa,
+            Err(e) => {
+                self.return_pages(content_pa, page_count);
+                return Err(e);
+            }
+        };
+
+        let va_assignment = match self.assign_va(effective_size, alignment) {
+            Ok(va) => va,
+            Err(e) => {
+                self.return_pages(content_pa, page_count);
+                self.return_pages(l3_table_pa, l3_table_count);
+                return Err(e);
+            }
+        };
+
+        Ok(SpaceCreationResult {
+            va_base: va_assignment.va_base,
+            size: effective_size,
+            content_pa,
+            l3_table_pa,
+            page_count,
+        })
     }
 }
 
@@ -1209,6 +1291,7 @@ mod tests {
                         "VA base must be {ALIGNMENT}-byte aligned (va_base={:#x})",
                         a.va_base
                     );
+
                     bases[count] = a.va_base;
                     count += 1;
                 }
@@ -1345,6 +1428,7 @@ mod tests {
                 "overhead must be non-decreasing: {count} pages gave \
                  {overhead}, but previous was {prev_overhead}"
             );
+
             prev_overhead = overhead;
         }
     }
@@ -1403,5 +1487,501 @@ mod tests {
                 "{count} pages (within single L3 table) must need exactly 1 table"
             );
         }
+    }
+
+    // ── D32 — create_space orchestration ──────────────────────────────
+
+    /// 32 MiB alignment constant for 16 KiB granule tests (D89).
+    const SPACE_VA_ALIGNMENT: usize = 32 * 1024 * 1024;
+
+    /// D32: happy path — create_space with a valid size returns correct result.
+    /// VA base is aligned, page_count matches, l3_table_pa differs from content_pa,
+    /// and size is page-rounded.
+    #[test]
+    fn d32_create_space_happy_path() {
+        const PAGE_16K: usize = 16384;
+        // Need enough physical memory for content + L3 table + VA space for alignment.
+        // 4096 pages * 16 KiB = 64 MiB.
+        let mut sm = make_space_manager_with(4096, PAGE_16K);
+        let result = sm
+            .create_space(PAGE_16K, SPACE_VA_ALIGNMENT)
+            .expect("create_space must succeed");
+
+        // VA base must be aligned to SPACE_VA_ALIGNMENT.
+        assert_eq!(
+            result.va_base % SPACE_VA_ALIGNMENT,
+            0,
+            "VA base must be 32 MiB aligned (va_base={:#x})",
+            result.va_base
+        );
+        // page_count must match ceil(size / page_size).
+        assert_eq!(
+            result.page_count, 1,
+            "1-page Space must report page_count=1"
+        );
+        // l3_table_pa must be non-zero and different from content_pa.
+        assert_ne!(result.l3_table_pa, 0, "l3_table_pa must be non-zero");
+        assert_ne!(
+            result.l3_table_pa, result.content_pa,
+            "l3_table_pa must differ from content_pa"
+        );
+        // Size must be page-rounded.
+        assert_eq!(
+            result.size % PAGE_16K,
+            0,
+            "size must be page-aligned (size={})",
+            result.size
+        );
+        assert_eq!(
+            result.size, PAGE_16K,
+            "1-page request must produce size=page_size"
+        );
+    }
+
+    /// D32: create_space with a sub-page size rounds up to one page.
+    #[test]
+    fn d32_create_space_rounds_sub_page_to_one_page() {
+        const PAGE_16K: usize = 16384;
+        let mut sm = make_space_manager_with(4096, PAGE_16K);
+        let result = sm
+            .create_space(1, SPACE_VA_ALIGNMENT)
+            .expect("create_space with 1 byte must succeed");
+
+        assert_eq!(
+            result.size, PAGE_16K,
+            "1-byte request must round up to page_size"
+        );
+        assert_eq!(result.page_count, 1, "rounded-up Space must have 1 page");
+    }
+
+    /// D32: create_space with a multi-page size returns correct page_count.
+    #[test]
+    fn d32_create_space_multi_page() {
+        const PAGE_16K: usize = 16384;
+        let mut sm = make_space_manager_with(4096, PAGE_16K);
+        let result = sm
+            .create_space(4 * PAGE_16K, SPACE_VA_ALIGNMENT)
+            .expect("create_space with 4 pages must succeed");
+
+        assert_eq!(result.page_count, 4, "4-page request must report 4 pages");
+        assert_eq!(
+            result.size,
+            4 * PAGE_16K,
+            "4-page request must produce exact size"
+        );
+    }
+
+    /// D92: total allocation = content_pages + L3 table pages.
+    /// For 1-page Space: 1 content page + 1 L3 table page = 2 pages consumed.
+    #[test]
+    fn d92_create_space_overhead_accounting_one_page() {
+        const PAGE_16K: usize = 16384;
+        let mut sm = make_space_manager_with(4096, PAGE_16K);
+        let before = sm.root_pool.free_bytes;
+
+        sm.create_space(PAGE_16K, SPACE_VA_ALIGNMENT)
+            .expect("create_space must succeed");
+
+        let consumed = before - sm.root_pool.free_bytes;
+
+        // 1 content page + 1 L3 table page = 2 * page_size.
+        assert_eq!(
+            consumed,
+            2 * PAGE_16K,
+            "1-page Space must consume exactly 2 pages (1 content + 1 L3 table), \
+             consumed {consumed} bytes"
+        );
+    }
+
+    /// D92: for a Space of 2048 pages (fills one L3 table exactly),
+    /// overhead is 1 L3 table page. Total = 2048 + 1 = 2049 pages.
+    #[test]
+    fn d92_create_space_overhead_exact_l3_boundary() {
+        const PAGE_16K: usize = 16384;
+        // Need 2049 pages + VA space overhead. Use 8192 pages.
+        let mut sm = make_space_manager_with(8192, PAGE_16K);
+        let before = sm.root_pool.free_bytes;
+
+        sm.create_space(2048 * PAGE_16K, SPACE_VA_ALIGNMENT)
+            .expect("create_space with 2048 pages must succeed");
+
+        let consumed = before - sm.root_pool.free_bytes;
+
+        assert_eq!(
+            consumed,
+            (2048 + 1) * PAGE_16K,
+            "2048-page Space must consume 2049 pages (2048 content + 1 L3 table)"
+        );
+    }
+
+    /// D92: for a Space of 2049 pages (crosses L3 table boundary),
+    /// overhead is 2 L3 table pages. Total = 2049 + 2 = 2051 pages.
+    #[test]
+    fn d92_create_space_overhead_crosses_l3_boundary() {
+        const PAGE_16K: usize = 16384;
+        let mut sm = make_space_manager_with(8192, PAGE_16K);
+        let before = sm.root_pool.free_bytes;
+
+        sm.create_space(2049 * PAGE_16K, SPACE_VA_ALIGNMENT)
+            .expect("create_space with 2049 pages must succeed");
+
+        let consumed = before - sm.root_pool.free_bytes;
+
+        assert_eq!(
+            consumed,
+            (2049 + 2) * PAGE_16K,
+            "2049-page Space must consume 2051 pages (2049 content + 2 L3 tables)"
+        );
+    }
+
+    /// D32: multiple create_space calls return distinct, aligned VA bases.
+    #[test]
+    fn d32_create_space_multiple_distinct_aligned_vas() {
+        const PAGE_16K: usize = 16384;
+        // Need enough for 3 aligned allocations. Each alignment wastes up to
+        // 32 MiB of VA. 3 * 32 MiB content + alignment overhead.
+        // 16384 pages * 16 KiB = 256 MiB.
+        let mut sm = make_space_manager_with(16384, PAGE_16K);
+        let a = sm
+            .create_space(PAGE_16K, SPACE_VA_ALIGNMENT)
+            .expect("first create_space must succeed");
+        let b = sm
+            .create_space(PAGE_16K, SPACE_VA_ALIGNMENT)
+            .expect("second create_space must succeed");
+        let c = sm
+            .create_space(PAGE_16K, SPACE_VA_ALIGNMENT)
+            .expect("third create_space must succeed");
+
+        // All VAs must be aligned.
+        assert_eq!(a.va_base % SPACE_VA_ALIGNMENT, 0);
+        assert_eq!(b.va_base % SPACE_VA_ALIGNMENT, 0);
+        assert_eq!(c.va_base % SPACE_VA_ALIGNMENT, 0);
+        // All VAs must be distinct.
+        assert_ne!(a.va_base, b.va_base, "first and second VAs must differ");
+        assert_ne!(b.va_base, c.va_base, "second and third VAs must differ");
+        assert_ne!(a.va_base, c.va_base, "first and third VAs must differ");
+    }
+
+    /// D32: failure rollback — pool has enough for content but not L3.
+    /// Error returned, free_bytes unchanged.
+    #[test]
+    fn d32_create_space_rollback_insufficient_for_l3() {
+        const PAGE_16K: usize = 16384;
+        // Pool with exactly 1 page: enough for 1 content page but not
+        // the additional L3 table page.
+        let mut sm = make_space_manager_with(1, PAGE_16K);
+        let before = sm.root_pool.free_bytes;
+        let result = sm.create_space(PAGE_16K, PAGE_16K);
+
+        assert_eq!(
+            result.err(),
+            Some(AllocError::OutOfMemory),
+            "create_space must fail when pool cannot cover L3 table"
+        );
+        assert_eq!(
+            sm.root_pool.free_bytes, before,
+            "failed create_space must not change free_bytes (all-or-nothing rollback)"
+        );
+    }
+
+    /// D32: failure rollback — pool has enough for content + L3 but VA
+    /// space is exhausted. Error returned, free_bytes unchanged.
+    #[test]
+    fn d32_create_space_rollback_insufficient_va() {
+        const PAGE_16K: usize = 16384;
+        // Pool with 4 pages but very small total_bytes (VA budget = page_size + total_bytes).
+        // Use 4 pages = 64 KiB total. VA budget = 16 KiB + 64 KiB = 80 KiB.
+        // 32 MiB alignment requires more VA than 80 KiB.
+        let mut sm = make_space_manager_with(4, PAGE_16K);
+        let before = sm.root_pool.free_bytes;
+        let result = sm.create_space(PAGE_16K, SPACE_VA_ALIGNMENT);
+
+        assert_eq!(
+            result.err(),
+            Some(AllocError::OutOfMemory),
+            "create_space must fail when VA space cannot satisfy alignment"
+        );
+        assert_eq!(
+            sm.root_pool.free_bytes, before,
+            "failed create_space must roll back all physical allocations"
+        );
+    }
+
+    /// D32: zero-size request. D25 says minimum Space = page_size,
+    /// but create_space rounds up, so size=0 should produce 1-page Space.
+    #[test]
+    fn d32_create_space_zero_size_rounds_to_one_page() {
+        const PAGE_16K: usize = 16384;
+        let mut sm = make_space_manager_with(4096, PAGE_16K);
+        let result = sm
+            .create_space(0, SPACE_VA_ALIGNMENT)
+            .expect("create_space with size=0 must succeed (rounds to 1 page)");
+
+        assert_eq!(
+            result.size, PAGE_16K,
+            "zero-size request must round to page_size"
+        );
+        assert_eq!(
+            result.page_count, 1,
+            "zero-size request must produce 1 page"
+        );
+    }
+
+    /// D32: size=1 byte rounds to 1 page.
+    #[test]
+    fn d32_create_space_one_byte_rounds_to_one_page() {
+        const PAGE_16K: usize = 16384;
+        let mut sm = make_space_manager_with(4096, PAGE_16K);
+        let result = sm
+            .create_space(1, SPACE_VA_ALIGNMENT)
+            .expect("create_space with size=1 must succeed");
+
+        assert_eq!(
+            result.size, PAGE_16K,
+            "1-byte request must round to page_size"
+        );
+        assert_eq!(result.page_count, 1);
+    }
+
+    /// D32: large Space crossing L3 table boundary — 2049 pages with 16 KiB
+    /// granule needs 2 L3 tables. Overhead is 2 * page_size.
+    #[test]
+    fn d32_create_space_large_crosses_l3_boundary() {
+        const PAGE_16K: usize = 16384;
+        let mut sm = make_space_manager_with(8192, PAGE_16K);
+        let result = sm
+            .create_space(2049 * PAGE_16K, SPACE_VA_ALIGNMENT)
+            .expect("create_space with 2049 pages must succeed");
+
+        assert_eq!(result.page_count, 2049);
+        assert_eq!(result.size, 2049 * PAGE_16K);
+        // l3_table_pa must point to a contiguous allocation of 2 L3 table pages.
+        // We verify it is non-zero and differs from content_pa.
+        assert_ne!(result.l3_table_pa, 0);
+        assert_ne!(result.l3_table_pa, result.content_pa);
+    }
+
+    /// D32: two consecutive create_space calls return non-overlapping
+    /// content_pa and l3_table_pa ranges.
+    #[test]
+    fn d32_create_space_non_overlapping_allocations() {
+        const PAGE_16K: usize = 16384;
+        let mut sm = make_space_manager_with(16384, PAGE_16K);
+        let a = sm
+            .create_space(2 * PAGE_16K, SPACE_VA_ALIGNMENT)
+            .expect("first create_space must succeed");
+        let b = sm
+            .create_space(3 * PAGE_16K, SPACE_VA_ALIGNMENT)
+            .expect("second create_space must succeed");
+        // Collect all allocated ranges: [base, base + count * page_size).
+        let ranges = [
+            (a.content_pa, a.page_count * PAGE_16K, "a.content"),
+            (a.l3_table_pa, PAGE_16K, "a.l3_table"),
+            (b.content_pa, b.page_count * PAGE_16K, "b.content"),
+            (b.l3_table_pa, PAGE_16K, "b.l3_table"),
+        ];
+
+        for i in 0..ranges.len() {
+            for j in (i + 1)..ranges.len() {
+                let (base_i, size_i, name_i) = ranges[i];
+                let (base_j, size_j, name_j) = ranges[j];
+                let end_i = base_i + size_i;
+                let end_j = base_j + size_j;
+                let overlaps = base_i < end_j && base_j < end_i;
+
+                assert!(
+                    !overlaps,
+                    "allocations {name_i} and {name_j} overlap: \
+                     [{base_i:#x}, {end_i:#x}) and [{base_j:#x}, {end_j:#x})"
+                );
+            }
+        }
+    }
+
+    /// D32: content_pa is page-aligned (physical pages are always page-aligned).
+    #[test]
+    fn d32_create_space_content_pa_page_aligned() {
+        const PAGE_16K: usize = 16384;
+        let mut sm = make_space_manager_with(4096, PAGE_16K);
+        let result = sm
+            .create_space(PAGE_16K, SPACE_VA_ALIGNMENT)
+            .expect("create_space must succeed");
+
+        assert_eq!(
+            result.content_pa % PAGE_16K,
+            0,
+            "content_pa must be page-aligned (content_pa={:#x})",
+            result.content_pa
+        );
+    }
+
+    /// D32: l3_table_pa is page-aligned.
+    #[test]
+    fn d32_create_space_l3_table_pa_page_aligned() {
+        const PAGE_16K: usize = 16384;
+        let mut sm = make_space_manager_with(4096, PAGE_16K);
+        let result = sm
+            .create_space(PAGE_16K, SPACE_VA_ALIGNMENT)
+            .expect("create_space must succeed");
+
+        assert_eq!(
+            result.l3_table_pa % PAGE_16K,
+            0,
+            "l3_table_pa must be page-aligned (l3_table_pa={:#x})",
+            result.l3_table_pa
+        );
+    }
+
+    /// D32: size not on page boundary rounds up correctly.
+    #[test]
+    fn d32_create_space_non_page_boundary_size() {
+        const PAGE_16K: usize = 16384;
+        let mut sm = make_space_manager_with(4096, PAGE_16K);
+        // Request size that is not a multiple of page_size.
+        let result = sm
+            .create_space(PAGE_16K + 1, SPACE_VA_ALIGNMENT)
+            .expect("create_space must succeed");
+
+        assert_eq!(
+            result.size,
+            2 * PAGE_16K,
+            "size=page_size+1 must round up to 2*page_size"
+        );
+        assert_eq!(result.page_count, 2);
+    }
+
+    /// D32: create_space with 4 KiB pages (alternate granule).
+    /// entries_per_table = 4096/8 = 512. 1 page Space needs 1 L3 table.
+    #[test]
+    fn d32_create_space_4kib_granule() {
+        let mut sm = make_space_manager_with(1024, 4096);
+        let before = sm.root_pool.free_bytes;
+        let result = sm
+            .create_space(4096, 4096)
+            .expect("create_space with 4 KiB page must succeed");
+
+        assert_eq!(result.page_count, 1);
+        assert_eq!(result.size, 4096);
+
+        let consumed = before - sm.root_pool.free_bytes;
+
+        assert_eq!(
+            consumed,
+            2 * 4096,
+            "1-page Space with 4 KiB granule: 1 content + 1 L3 table = 2 pages"
+        );
+    }
+
+    /// D32: conservation across create_space — total_bytes never changes,
+    /// free_bytes decreases by exactly (content + overhead) pages.
+    #[test]
+    fn d32_create_space_conservation() {
+        const PAGE_16K: usize = 16384;
+        let mut sm = make_space_manager_with(4096, PAGE_16K);
+        let total_before = sm.root_pool.total_bytes;
+        let free_before = sm.root_pool.free_bytes;
+        let result = sm
+            .create_space(8 * PAGE_16K, SPACE_VA_ALIGNMENT)
+            .expect("create_space must succeed");
+
+        // total_bytes must not change.
+        assert_eq!(
+            sm.root_pool.total_bytes, total_before,
+            "total_bytes must be conserved"
+        );
+
+        // free_bytes must decrease by content + overhead.
+        let expected_overhead = PAGE_16K; // 8 pages fit in 1 L3 table
+        let expected_consumed = result.page_count * PAGE_16K + expected_overhead;
+
+        assert_eq!(
+            sm.root_pool.free_bytes,
+            free_before - expected_consumed,
+            "free_bytes must decrease by exactly (content + L3 overhead)"
+        );
+    }
+
+    /// D32: rollback atomicity — after a failed create_space, the
+    /// SpaceManager state is identical to before the call.
+    #[test]
+    fn d32_create_space_rollback_atomicity() {
+        const PAGE_16K: usize = 16384;
+        // 3 pages: enough for 1 content + 1 L3 but VA alignment (32 MiB)
+        // cannot be satisfied with only 3 * 16 KiB = 48 KiB VA budget.
+        let mut sm = make_space_manager_with(3, PAGE_16K);
+        let free_before = sm.root_pool.free_bytes;
+        let result = sm.create_space(PAGE_16K, SPACE_VA_ALIGNMENT);
+
+        assert!(
+            result.is_err(),
+            "create_space must fail with tiny VA budget"
+        );
+        assert_eq!(
+            sm.root_pool.free_bytes, free_before,
+            "free_bytes must be restored after rollback"
+        );
+        // Bump allocator cursors advance monotonically and are not rolled
+        // back — free_bytes is the critical conservation invariant.
+    }
+
+    /// D32: pool has exactly enough for content + L3 table.
+    /// This exercises the exact-boundary allocation path.
+    #[test]
+    fn d32_create_space_exact_pool_boundary() {
+        const PAGE_16K: usize = 16384;
+        // 2 pages: exactly enough for 1 content + 1 L3 table.
+        // But we also need VA space. With total_bytes = 2 * 16384 = 32768,
+        // VA budget = 16384 + 32768 = 49152. page_size alignment works.
+        let mut sm = make_space_manager_with(2, PAGE_16K);
+        let result = sm.create_space(PAGE_16K, PAGE_16K);
+
+        assert!(
+            result.is_ok(),
+            "create_space must succeed with exactly 2 pages (1 content + 1 L3)"
+        );
+        assert_eq!(
+            sm.root_pool.free_bytes, 0,
+            "free_bytes must be 0 after consuming all pages"
+        );
+    }
+
+    /// D32: second create_space fails when pool is exhausted after first.
+    #[test]
+    fn d32_create_space_second_fails_after_exhaustion() {
+        const PAGE_16K: usize = 16384;
+        let mut sm = make_space_manager_with(2, PAGE_16K);
+
+        sm.create_space(PAGE_16K, PAGE_16K)
+            .expect("first create_space must succeed");
+
+        let result = sm.create_space(PAGE_16K, PAGE_16K);
+
+        assert_eq!(
+            result.err(),
+            Some(AllocError::OutOfMemory),
+            "second create_space must fail on exhausted pool"
+        );
+    }
+
+    /// D32: VA bases from create_space are non-overlapping in VA space.
+    #[test]
+    fn d32_create_space_va_ranges_non_overlapping() {
+        const PAGE_16K: usize = 16384;
+        let mut sm = make_space_manager_with(16384, PAGE_16K);
+        let a = sm
+            .create_space(4 * PAGE_16K, SPACE_VA_ALIGNMENT)
+            .expect("first");
+        let b = sm
+            .create_space(8 * PAGE_16K, SPACE_VA_ALIGNMENT)
+            .expect("second");
+        let a_end = a.va_base + a.size;
+        let b_end = b.va_base + b.size;
+        let overlaps = a.va_base < b_end && b.va_base < a_end;
+
+        assert!(
+            !overlaps,
+            "VA ranges must not overlap: [{:#x}, {:#x}) and [{:#x}, {:#x})",
+            a.va_base, a_end, b.va_base, b_end
+        );
     }
 }

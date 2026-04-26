@@ -229,6 +229,22 @@ pub fn l2_is_empty(l2: &[u64; ENTRIES_PER_TABLE]) -> bool {
     l2.iter().all(|&e| e == 0)
 }
 
+/// Count valid table descriptors in an L2 table.
+///
+/// Useful for assertions that verify the number of Spaces mapped
+/// into an Observer's address space.
+pub fn count_valid_l2_entries(l2: &[u64; ENTRIES_PER_TABLE]) -> usize {
+    l2.iter().filter(|&&e| is_valid_table(e)).count()
+}
+
+/// Count valid page descriptors in an L3 table.
+///
+/// Useful for assertions that verify how many pages a Space has
+/// mapped after populate, split, or partial unmap operations.
+pub fn count_valid_l3_pages(l3: &[u64; ENTRIES_PER_TABLE]) -> usize {
+    l3.iter().filter(|&&e| is_valid_page(e)).count()
+}
+
 // ── Range validation ───────────────────────────────────────────────
 
 /// Errors from page table mapping operations.
@@ -603,9 +619,7 @@ mod tests {
 
         populate_l3(&mut l3, 0x8000_0000, 10);
 
-        let valid_count = l3.iter().filter(|&&e| is_valid_page(e)).count();
-
-        assert_eq!(valid_count, 10);
+        assert_eq!(count_valid_l3_pages(&l3), 10);
     }
 
     #[test]
@@ -650,10 +664,9 @@ mod tests {
 
         populate_l3(&mut l3, 0x8000_0000, ENTRIES_PER_TABLE + 100);
 
-        let valid_count = l3.iter().filter(|&&e| is_valid_page(e)).count();
-
         assert_eq!(
-            valid_count, ENTRIES_PER_TABLE,
+            count_valid_l3_pages(&l3),
+            ENTRIES_PER_TABLE,
             "page_count exceeding ENTRIES_PER_TABLE must be clamped"
         );
     }
@@ -1230,6 +1243,593 @@ mod tests {
         assert!(is_empty, "removing from empty table must return true");
     }
 
+    // ── D91: count helpers ────────────────────────────────────────
+
+    #[test]
+    fn d91_count_valid_l2_entries_empty() {
+        let l2 = [0u64; ENTRIES_PER_TABLE];
+
+        assert_eq!(count_valid_l2_entries(&l2), 0);
+    }
+
+    #[test]
+    fn d91_count_valid_l2_entries_after_installs() {
+        let mut l2 = [0u64; ENTRIES_PER_TABLE];
+
+        install_space_in_l2(&mut l2, 0, 0x7000_0000);
+        install_space_in_l2(&mut l2, SPACE_VA_ALIGNMENT, 0x8000_0000);
+        install_space_in_l2(&mut l2, 2 * SPACE_VA_ALIGNMENT, 0x9000_0000);
+
+        assert_eq!(count_valid_l2_entries(&l2), 3);
+    }
+
+    #[test]
+    fn d91_count_valid_l3_pages_empty() {
+        let l3 = [0u64; ENTRIES_PER_TABLE];
+
+        assert_eq!(count_valid_l3_pages(&l3), 0);
+    }
+
+    #[test]
+    fn d91_count_valid_l3_pages_after_populate() {
+        let mut l3 = [0u64; ENTRIES_PER_TABLE];
+
+        populate_l3(&mut l3, 0x8000_0000, 512);
+
+        assert_eq!(count_valid_l3_pages(&l3), 512);
+    }
+
+    // ── D91 Integration: full cap-to-mapping lifecycle ────────────
+
+    /// Scenario (a): Single Observer, single Space — full lifecycle.
+    ///
+    /// Simulates the complete D91 protocol: allocate tables, populate
+    /// L3, check L1 → install L2, check duplicate → install Space,
+    /// verify, unmap, free, verify clean.
+    #[test]
+    fn d91_integration_single_observer_single_space_full_lifecycle() {
+        // Allocate all page tables (stack-allocated, zeroed)
+        let mut l1 = [0u64; ENTRIES_PER_TABLE];
+        let mut l2 = [0u64; ENTRIES_PER_TABLE];
+        let mut l3 = [0u64; ENTRIES_PER_TABLE];
+        // Fake PAs — building blocks store these in descriptors but never
+        // dereference them, so any page-aligned value works for testing.
+        let l2_pa: u64 = 0x0010_0000;
+        let l3_pa: u64 = 0x0020_0000;
+        let space_pa_base: u64 = 0x4000_0000;
+        let space_page_count = 256;
+        let va = 0usize; // L1 index 0, L2 index 0
+
+        // ── Step 1: Populate L3 with the Space's physical pages (D90) ──
+        populate_l3(&mut l3, space_pa_base, space_page_count);
+
+        assert_eq!(count_valid_l3_pages(&l3), space_page_count);
+        // Spot-check first and last page
+        assert_eq!(page_address(l3[0]), space_pa_base);
+        assert_eq!(
+            page_address(l3[space_page_count - 1]),
+            space_pa_base + ((space_page_count - 1) as u64) * (PAGE_SIZE as u64)
+        );
+        // ── Step 2: Check L1 — no L2 yet ──
+        assert_eq!(l1_l2_table_pa(&l1, va), None, "L1 must start empty");
+
+        // ── Step 3: Allocate and install L2 in L1 ──
+        install_l2_in_l1(&mut l1, va, l2_pa);
+
+        assert_eq!(l1_l2_table_pa(&l1, va), Some(l2_pa));
+        // ── Step 4: Check for duplicate (D91) — no existing mapping ──
+        assert!(
+            !l2_maps_space(&l2, va, l3_pa),
+            "Space not yet installed — duplicate check must return false"
+        );
+
+        // ── Step 5: Install Space's L3 table in L2 ──
+        install_space_in_l2(&mut l2, va, l3_pa);
+
+        assert!(
+            l2_maps_space(&l2, va, l3_pa),
+            "Observer must now see the Space"
+        );
+        assert_eq!(count_valid_l2_entries(&l2), 1);
+
+        // ── Step 6: Unmap — remove Space from L2 ──
+        let l2_empty = remove_space_from_l2(&mut l2, va);
+
+        assert!(l2_empty, "L2 had one entry, must be empty after removal");
+        assert!(
+            !l2_maps_space(&l2, va, l3_pa),
+            "Space must no longer be visible"
+        );
+
+        // ── Step 7: Free L2 — remove from L1 ──
+        remove_l2_from_l1(&mut l1, va);
+
+        assert_eq!(l1_l2_table_pa(&l1, va), None, "L1 must be clean");
+        // ── Step 8: Verify fully clean state ──
+        assert!(l2_is_empty(&l2));
+        assert_eq!(l1[l1_index(va)], 0);
+        // L3 retains its pages (Space still exists, just unmapped from this Observer)
+        assert_eq!(count_valid_l3_pages(&l3), space_page_count);
+    }
+
+    /// Scenario (b): Single Observer, three Spaces — install and selective unmap.
+    ///
+    /// Three Spaces at 0, 32 MiB, 64 MiB share the same L2 table.
+    /// Unmap the middle one: L2 not empty. Unmap remaining: last returns true.
+    #[test]
+    fn d91_integration_three_spaces_selective_unmap() {
+        let mut l1 = [0u64; ENTRIES_PER_TABLE];
+        let mut l2 = [0u64; ENTRIES_PER_TABLE];
+        let mut l3_a = [0u64; ENTRIES_PER_TABLE];
+        let mut l3_b = [0u64; ENTRIES_PER_TABLE];
+        let mut l3_c = [0u64; ENTRIES_PER_TABLE];
+        let l2_pa: u64 = 0x0010_0000;
+        let l3_pa_a: u64 = 0x0020_0000;
+        let l3_pa_b: u64 = 0x0030_0000;
+        let l3_pa_c: u64 = 0x0040_0000;
+        let va_a = 0usize;
+        let va_b = SPACE_VA_ALIGNMENT; // 32 MiB
+        let va_c = 2 * SPACE_VA_ALIGNMENT; // 64 MiB
+
+        // All three VAs have L1 index 0 — they share the same L2
+        assert_eq!(l1_index(va_a), 0);
+        assert_eq!(l1_index(va_b), 0);
+        assert_eq!(l1_index(va_c), 0);
+
+        // Populate each Space's L3 table
+        populate_l3(&mut l3_a, 0x4000_0000, 100);
+        populate_l3(&mut l3_b, 0x5000_0000, 200);
+        populate_l3(&mut l3_c, 0x6000_0000, 50);
+        // Install L2 in L1 (once, since all three share the same L1 index)
+        install_l2_in_l1(&mut l1, va_a, l2_pa);
+        // Install all three Spaces in L2
+        install_space_in_l2(&mut l2, va_a, l3_pa_a);
+        install_space_in_l2(&mut l2, va_b, l3_pa_b);
+        install_space_in_l2(&mut l2, va_c, l3_pa_c);
+
+        assert_eq!(count_valid_l2_entries(&l2), 3);
+        assert!(l2_maps_space(&l2, va_a, l3_pa_a));
+        assert!(l2_maps_space(&l2, va_b, l3_pa_b));
+        assert!(l2_maps_space(&l2, va_c, l3_pa_c));
+
+        // ── Unmap the middle Space (B) ──
+        let l2_empty = remove_space_from_l2(&mut l2, va_b);
+
+        assert!(!l2_empty, "two Spaces remain — L2 must not be empty");
+        assert!(!l2_maps_space(&l2, va_b, l3_pa_b), "B must be gone");
+        assert!(l2_maps_space(&l2, va_a, l3_pa_a), "A must survive");
+        assert!(l2_maps_space(&l2, va_c, l3_pa_c), "C must survive");
+        assert_eq!(count_valid_l2_entries(&l2), 2);
+
+        // ── Unmap Space A ──
+        let l2_empty = remove_space_from_l2(&mut l2, va_a);
+
+        assert!(!l2_empty, "one Space remains — L2 must not be empty");
+        assert_eq!(count_valid_l2_entries(&l2), 1);
+
+        // ── Unmap Space C (last one) ──
+        let l2_empty = remove_space_from_l2(&mut l2, va_c);
+
+        assert!(l2_empty, "last Space removed — L2 must be empty");
+        assert_eq!(count_valid_l2_entries(&l2), 0);
+
+        // Clean up L1
+        remove_l2_from_l1(&mut l1, va_a);
+
+        assert_eq!(l1_l2_table_pa(&l1, va_a), None);
+        // L3 tables still have their pages (Spaces still exist as objects)
+        assert_eq!(count_valid_l3_pages(&l3_a), 100);
+        assert_eq!(count_valid_l3_pages(&l3_b), 200);
+        assert_eq!(count_valid_l3_pages(&l3_c), 50);
+    }
+
+    /// Scenario (c): Two Observers sharing a Space (D26/D89).
+    ///
+    /// Two L1 tables, two L2 tables, ONE shared L3 table. Both Observers
+    /// install the same Space. Unmapping from Observer A does not affect B.
+    #[test]
+    fn d91_integration_two_observers_shared_space() {
+        // Observer A's page tables
+        let mut l1_a = [0u64; ENTRIES_PER_TABLE];
+        let mut l2_a = [0u64; ENTRIES_PER_TABLE];
+        // Observer B's page tables
+        let mut l1_b = [0u64; ENTRIES_PER_TABLE];
+        let mut l2_b = [0u64; ENTRIES_PER_TABLE];
+        // Shared Space's L3 table
+        let mut l3_shared = [0u64; ENTRIES_PER_TABLE];
+        let l2_pa_a: u64 = 0x0010_0000;
+        let l2_pa_b: u64 = 0x0014_0000;
+        let shared_l3_pa: u64 = 0x0020_0000;
+        let va = SPACE_VA_ALIGNMENT; // Both Observers map the Space at the same VA
+
+        // Populate the shared L3 table (D90)
+        populate_l3(&mut l3_shared, 0x8000_0000, 1024);
+
+        assert_eq!(count_valid_l3_pages(&l3_shared), 1024);
+        // ── Observer A installs the Space ──
+        assert_eq!(l1_l2_table_pa(&l1_a, va), None);
+
+        install_l2_in_l1(&mut l1_a, va, l2_pa_a);
+
+        assert!(!l2_maps_space(&l2_a, va, shared_l3_pa));
+
+        install_space_in_l2(&mut l2_a, va, shared_l3_pa);
+
+        // ── Observer B installs the same Space ──
+        assert_eq!(l1_l2_table_pa(&l1_b, va), None);
+
+        install_l2_in_l1(&mut l1_b, va, l2_pa_b);
+
+        assert!(!l2_maps_space(&l2_b, va, shared_l3_pa));
+
+        install_space_in_l2(&mut l2_b, va, shared_l3_pa);
+
+        // ── Both Observers can see the Space ──
+        assert!(l2_maps_space(&l2_a, va, shared_l3_pa));
+        assert!(l2_maps_space(&l2_b, va, shared_l3_pa));
+        // Both L2 entries point to the SAME L3 PA — the subtree sharing model
+        assert_eq!(table_address(l2_a[l2_index(va)]), shared_l3_pa);
+        assert_eq!(table_address(l2_b[l2_index(va)]), shared_l3_pa);
+
+        // ── Unmap from Observer A ──
+        let l2_a_empty = remove_space_from_l2(&mut l2_a, va);
+
+        assert!(l2_a_empty);
+
+        remove_l2_from_l1(&mut l1_a, va);
+
+        // Observer A is clean
+        assert!(!l2_maps_space(&l2_a, va, shared_l3_pa));
+        assert_eq!(l1_l2_table_pa(&l1_a, va), None);
+        // Observer B still has the mapping — completely unaffected
+        assert!(l2_maps_space(&l2_b, va, shared_l3_pa));
+        assert_eq!(l1_l2_table_pa(&l1_b, va), Some(l2_pa_b));
+        // Shared L3 table is untouched (Space is still alive)
+        assert_eq!(count_valid_l3_pages(&l3_shared), 1024);
+
+        // ── Unmap from Observer B ──
+        let l2_b_empty = remove_space_from_l2(&mut l2_b, va);
+
+        assert!(l2_b_empty);
+
+        remove_l2_from_l1(&mut l1_b, va);
+
+        // Both Observers are now clean
+        assert_eq!(l1_l2_table_pa(&l1_a, va), None);
+        assert_eq!(l1_l2_table_pa(&l1_b, va), None);
+        assert!(l2_is_empty(&l2_a));
+        assert!(l2_is_empty(&l2_b));
+        // L3 still exists (Space object isn't destroyed by unmapping)
+        assert_eq!(count_valid_l3_pages(&l3_shared), 1024);
+    }
+
+    /// Scenario (d): Duplicate cap detection (D91).
+    ///
+    /// Observer holds two caps to the same Space. On second install,
+    /// l2_maps_space detects the duplicate. On close, only the last
+    /// cap triggers unmap.
+    #[test]
+    fn d91_integration_duplicate_cap_detection() {
+        let mut l1 = [0u64; ENTRIES_PER_TABLE];
+        let mut l2 = [0u64; ENTRIES_PER_TABLE];
+        let mut l3 = [0u64; ENTRIES_PER_TABLE];
+        let l2_pa: u64 = 0x0010_0000;
+        let l3_pa: u64 = 0x0020_0000;
+        let va = 0usize;
+
+        populate_l3(&mut l3, 0x8000_0000, 512);
+        // ── First cap: install ──
+        install_l2_in_l1(&mut l1, va, l2_pa);
+
+        assert!(!l2_maps_space(&l2, va, l3_pa), "no mapping yet");
+
+        install_space_in_l2(&mut l2, va, l3_pa);
+
+        assert!(l2_maps_space(&l2, va, l3_pa));
+
+        // ── Second cap (e.g., attenuated clone per D52): ──
+        // The kernel checks l2_maps_space BEFORE installing. Since the
+        // Space is already mapped at this VA, no page table work is needed.
+        let already_mapped = l2_maps_space(&l2, va, l3_pa);
+
+        assert!(
+            already_mapped,
+            "duplicate cap must be detected — no page table work needed"
+        );
+        // No install_space_in_l2 call — the mapping already exists.
+        // The L2 table still has exactly one valid entry (not two).
+        assert_eq!(count_valid_l2_entries(&l2), 1);
+        // ── Close first cap: another cap still references this Space ──
+        // Kernel scans cap table, finds the second cap — no unmap.
+        assert!(
+            l2_maps_space(&l2, va, l3_pa),
+            "mapping must survive while any cap to this Space exists"
+        );
+
+        // ── Close second cap: last reference, trigger unmap ──
+        let l2_empty = remove_space_from_l2(&mut l2, va);
+
+        assert!(l2_empty);
+
+        remove_l2_from_l1(&mut l1, va);
+
+        // Fully clean
+        assert_eq!(l1_l2_table_pa(&l1, va), None);
+        assert!(l2_is_empty(&l2));
+    }
+
+    /// Scenario (e): Space split (D41) — L3 table update.
+    ///
+    /// Original Space has a full L3 table. Split moves the upper half
+    /// to a new Space. The original's cleared entries become invalid.
+    /// The new Space gets its own L3 table with the moved pages.
+    #[test]
+    fn d91_integration_space_split_l3_update() {
+        // Original Space: full L3 table
+        let mut l3_original = [0u64; ENTRIES_PER_TABLE];
+        let pa_base: u64 = 0x8000_0000;
+
+        populate_l3(&mut l3_original, pa_base, ENTRIES_PER_TABLE);
+
+        assert_eq!(count_valid_l3_pages(&l3_original), ENTRIES_PER_TABLE);
+
+        // ── Split at the midpoint ──
+        // Pages [0..1024) stay in original, pages [1024..2048) move to new Space.
+        let split_index = ENTRIES_PER_TABLE / 2;
+        // New Space's L3 table: populated with the moved pages
+        let mut l3_new = [0u64; ENTRIES_PER_TABLE];
+        let new_pa_base = pa_base + (split_index as u64) * (PAGE_SIZE as u64);
+
+        populate_l3(&mut l3_new, new_pa_base, ENTRIES_PER_TABLE - split_index);
+
+        // Clear moved pages from original L3
+        for i in split_index..ENTRIES_PER_TABLE {
+            clear_page_entry(&mut l3_original, i);
+        }
+
+        // ── Verify original: only lower half remains ──
+        assert_eq!(count_valid_l3_pages(&l3_original), split_index);
+
+        for i in 0..split_index {
+            assert!(
+                is_valid_page(l3_original[i]),
+                "original entry {i} must remain valid"
+            );
+
+            let expected_pa = pa_base + (i as u64) * (PAGE_SIZE as u64);
+
+            assert_eq!(page_address(l3_original[i]), expected_pa);
+        }
+        for i in split_index..ENTRIES_PER_TABLE {
+            assert!(
+                !is_valid_page(l3_original[i]),
+                "moved entry {i} must be invalid"
+            );
+        }
+
+        // ── Verify new Space: upper half pages ──
+        assert_eq!(
+            count_valid_l3_pages(&l3_new),
+            ENTRIES_PER_TABLE - split_index
+        );
+
+        for i in 0..(ENTRIES_PER_TABLE - split_index) {
+            assert!(
+                is_valid_page(l3_new[i]),
+                "new Space entry {i} must be valid"
+            );
+
+            let expected_pa = new_pa_base + (i as u64) * (PAGE_SIZE as u64);
+
+            assert_eq!(page_address(l3_new[i]), expected_pa);
+        }
+
+        // The two L3 tables together account for all original pages
+        assert_eq!(
+            count_valid_l3_pages(&l3_original) + count_valid_l3_pages(&l3_new),
+            ENTRIES_PER_TABLE,
+            "split must preserve total page count"
+        );
+    }
+
+    /// Scenario (f): Cross-region mapping (two different L1 indices).
+    ///
+    /// Space A at VA 0 (L1 index 0), Space B at VA 64 GiB (L1 index 1).
+    /// Each needs its own L2 table. Unmapping A leaves B intact.
+    #[test]
+    fn d91_integration_cross_region_mapping() {
+        let mut l1 = [0u64; ENTRIES_PER_TABLE];
+        let mut l2_region0 = [0u64; ENTRIES_PER_TABLE];
+        let mut l2_region1 = [0u64; ENTRIES_PER_TABLE];
+        let mut l3_a = [0u64; ENTRIES_PER_TABLE];
+        let mut l3_b = [0u64; ENTRIES_PER_TABLE];
+        let l2_pa_region0: u64 = 0x0010_0000;
+        let l2_pa_region1: u64 = 0x0014_0000;
+        let l3_pa_a: u64 = 0x0020_0000;
+        let l3_pa_b: u64 = 0x0030_0000;
+        let va_a = 0usize; // L1 index 0
+        let va_b = 64 * 1024 * 1024 * 1024usize; // L1 index 1
+
+        assert_eq!(l1_index(va_a), 0);
+        assert_eq!(l1_index(va_b), 1);
+
+        // Populate both Spaces
+        populate_l3(&mut l3_a, 0x4000_0000, 100);
+        populate_l3(&mut l3_b, 0x5000_0000, 200);
+        // ── Install Space A (region 0) ──
+        install_l2_in_l1(&mut l1, va_a, l2_pa_region0);
+        install_space_in_l2(&mut l2_region0, va_a, l3_pa_a);
+        // ── Install Space B (region 1) ──
+        install_l2_in_l1(&mut l1, va_b, l2_pa_region1);
+        install_space_in_l2(&mut l2_region1, va_b, l3_pa_b);
+
+        // Both L1 entries point to different L2 tables
+        assert_eq!(l1_l2_table_pa(&l1, va_a), Some(l2_pa_region0));
+        assert_eq!(l1_l2_table_pa(&l1, va_b), Some(l2_pa_region1));
+        assert_ne!(
+            table_address(l1[l1_index(va_a)]),
+            table_address(l1[l1_index(va_b)]),
+            "L1 entries must point to different L2 tables"
+        );
+        // Both Spaces visible
+        assert!(l2_maps_space(&l2_region0, va_a, l3_pa_a));
+        assert!(l2_maps_space(&l2_region1, va_b, l3_pa_b));
+
+        // ── Unmap Space A (region 0 only) ──
+        let l2_empty = remove_space_from_l2(&mut l2_region0, va_a);
+
+        assert!(l2_empty);
+
+        remove_l2_from_l1(&mut l1, va_a);
+
+        // L1[0] cleared, L1[1] still valid
+        assert_eq!(l1_l2_table_pa(&l1, va_a), None, "region 0 must be cleared");
+        assert_eq!(
+            l1_l2_table_pa(&l1, va_b),
+            Some(l2_pa_region1),
+            "region 1 must survive"
+        );
+        // Space B still mapped
+        assert!(l2_maps_space(&l2_region1, va_b, l3_pa_b));
+
+        // ── Clean up Space B ──
+        let l2_empty = remove_space_from_l2(&mut l2_region1, va_b);
+
+        assert!(l2_empty);
+
+        remove_l2_from_l1(&mut l1, va_b);
+
+        assert_eq!(l1_l2_table_pa(&l1, va_b), None);
+    }
+
+    /// Scenario: Space split at non-midpoint boundary with Observer verification.
+    ///
+    /// Combines D41 split with D91 Observer mapping — after split, the
+    /// Observer's L2 must reference updated L3 tables.
+    #[test]
+    fn d91_integration_split_with_observer_remapping() {
+        let mut l1 = [0u64; ENTRIES_PER_TABLE];
+        let mut l2 = [0u64; ENTRIES_PER_TABLE];
+        let mut l3_original = [0u64; ENTRIES_PER_TABLE];
+        let l2_pa: u64 = 0x0010_0000;
+        let l3_pa_original: u64 = 0x0020_0000;
+        let l3_pa_split: u64 = 0x0030_0000;
+        let va = 0usize;
+        let pa_base: u64 = 0x8000_0000;
+        let total_pages = 1500;
+
+        // Populate original Space and map it
+        populate_l3(&mut l3_original, pa_base, total_pages);
+        install_l2_in_l1(&mut l1, va, l2_pa);
+        install_space_in_l2(&mut l2, va, l3_pa_original);
+
+        assert!(l2_maps_space(&l2, va, l3_pa_original));
+        assert_eq!(count_valid_l3_pages(&l3_original), total_pages);
+
+        // ── Split: pages [1000..1500) move to new Space ──
+        let split_at = 1000;
+        let moved_count = total_pages - split_at;
+        let mut l3_split = [0u64; ENTRIES_PER_TABLE];
+        let split_pa_base = pa_base + (split_at as u64) * (PAGE_SIZE as u64);
+
+        populate_l3(&mut l3_split, split_pa_base, moved_count);
+
+        // Clear moved pages from original
+        for i in split_at..total_pages {
+            clear_page_entry(&mut l3_original, i);
+        }
+
+        assert_eq!(count_valid_l3_pages(&l3_original), split_at);
+        assert_eq!(count_valid_l3_pages(&l3_split), moved_count);
+        // Original mapping still valid (same L3 PA, just fewer entries)
+        assert!(l2_maps_space(&l2, va, l3_pa_original));
+
+        // Install new Space at the next L2 slot
+        let va_split = SPACE_VA_ALIGNMENT;
+
+        install_space_in_l2(&mut l2, va_split, l3_pa_split);
+
+        // Both Spaces now visible to Observer
+        assert!(l2_maps_space(&l2, va, l3_pa_original));
+        assert!(l2_maps_space(&l2, va_split, l3_pa_split));
+        assert_eq!(count_valid_l2_entries(&l2), 2);
+    }
+
+    /// Scenario: Multiple Observers, each with multiple Spaces, selective teardown.
+    ///
+    /// Exercises the full protocol across two Observers with overlapping
+    /// and non-overlapping Space sets.
+    #[test]
+    fn d91_integration_multi_observer_multi_space_teardown() {
+        // Observer A: Spaces at VA 0, 32 MiB, 64 MiB
+        let mut l1_a = [0u64; ENTRIES_PER_TABLE];
+        let mut l2_a = [0u64; ENTRIES_PER_TABLE];
+        // Observer B: Spaces at VA 0 (shared!), 32 MiB (different Space)
+        let mut l1_b = [0u64; ENTRIES_PER_TABLE];
+        let mut l2_b = [0u64; ENTRIES_PER_TABLE];
+        // Shared Space (S1) and Observer-specific Spaces (S2, S3, S4)
+        let mut l3_s1 = [0u64; ENTRIES_PER_TABLE]; // shared between A and B
+        let mut l3_s2 = [0u64; ENTRIES_PER_TABLE]; // A only
+        let mut l3_s3 = [0u64; ENTRIES_PER_TABLE]; // A only
+        let mut l3_s4 = [0u64; ENTRIES_PER_TABLE]; // B only
+        let l2_pa_a: u64 = 0x0010_0000;
+        let l2_pa_b: u64 = 0x0014_0000;
+        let l3_pa_s1: u64 = 0x0020_0000; // shared
+        let l3_pa_s2: u64 = 0x0024_0000;
+        let l3_pa_s3: u64 = 0x0028_0000;
+        let l3_pa_s4: u64 = 0x002C_0000;
+        let va_0 = 0usize;
+        let va_32m = SPACE_VA_ALIGNMENT;
+        let va_64m = 2 * SPACE_VA_ALIGNMENT;
+
+        // Populate all Spaces
+        populate_l3(&mut l3_s1, 0x4000_0000, 500);
+        populate_l3(&mut l3_s2, 0x5000_0000, 300);
+        populate_l3(&mut l3_s3, 0x6000_0000, 100);
+        populate_l3(&mut l3_s4, 0x7000_0000, 400);
+        // ── Install for Observer A ──
+        install_l2_in_l1(&mut l1_a, va_0, l2_pa_a);
+        install_space_in_l2(&mut l2_a, va_0, l3_pa_s1); // S1 shared
+        install_space_in_l2(&mut l2_a, va_32m, l3_pa_s2); // S2
+        install_space_in_l2(&mut l2_a, va_64m, l3_pa_s3); // S3
+        // ── Install for Observer B ──
+        install_l2_in_l1(&mut l1_b, va_0, l2_pa_b);
+        install_space_in_l2(&mut l2_b, va_0, l3_pa_s1); // S1 shared (same L3!)
+        install_space_in_l2(&mut l2_b, va_32m, l3_pa_s4); // S4 (different from A)
+
+        assert_eq!(count_valid_l2_entries(&l2_a), 3);
+        assert_eq!(count_valid_l2_entries(&l2_b), 2);
+        // Both A and B point to same L3 for S1
+        assert!(l2_maps_space(&l2_a, va_0, l3_pa_s1));
+        assert!(l2_maps_space(&l2_b, va_0, l3_pa_s1));
+        // But different L3 at va_32m
+        assert!(l2_maps_space(&l2_a, va_32m, l3_pa_s2));
+        assert!(l2_maps_space(&l2_b, va_32m, l3_pa_s4));
+
+        // ── Tear down Observer A completely ──
+        let _ = remove_space_from_l2(&mut l2_a, va_0);
+        let _ = remove_space_from_l2(&mut l2_a, va_32m);
+        let l2_a_empty = remove_space_from_l2(&mut l2_a, va_64m);
+
+        assert!(l2_a_empty);
+
+        remove_l2_from_l1(&mut l1_a, va_0);
+
+        // Observer A is fully clean
+        assert!(l2_is_empty(&l2_a));
+        assert_eq!(l1_l2_table_pa(&l1_a, va_0), None);
+        // Observer B is completely unaffected
+        assert_eq!(count_valid_l2_entries(&l2_b), 2);
+        assert!(l2_maps_space(&l2_b, va_0, l3_pa_s1));
+        assert!(l2_maps_space(&l2_b, va_32m, l3_pa_s4));
+        assert_eq!(l1_l2_table_pa(&l1_b, va_0), Some(l2_pa_b));
+        // All L3 tables remain intact
+        assert_eq!(count_valid_l3_pages(&l3_s1), 500);
+        assert_eq!(count_valid_l3_pages(&l3_s2), 300);
+        assert_eq!(count_valid_l3_pages(&l3_s3), 100);
+        assert_eq!(count_valid_l3_pages(&l3_s4), 400);
+    }
+
     #[test]
     fn d89_l1_index_at_user_va_end_boundary() {
         // Just below USER_VA_END: L1 index should be valid
@@ -1260,10 +1860,9 @@ mod tests {
         // usize::MAX should clamp to ENTRIES_PER_TABLE without overflow
         populate_l3(&mut l3, 0x8000_0000, usize::MAX);
 
-        let valid_count = l3.iter().filter(|&&e| is_valid_page(e)).count();
-
         assert_eq!(
-            valid_count, ENTRIES_PER_TABLE,
+            count_valid_l3_pages(&l3),
+            ENTRIES_PER_TABLE,
             "usize::MAX page_count must clamp to ENTRIES_PER_TABLE"
         );
     }
