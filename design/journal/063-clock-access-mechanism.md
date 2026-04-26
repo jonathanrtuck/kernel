@@ -25,7 +25,7 @@ mechanism, storage, and constraints were not derived as a single entry.
 
 ## Context-switch code shape
 
-```rs
+```rust
 // Context switch: clock access
 // SAFETY: CNTKCTL_EL1.EL0VCTEN controls EL0 virtual counter access.
 // Written before restoring EL0 state to ensure the register is accurate

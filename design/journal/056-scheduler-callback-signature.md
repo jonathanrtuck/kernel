@@ -73,7 +73,7 @@ fast path has already released Arena\<Field\> before the scheduler check).
 
 ### Placement trait
 
-```rs
+```rust
 fn place(&self, observer: &Observer, snapshot: &CoreSnapshot) -> PlacementDecision
 ```
 

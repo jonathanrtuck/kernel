@@ -530,7 +530,7 @@ IPC at rendezvous speed).
 Phase 0 (boot proof) ← FIRST: prove the kernel boots before building on it
   │
 Phase 1 (close stubs) ← mechanical wiring + design decisions
-  ├── 1a SpaceSplit   ─┐
+  ├── 1a SpaceSplit    ─┐
   ├── 1b TimeSplit     ─┤
   ├── 1c ClockRead     ─┤── no inter-dependencies, but 1f and 1g
   ├── 1d ResourceReq   ─┤   both touch core_manager.rs — do sequentially
@@ -539,7 +539,7 @@ Phase 1 (close stubs) ← mechanical wiring + design decisions
   └── 1g Block/unblock ─┘
          │
 Phase 2 (integration tests) ← needs Phase 1 for full scenarios
-  ├── 2a Scenario builder ─┐
+  ├── 2a Scenario builder  ─┐
   ├── 2b Workflow tests    ─┤── 2b–2d depend on 2a
   ├── 2c Observer coverage ─┤
   └── 2d Contention tests  ─┘

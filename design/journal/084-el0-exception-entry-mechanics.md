@@ -68,7 +68,7 @@ Observer's persistent identity (D74). They are NOT saved to RegisterState.
 Approach: read in the assembly common handler into scratch registers after GPR
 save, pass to the Rust handler as function parameters:
 
-```rs
+```rust
 el0_exception_handler(source: u64, esr: u64, far: u64)
 ```
 
