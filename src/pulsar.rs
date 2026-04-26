@@ -146,7 +146,7 @@ impl Pulsar {
 ///
 /// D72: the kernel absorbs this conversion (A5). Uses integer
 /// arithmetic to avoid floating point in the kernel.
-fn ns_to_ticks(ns: u64, counter_freq: u64) -> u64 {
+pub fn ns_to_ticks(ns: u64, counter_freq: u64) -> u64 {
     (ns as u128 * counter_freq as u128 / 1_000_000_000) as u64
 }
 

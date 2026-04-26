@@ -101,6 +101,57 @@ pub fn alloc_test_entries(capacity: u32) -> NonNull<Entry> {
     unsafe { NonNull::new_unchecked(ptr) }
 }
 
+/// Write a capability entry at the given index via raw pointer (D95, D32).
+///
+/// Writes directly through the raw pointer without creating a `&mut Entry`,
+/// avoiding aliasing with outstanding `&Entry` references from `entry_ref`.
+/// Used by type-conversion operations where the entry was previously read
+/// via `entry_ref` and must now be overwritten.
+pub fn write_entry(entries: NonNull<Entry>, capacity: u32, index: u32, new_entry: Entry) -> bool {
+    if index >= capacity {
+        return false;
+    }
+
+    #[cfg(any(target_os = "none", test))]
+    crate::frame::arch::speculation::speculation_barrier();
+
+    // SAFETY: index < capacity (checked above). entries points to a valid
+    // array of at least capacity Entry elements (structural invariant of
+    // the owning cap table). We write through a raw pointer rather than
+    // creating a &mut Entry reference to avoid aliasing with any outstanding
+    // &Entry from entry_ref in the same dispatch path.
+    unsafe {
+        core::ptr::write(entries.as_ptr().add(index as usize), new_entry);
+    }
+
+    true
+}
+
+/// Allocate cap table entries for a new Observer (D95, D32).
+///
+/// Cap table pages come from the consumed Space's structural backing (D95).
+/// Test builds use the heap allocator. Bare-metal builds will use Space
+/// pages once wired.
+#[cfg(any(target_os = "none", test))]
+pub fn allocate_cap_table(capacity: u32) -> Option<NonNull<Entry>> {
+    if capacity == 0 {
+        return None;
+    }
+
+    #[cfg(test)]
+    {
+        let entries = alloc_test_entries(capacity);
+
+        init_freelist(entries, capacity, crate::capability::SLOT_USER_START);
+
+        Some(entries)
+    }
+    #[cfg(not(test))]
+    {
+        None
+    }
+}
+
 /// Initialize the intrusive freelist through empty entries.
 ///
 /// Links slots from `start` to `capacity - 1`. Each empty entry's

@@ -538,3 +538,26 @@ fn grow_routing_table(table: &mut RoutingTable, new_capacity: u32) -> Result<(),
 fn grow_routing_table(_table: &mut RoutingTable, _new_capacity: u32) -> Result<(), FieldError> {
     Err(FieldError::RoutingTableFull)
 }
+
+// ── D. Queue allocation for object creation (D95, D32) ──────────────
+
+/// Allocate queue backing for a new Field (D95, D32).
+///
+/// Queue pages logically come from the consumed Space's structural backing.
+/// Test builds use the heap allocator; bare-metal builds will use Space
+/// pages once the page allocator is wired.
+#[cfg(any(target_os = "none", test))]
+pub fn allocate_field_queue(capacity: u32) -> Option<NonNull<Message>> {
+    if capacity == 0 {
+        return None;
+    }
+
+    #[cfg(test)]
+    {
+        Some(alloc_test_queue(capacity))
+    }
+    #[cfg(not(test))]
+    {
+        None
+    }
+}

@@ -568,6 +568,35 @@ pub fn update_register_state_ptr(rs_ptr: *mut RegisterState) {
     }
 }
 
+/// Read the hardware counter frequency (D72, CNTFRQ_EL0).
+#[cfg(any(target_os = "none", test))]
+pub fn read_counter_freq() -> u64 {
+    crate::frame::arch::cntfrq_el0()
+}
+
+/// Read the current hardware counter value (CNTVCT_EL0).
+#[cfg(any(target_os = "none", test))]
+pub fn read_counter_ticks() -> u64 {
+    crate::frame::arch::cntvct_el0()
+}
+
+/// Allocate a RegisterState for a new Observer (D95, D32).
+///
+/// RegisterState lives in the consumed Space's structural backing (D95).
+/// Test builds use the heap allocator; bare-metal builds will use Space
+/// pages once the page allocator is wired.
+#[cfg(any(target_os = "none", test))]
+pub fn allocate_register_state() -> Option<NonNull<u8>> {
+    #[cfg(test)]
+    {
+        Some(alloc_test_register_state())
+    }
+    #[cfg(not(test))]
+    {
+        None
+    }
+}
+
 /// Allocate a test RegisterState and return a handle to it (test-only).
 ///
 /// Returns a NonNull<u8> suitable for use as Observer::register_state.

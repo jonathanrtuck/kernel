@@ -76,6 +76,22 @@ pub fn halt() {
     }
 }
 
+/// Read the counter frequency register (CNTFRQ_EL0).
+///
+/// D72: used for ns→ticks conversion (Pulsar creation, D95).
+/// Immutable per-core — value set by firmware at boot.
+pub fn cntfrq_el0() -> u64 {
+    sysreg::cntfrq_el0()
+}
+
+/// Read the virtual counter register (CNTVCT_EL0).
+///
+/// Returns the current timer count in hardware ticks. Used by Pulsar
+/// creation (D95) to compute absolute deadlines from relative durations.
+pub fn cntvct_el0() -> u64 {
+    sysreg::cntvct_el0()
+}
+
 /// Read the per-core data pointer (TPIDR_EL1).
 ///
 /// D83: each core stores a pointer to its `PerCoreData` in this register
