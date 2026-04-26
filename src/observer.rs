@@ -593,4 +593,268 @@ mod tests {
         assert!(should_enqueue, "non-suspended Observer should be enqueued");
         assert!(matches!(observer.state, PrimaryState::Runnable));
     }
+
+    // ── block() coverage ─────────────────────────────────────────────
+
+    #[test]
+    fn block_from_runnable_sets_blocked_and_wait_state() {
+        let mut observer = Observer::test_default();
+        let wait = WaitState::Single(WaitEntry {
+            observer: NonNull::from(&observer),
+            field: NonNull::dangling(),
+            prev: None,
+            next: None,
+        });
+
+        assert!(observer.block(wait).is_ok());
+        assert!(matches!(observer.state, PrimaryState::Blocked));
+        assert!(matches!(observer.wait_state, WaitState::Single(_)));
+    }
+
+    #[test]
+    fn block_from_inert_fails() {
+        let mut observer = Observer::test_default();
+
+        observer.state = PrimaryState::Inert;
+
+        assert_eq!(
+            observer.block(WaitState::None).unwrap_err(),
+            ObserverError::InvalidTransition
+        );
+    }
+
+    #[test]
+    fn block_from_blocked_fails() {
+        let mut observer = Observer::test_default();
+
+        observer.state = PrimaryState::Blocked;
+
+        assert_eq!(
+            observer.block(WaitState::None).unwrap_err(),
+            ObserverError::InvalidTransition
+        );
+    }
+
+    #[test]
+    fn block_from_faulted_fails() {
+        let mut observer = Observer::test_default();
+
+        observer.state = PrimaryState::Faulted;
+
+        assert_eq!(
+            observer.block(WaitState::None).unwrap_err(),
+            ObserverError::InvalidTransition
+        );
+    }
+
+    #[test]
+    fn block_then_unblock_roundtrip() {
+        let mut observer = Observer::test_default();
+
+        observer.block(WaitState::None).unwrap();
+
+        assert!(matches!(observer.state, PrimaryState::Blocked));
+
+        let should_enqueue = observer.unblock().unwrap();
+
+        assert!(should_enqueue);
+        assert!(matches!(observer.state, PrimaryState::Runnable));
+        assert!(matches!(observer.wait_state, WaitState::None));
+    }
+
+    // ── fault() coverage ─────────────────────────────────────────────
+
+    #[test]
+    fn fault_from_runnable_succeeds() {
+        let mut observer = Observer::test_default();
+
+        assert!(observer.fault().is_ok());
+        assert!(matches!(observer.state, PrimaryState::Faulted));
+    }
+
+    #[test]
+    fn fault_from_inert_fails() {
+        let mut observer = Observer::test_default();
+
+        observer.state = PrimaryState::Inert;
+
+        assert_eq!(
+            observer.fault().unwrap_err(),
+            ObserverError::InvalidTransition
+        );
+    }
+
+    #[test]
+    fn fault_from_blocked_fails() {
+        let mut observer = Observer::test_default();
+
+        observer.state = PrimaryState::Blocked;
+
+        assert_eq!(
+            observer.fault().unwrap_err(),
+            ObserverError::InvalidTransition
+        );
+    }
+
+    #[test]
+    fn fault_then_resume_roundtrip() {
+        let mut observer = Observer::test_default();
+
+        observer.fault().unwrap();
+
+        assert!(matches!(observer.state, PrimaryState::Faulted));
+
+        observer.resume().unwrap();
+
+        assert!(matches!(observer.state, PrimaryState::Runnable));
+    }
+
+    // ── suspend() + resume() interactions ────────────────────────────
+
+    #[test]
+    fn suspend_sets_flag() {
+        let mut observer = Observer::test_default();
+
+        assert!(!observer.suspended);
+
+        observer.suspend();
+
+        assert!(observer.suspended);
+    }
+
+    #[test]
+    fn suspend_is_idempotent() {
+        let mut observer = Observer::test_default();
+
+        observer.suspend();
+        observer.suspend();
+
+        assert!(observer.suspended);
+        assert!(matches!(observer.state, PrimaryState::Runnable));
+    }
+
+    #[test]
+    fn resume_from_faulted_clears_suspension() {
+        let mut observer = Observer::test_default();
+
+        observer.fault().unwrap();
+        observer.suspend();
+
+        assert!(observer.suspended);
+        assert!(matches!(observer.state, PrimaryState::Faulted));
+
+        observer.resume().unwrap();
+
+        assert!(!observer.suspended);
+        assert!(matches!(observer.state, PrimaryState::Runnable));
+    }
+
+    // ── set_scheduling() coverage ────────────────────────────────────
+
+    #[test]
+    fn set_scheduling_valid_profile() {
+        let mut observer = Observer::test_default();
+
+        assert!(observer.set_scheduling(60, 60).is_ok());
+        assert_eq!(observer.responsiveness, 60);
+        assert_eq!(observer.throughput, 60);
+        assert_eq!(observer.precision(), 8);
+    }
+
+    #[test]
+    fn set_scheduling_all_responsiveness() {
+        let mut observer = Observer::test_default();
+
+        assert!(observer.set_scheduling(128, 0).is_ok());
+        assert_eq!(observer.precision(), 0);
+    }
+
+    #[test]
+    fn set_scheduling_all_throughput() {
+        let mut observer = Observer::test_default();
+
+        assert!(observer.set_scheduling(0, 128).is_ok());
+        assert_eq!(observer.precision(), 0);
+    }
+
+    #[test]
+    fn set_scheduling_even_split() {
+        let mut observer = Observer::test_default();
+
+        assert!(observer.set_scheduling(64, 64).is_ok());
+        assert_eq!(observer.precision(), 0);
+    }
+
+    #[test]
+    fn set_scheduling_overflow_fails() {
+        let mut observer = Observer::test_default();
+        let original_r = observer.responsiveness;
+        let original_t = observer.throughput;
+
+        assert_eq!(
+            observer.set_scheduling(100, 100).unwrap_err(),
+            ObserverError::InvalidProfile
+        );
+        assert_eq!(
+            observer.responsiveness, original_r,
+            "must not mutate on error"
+        );
+        assert_eq!(observer.throughput, original_t, "must not mutate on error");
+    }
+
+    // ── revoke() coverage ────────────────────────────────────────────
+
+    #[test]
+    fn revoke_increments_generation() {
+        let observer = Observer::test_default();
+        let gen_before = observer
+            .generation
+            .load(core::sync::atomic::Ordering::Acquire);
+
+        observer.revoke();
+
+        let gen_after = observer
+            .generation
+            .load(core::sync::atomic::Ordering::Acquire);
+
+        assert_eq!(gen_after, gen_before + 1);
+    }
+
+    #[test]
+    fn revoke_is_cumulative() {
+        let observer = Observer::test_default();
+
+        observer.revoke();
+        observer.revoke();
+        observer.revoke();
+
+        assert_eq!(
+            observer
+                .generation
+                .load(core::sync::atomic::Ordering::Acquire),
+            3
+        );
+    }
+
+    // ── remove_compute() saturation ──────────────────────────────────
+
+    #[test]
+    fn remove_compute_saturates_at_zero() {
+        let mut observer = Observer::test_default();
+
+        observer.compute_aggregate = 10;
+        observer.remove_compute(100);
+
+        assert_eq!(observer.compute_aggregate, 0);
+    }
+
+    // ── is_stopped() coverage ────────────────────────────────────────
+
+    #[test]
+    fn is_stopped_matches_inert_and_faulted() {
+        assert!(PrimaryState::Inert.is_stopped());
+        assert!(PrimaryState::Faulted.is_stopped());
+        assert!(!PrimaryState::Runnable.is_stopped());
+        assert!(!PrimaryState::Blocked.is_stopped());
+    }
 }

@@ -104,8 +104,15 @@ impl<T> Arena<T> {
 
 #[cfg(test)]
 mod tests {
+    extern crate alloc;
+    extern crate std;
+
     use super::*;
+    use crate::frame::lock::{Lock, LockOrder};
+    use alloc::vec::Vec;
     use core::sync::atomic::AtomicU64;
+    use std::sync::Arc;
+    use std::thread;
 
     /// Minimal kernel object stand-in for arena tests.
     #[derive(Debug)]
@@ -1240,5 +1247,95 @@ mod tests {
                 "get_mut must succeed for just-allocated id"
             );
         }
+    }
+
+    // ── Phase 2d: Concurrency contention tests ───────────────────────
+
+    #[test]
+    fn test_contention_two_threads_allocate_free() {
+        let arena = Arc::new(Lock::new(LockOrder::Space, Arena::<TestObject>::new()));
+        let iterations = 200;
+        let handles: Vec<_> = (0..2)
+            .map(|thread_idx| {
+                let arena = Arc::clone(&arena);
+
+                thread::spawn(move || {
+                    for i in 0..iterations {
+                        let mut guard = arena.acquire();
+                        let (id, obj) = guard
+                            .allocate()
+                            .expect("allocate must succeed under contention");
+
+                        obj.value = thread_idx * 10_000 + i;
+
+                        let read_back = guard
+                            .get(id)
+                            .expect("just-allocated id must be retrievable");
+
+                        assert_eq!(
+                            read_back.value,
+                            thread_idx * 10_000 + i,
+                            "data corruption: thread {thread_idx} iteration {i}"
+                        );
+
+                        guard.free(id);
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("thread must not panic");
+        }
+
+        let mut guard = arena.acquire();
+        let (id, obj) = guard.allocate().expect("post-contention allocate");
+
+        obj.value = 0xCAFE;
+
+        let retrieved = guard.get(id).expect("post-contention get");
+
+        assert_eq!(
+            retrieved.value, 0xCAFE,
+            "arena must be functional after contention"
+        );
+    }
+
+    #[test]
+    fn test_contention_generation_counter_under_revocation() {
+        let arena = Arc::new(Lock::new(LockOrder::Space, Arena::<TestObject>::new()));
+        let iterations = 200;
+        let arena_a = Arc::clone(&arena);
+        let revoker = thread::spawn(move || {
+            for _ in 0..iterations {
+                let mut guard = arena_a.acquire();
+                let (id, obj) = guard.allocate().expect("revoker allocate");
+                let prev = obj
+                    .generation
+                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+
+                assert_eq!(prev, 0, "freshly allocated slot must have generation 0");
+
+                guard.free(id);
+            }
+        });
+        let arena_b = Arc::clone(&arena);
+        let reader = thread::spawn(move || {
+            for _ in 0..iterations {
+                let mut guard = arena_b.acquire();
+                let (id, obj) = guard.allocate().expect("reader allocate");
+                let generation_value = obj.generation.load(core::sync::atomic::Ordering::Relaxed);
+
+                assert_eq!(
+                    generation_value, 0,
+                    "freshly allocated slot must have generation 0"
+                );
+
+                guard.free(id);
+            }
+        });
+
+        revoker.join().expect("revoker thread must not panic");
+        reader.join().expect("reader thread must not panic");
     }
 }

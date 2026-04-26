@@ -290,11 +290,14 @@ impl<S: Scheduler> CoreState<S> {
         };
 
         // D48: Yield is fire-and-forget — no cap resolution needed.
-        // D79: re-enqueue current Observer at tail, then pick_next.
+        // D79: rotate current Observer to tail, then pick_next.
+        // The running Observer is always in the scheduler queue (boot
+        // enqueues it). on_preempt rotates head to tail — same as the
+        // timer preemption path.
         if operation == crate::syscall::IpcOperation::Yield {
             crate::communication::yield_cpu();
 
-            self.scheduler.enqueue(sender_ptr);
+            self.scheduler.on_preempt();
 
             return self.schedule_next();
         }
@@ -3010,20 +3013,22 @@ mod tests {
         let current_ptr = NonNull::from(&mut current);
         let next_ptr = NonNull::from(&mut next);
 
-        core.current = Some(current_ptr);
-
+        // Scheduler invariant: current is in queue at head.
+        core.scheduler.enqueue(current_ptr);
         core.scheduler.enqueue(next_ptr);
+
+        core.current = Some(current_ptr);
 
         let result = core.dispatch_ipc(IpcOperation::Yield, &ks);
 
         match result {
             DispatchResult::Resume(resumed) | DispatchResult::ResumeFastPath(resumed) => {
-                // D79: Yield re-enqueues current at tail, then pick_next.
-                // With [next] in queue, enqueue(current) makes [next, current].
+                // D79: Yield rotates current to tail via on_preempt.
+                // Queue was [current, next], becomes [next, current].
                 // pick_next returns next.
                 assert_eq!(
                     resumed, next_ptr,
-                    "D79: Yield must re-enqueue current at tail and schedule next"
+                    "D79: Yield must rotate current to tail and schedule next"
                 );
             }
             DispatchResult::Idle => {
@@ -3214,16 +3219,11 @@ mod tests {
         let mut obs = make_observer();
         let ptr = NonNull::from(&mut obs);
 
+        // Scheduler invariant: current is in the queue.
+        core.scheduler.enqueue(ptr);
+
         core.current = Some(ptr);
 
-        // Observer is already in the run queue. Yield will enqueue again
-        // (double-enqueue would be a bug, but in this test the Observer
-        // is both current AND in the queue — matching real dispatch where
-        // the current Observer is in the run queue).
-        // After D79: yield re-enqueues, but since it's already there,
-        // we need to dequeue first to avoid double-enqueue in tests.
-        // Actually, the real kernel has current in the queue already.
-        // Let's test with current NOT in the queue — Yield puts it back.
         let result = core.dispatch_ipc(IpcOperation::Yield, &ks);
 
         match result {
@@ -4616,11 +4616,11 @@ mod tests {
         let current_ptr = NonNull::from(&mut current);
         let next_ptr = NonNull::from(&mut next);
 
-        core.current = Some(current_ptr);
-
-        // Neither is in the queue yet. Yield will enqueue current.
-        // We enqueue next first so it's ahead.
+        // Scheduler invariant: current is in queue at head.
+        core.scheduler.enqueue(current_ptr);
         core.scheduler.enqueue(next_ptr);
+
+        core.current = Some(current_ptr);
 
         let result = core.dispatch_ipc(IpcOperation::Yield, &ks);
 
@@ -4628,20 +4628,21 @@ mod tests {
             DispatchResult::Resume(resumed) => {
                 assert_eq!(
                     resumed, next_ptr,
-                    "D79: Yield re-enqueues at tail — next Observer runs first"
+                    "D79: Yield rotates current to tail — next Observer runs first"
                 );
             }
             _ => panic!("D79: Yield with runnable Observer must not Idle"),
         }
 
-        // Current must be in the queue (re-enqueued at tail).
+        // Current must still be in the queue (rotated to tail).
         assert!(
             core.scheduler.contains(current_ptr),
-            "D79: yielded Observer must be in the run queue"
+            "D79: yielded Observer must remain in the run queue"
         );
     }
 
     /// D79 Yield: if only one Observer, it runs again.
+    /// Scheduler invariant: the running Observer is in the queue.
     #[test]
     fn test_d79_yield_single_observer_runs_again() {
         let ks = make_kernel_state();
@@ -4649,8 +4650,9 @@ mod tests {
         let mut obs = make_observer();
         let ptr = NonNull::from(&mut obs);
 
+        // Scheduler invariant: current is in the queue.
+        core.scheduler.enqueue(ptr);
         core.current = Some(ptr);
-        // Not in queue. Yield enqueues it, then pick_next returns it.
 
         let result = core.dispatch_ipc(IpcOperation::Yield, &ks);
 

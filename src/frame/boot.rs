@@ -32,6 +32,8 @@ use crate::observer::{
 #[cfg(target_os = "none")]
 use crate::time_manager::CoreId;
 #[cfg(target_os = "none")]
+use crate::time_manager::Scheduler;
+#[cfg(target_os = "none")]
 use crate::time_manager::round_robin::RoundRobin;
 #[cfg(target_os = "none")]
 use core::ptr::NonNull;
@@ -300,11 +302,11 @@ fn init_bsp_per_core_data(rs_ptr: *mut RegisterState) {
     }
 }
 
-/// Set the current Observer on the BSP core state.
+/// Set the current Observer on the BSP core state and enqueue it.
 ///
-/// Only sets `current` — does NOT enqueue. The Observer is about to be
-/// restored directly via __restore_observer, bypassing the scheduler.
-/// The Yield dispatch path handles enqueuing when the Observer yields.
+/// Maintains the scheduler invariant: the running Observer is always
+/// in the scheduler queue. All dispatch paths assume this — blocking
+/// dequeues, becoming runnable enqueues, Yield and timer rotate.
 #[cfg(target_os = "none")]
 fn set_current_observer(observer_ptr: NonNull<Observer>) {
     // SAFETY: BSP_CORE_STATE is initialized by init_bsp_per_core_data.
@@ -312,6 +314,8 @@ fn set_current_observer(observer_ptr: NonNull<Observer>) {
     // prohibition on references to mutable statics.
     unsafe {
         let cs = &raw mut BSP_CORE_STATE;
+
+        Scheduler::enqueue(&mut (*cs).scheduler, observer_ptr);
 
         (*cs).current = Some(observer_ptr);
     }
