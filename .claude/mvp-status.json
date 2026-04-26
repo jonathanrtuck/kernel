@@ -1,0 +1,221 @@
+{
+  "blockers": [],
+  "completed_items": 0,
+  "current_phase": 0,
+  "items": {
+    "0.1": {
+      "name": "Send-once cap consumption",
+      "note": "",
+      "status": "pending"
+    },
+    "0.10": {
+      "name": "Scheduler duplicate prevention",
+      "note": "",
+      "status": "pending"
+    },
+    "0.11": {
+      "name": "Slab MaybeUninit soundness",
+      "note": "",
+      "status": "pending"
+    },
+    "0.12": {
+      "name": "Overlapping routing range prevention",
+      "note": "",
+      "status": "pending"
+    },
+    "0.13": {
+      "name": "Boot invariant promotion",
+      "note": "",
+      "status": "pending"
+    },
+    "0.14": {
+      "name": "Deferred fault delivery linkage",
+      "note": "",
+      "status": "pending"
+    },
+    "0.2": {
+      "name": "Unified message delivery path",
+      "note": "",
+      "status": "pending"
+    },
+    "0.3": {
+      "name": "Fault handler validation ordering",
+      "note": "Requires D-0.3 decision",
+      "status": "pending"
+    },
+    "0.4": {
+      "name": "Fault delivery unblock",
+      "note": "",
+      "status": "pending"
+    },
+    "0.5": {
+      "name": "IRQ message drop on full queue",
+      "note": "",
+      "status": "pending"
+    },
+    "0.6": {
+      "name": "ResourceRequest split rollback",
+      "note": "",
+      "status": "pending"
+    },
+    "0.7": {
+      "name": "SpaceMerge arena slot leak",
+      "note": "",
+      "status": "pending"
+    },
+    "0.8": {
+      "name": "Cascade dequeue",
+      "note": "",
+      "status": "pending"
+    },
+    "0.9": {
+      "name": "SlotTag u64 upgrade",
+      "note": "",
+      "status": "pending"
+    },
+    "1.1": {
+      "name": "TTBR1 kernel linear map",
+      "note": "Requires D-1.1 decision (slab init)",
+      "status": "pending"
+    },
+    "1.2": {
+      "name": "Per-Observer L1 page tables",
+      "note": "",
+      "status": "pending"
+    },
+    "1.3": {
+      "name": "L3 table allocation",
+      "note": "",
+      "status": "pending"
+    },
+    "1.4": {
+      "name": "Map/unmap wiring",
+      "note": "",
+      "status": "pending"
+    },
+    "1.5": {
+      "name": "VmFault translation",
+      "note": "",
+      "status": "pending"
+    },
+    "2.1": {
+      "name": "Two-Observer boot",
+      "note": "",
+      "status": "pending"
+    },
+    "2.2": {
+      "name": "IPC roundtrip",
+      "note": "",
+      "status": "pending"
+    },
+    "2.3": {
+      "name": "Fault handling",
+      "note": "",
+      "status": "pending"
+    },
+    "2.4": {
+      "name": "Timer fire",
+      "note": "",
+      "status": "pending"
+    },
+    "2.5": {
+      "name": "Observer destroy + cleanup",
+      "note": "Pre-flight: verify return_backing_space",
+      "status": "pending"
+    },
+    "3.1": {
+      "name": "Cap table growth fault protocol",
+      "note": "Requires D-3.1a/b/c decisions",
+      "status": "pending"
+    },
+    "3.2": {
+      "name": "Badge-closure notifications",
+      "note": "Requires D-3.2a/b/c decisions",
+      "status": "pending"
+    },
+    "3.3": {
+      "name": "Field split routing",
+      "note": "",
+      "status": "pending"
+    },
+    "3.4": {
+      "name": "Field destroy routing cleanup",
+      "note": "",
+      "status": "pending"
+    },
+    "3.5": {
+      "name": "Space unmap on last cap close",
+      "note": "",
+      "status": "pending"
+    },
+    "3.6": {
+      "name": "Destroy returns Space cap",
+      "note": "",
+      "status": "pending"
+    },
+    "3.7": {
+      "name": "Nested fault handling",
+      "note": "",
+      "status": "pending"
+    },
+    "4.0": {
+      "name": "IPI interface design",
+      "note": "Requires D-4.0a/b/c decisions (fresh derivation)",
+      "status": "pending"
+    },
+    "4.1": {
+      "name": "Fix TPIDR_EL1 secondary cores",
+      "note": "",
+      "status": "pending"
+    },
+    "4.2": {
+      "name": "Fix fatal_exception masking",
+      "note": "",
+      "status": "pending"
+    },
+    "4.3": {
+      "name": "Secondary core boot",
+      "note": "",
+      "status": "pending"
+    },
+    "4.4": {
+      "name": "Cross-core scheduling",
+      "note": "",
+      "status": "pending"
+    },
+    "4.5": {
+      "name": "Lock ordering verification",
+      "note": "",
+      "status": "pending"
+    },
+    "4.6": {
+      "name": "Cross-core TLB invalidation",
+      "note": "",
+      "status": "pending"
+    }
+  },
+  "last_updated": "2026-04-26",
+  "phases": {
+    "0": {
+      "name": "Correctness",
+      "status": "pending"
+    },
+    "1": {
+      "name": "Memory Pipeline",
+      "status": "pending"
+    },
+    "2": {
+      "name": "Integration Proof",
+      "status": "pending"
+    },
+    "3": {
+      "name": "Protocol Completeness",
+      "status": "pending"
+    },
+    "4": {
+      "name": "SMP",
+      "status": "pending"
+    }
+  },
+  "total_items": 38
+}
