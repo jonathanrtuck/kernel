@@ -1015,7 +1015,6 @@ impl<S: Scheduler> CoreState<S> {
                     Some(o) => o,
                     None => return typed_error(SyscallError::InvalidCap),
                 };
-                // D67: generation check.
                 let live_gen = observer.generation.load(Ordering::Acquire);
 
                 if !entry.check_generation(live_gen) {
@@ -1023,7 +1022,15 @@ impl<S: Scheduler> CoreState<S> {
                 }
 
                 match observer.resume() {
-                    Ok(()) => typed_ok(0),
+                    Ok(()) => {
+                        let obs_ptr = NonNull::from(&mut *observer);
+
+                        drop(observers);
+
+                        self.scheduler.enqueue(obs_ptr);
+
+                        typed_ok(0)
+                    }
                     Err(_) => typed_error(SyscallError::InvalidState),
                 }
             }
@@ -2235,31 +2242,33 @@ impl<S: Scheduler> CoreState<S> {
                         return typed_error(SyscallError::ZeroSize);
                     }
 
-                    let (va_base, size, page_size) = {
-                        let mut sm = kernel_state.space_manager.acquire();
-                        let ps = sm.root_pool.page_size;
-                        let size = page_count * ps;
+                    let page_size = {
+                        let sm = kernel_state.space_manager.acquire();
 
-                        match sm.allocate_pages(page_count) {
-                            Ok(_pa) => match sm.assign_va(size, ps) {
-                                Ok(va) => (va.va_base, size, ps),
-                                Err(_) => {
-                                    sm.return_pages(0, page_count);
+                        sm.root_pool.page_size
+                    };
+                    let split_size = page_count * page_size;
+                    // D31/D104: root allocates by splitting the target Space.
+                    let (new_va, rounded_size) = {
+                        let mut spaces = kernel_state.spaces.acquire();
+                        let space = match spaces.get_mut(object_id) {
+                            Some(s) => s,
+                            None => return typed_error(SyscallError::InvalidCap),
+                        };
 
-                                    return typed_error(SyscallError::InsufficientResource);
-                                }
-                            },
+                        match space.split(split_size, page_size) {
+                            Ok(pair) => pair,
                             Err(_) => return typed_error(SyscallError::InsufficientResource),
                         }
                     };
 
-                    let _ = page_size;
                     let new_space_id = {
                         let mut spaces = kernel_state.spaces.acquire();
+
                         match spaces.allocate() {
                             Ok((id, space)) => {
-                                space.va_base = va_base;
-                                space.size = size;
+                                space.va_base = new_va;
+                                space.size = rounded_size;
                                 space.l3_table_pa = 0;
                                 space.refcount = 1;
                                 space.generation = core::sync::atomic::AtomicU64::new(0);
@@ -2269,7 +2278,6 @@ impl<S: Scheduler> CoreState<S> {
                             Err(_) => return typed_error(SyscallError::InsufficientResource),
                         }
                     };
-
                     let transferred = capability::TransferredCap {
                         object_type: ObjectType::Space,
                         object_id: new_space_id,
@@ -2278,6 +2286,7 @@ impl<S: Scheduler> CoreState<S> {
                         send_once: false,
                         stored_generation: 0,
                     };
+
                     match crate::frame::cores::observer_install_transferred_cap(
                         sender_ptr,
                         &transferred,

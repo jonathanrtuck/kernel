@@ -357,7 +357,22 @@ fn setup_root_cap_table(
     let first_free = capability::SLOT_USER_START + 1;
 
     crate::frame::capabilities::init_freelist(entries, ROOT_CAP_TABLE_CAPACITY, first_free);
-
+    // Slots 0-1 must be explicitly empty. Zeroed memory is NOT equivalent
+    // to Entry { object: None, .. } because Option<(ObjectType, ObjectId)>
+    // represents Some((Space, ObjectId(0))) as all-zero bytes (Space = 0,
+    // ObjectId(0) = 0). Without this, slot 0 looks like a valid Space cap.
+    crate::frame::capabilities::write_entry(
+        entries,
+        ROOT_CAP_TABLE_CAPACITY,
+        capability::SLOT_FAULT_HANDLER,
+        capability::Entry::empty(SlotTag(0)),
+    );
+    crate::frame::capabilities::write_entry(
+        entries,
+        ROOT_CAP_TABLE_CAPACITY,
+        capability::SLOT_REPLY_FIELD,
+        capability::Entry::empty(SlotTag(0)),
+    );
     // Slot 2 (SLOT_SELF): self-cap with full Observer rights.
     crate::frame::capabilities::write_entry(
         entries,
