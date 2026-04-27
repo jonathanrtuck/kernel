@@ -10288,4 +10288,199 @@ mod tests {
             "D56: mailbox must be drained after handle_ipi"
         );
     }
+
+    // ── Integration tests: multi-dispatch scenarios ─────────────────
+    //
+    // These tests exercise TWO dispatch calls where the second depends
+    // on state from the first. This catches regressions in the wiring
+    // between dispatch_ipc/dispatch_typed and register writeback that
+    // unit tests (single dispatch call) miss.
+
+    /// Integration: Receiver blocks, sender wakes it — verify message in registers.
+    #[test]
+    fn test_integration_receive_then_send_roundtrip() {
+        let ks = make_kernel_state();
+        let field_id = make_field_in_arena(&ks, 8);
+
+        let (mut receiver, _re) =
+            make_sender_with_cap(ObjectType::Field, field_id, Rights::RECEIVE, Badge(0), 0);
+        let receiver_ptr = NonNull::from(&mut receiver);
+
+        let (mut sender, _se) =
+            make_sender_with_cap(ObjectType::Field, field_id, Rights::SEND, Badge(0xBEEF), 0);
+        let sender_ptr = NonNull::from(&mut sender);
+
+        let handle = encode_handle(0);
+
+        // Step 1: Receiver does Receive on empty Field → blocks.
+        crate::frame::cores::write_test_ipc_registers_via_observer(
+            receiver_ptr,
+            &crate::syscall::IpcRegisters {
+                data: [0; 4],
+                label: 0,
+                handle_or_badge: handle,
+                user_cap: u64::MAX,
+                reply_info: 0,
+            },
+        );
+
+        let mut core = make_core_state();
+        core.current = Some(receiver_ptr);
+        core.scheduler.enqueue(receiver_ptr);
+        core.scheduler.enqueue(sender_ptr);
+
+        let result = core.dispatch_ipc(IpcOperation::Receive, &ks);
+        assert!(matches!(result, DispatchResult::Resume(p) if p == sender_ptr));
+        assert!(!core.scheduler.contains(receiver_ptr));
+
+        // Step 2: Sender does Send → wakes receiver.
+        crate::frame::cores::write_test_ipc_registers_via_observer(
+            sender_ptr,
+            &crate::syscall::IpcRegisters {
+                data: [0x1111, 0x2222, 0x3333, 0x4444],
+                label: 0xABCD,
+                handle_or_badge: handle,
+                user_cap: u64::MAX,
+                reply_info: 0,
+            },
+        );
+        core.current = Some(sender_ptr);
+
+        let result = core.dispatch_ipc(IpcOperation::Send, &ks);
+        assert!(matches!(result, DispatchResult::Resume(p) if p == sender_ptr));
+
+        // Receiver must have message in registers.
+        let regs = crate::frame::cores::read_ipc_registers(receiver_ptr);
+        assert_eq!(regs.data, [0x1111, 0x2222, 0x3333, 0x4444]);
+        assert_eq!(regs.label, 0xABCD);
+        assert_eq!(regs.handle_or_badge, 0xBEEF);
+
+        let (carry, _) = crate::frame::cores::read_ipc_carry_and_x0(receiver_ptr);
+        assert!(!carry, "receiver carry must be clear");
+        assert!(
+            core.scheduler.contains(receiver_ptr),
+            "receiver must be re-enqueued"
+        );
+    }
+
+    /// Integration: Fault delivery to blocked handler — verify fault message in registers.
+    #[test]
+    fn test_integration_fault_delivery_to_blocked_handler() {
+        let ks = make_kernel_state();
+        let handler_field_id = make_field_in_arena(&ks, 8);
+
+        let (mut handler_obs, _he) = make_sender_with_cap(
+            ObjectType::Field,
+            handler_field_id,
+            Rights::RECEIVE,
+            Badge(0),
+            0,
+        );
+        let handler_ptr = NonNull::from(&mut handler_obs);
+
+        let handle = encode_handle(0);
+
+        // Step 1: Handler blocks on Receive.
+        crate::frame::cores::write_test_ipc_registers_via_observer(
+            handler_ptr,
+            &crate::syscall::IpcRegisters {
+                data: [0; 4],
+                label: 0,
+                handle_or_badge: handle,
+                user_cap: u64::MAX,
+                reply_info: 0,
+            },
+        );
+        let mut core = make_core_state();
+        core.current = Some(handler_ptr);
+        core.scheduler.enqueue(handler_ptr);
+
+        let result = core.dispatch_ipc(IpcOperation::Receive, &ks);
+        assert!(matches!(result, DispatchResult::Idle));
+
+        // Step 2: Faulting Observer faults → delivered to blocked handler.
+        let mut faulting_obs = make_observer_with_handler(Some((handler_field_id, 0)));
+        let faulting_ptr = NonNull::from(&mut faulting_obs);
+        core.current = Some(faulting_ptr);
+
+        let fault = crate::fault::FaultType::HardwareException {
+            esr_el1: 0xDEAD_0001,
+            elr_el1: 0x0040_0000,
+            far_el1: 0xBAD0_CAFE,
+        };
+        let result = core.dispatch_fault(fault, &ks);
+        assert!(matches!(result, DispatchResult::Resume(p) if p == handler_ptr));
+
+        // Handler's registers must contain fault message.
+        let regs = crate::frame::cores::read_ipc_registers(handler_ptr);
+        assert_eq!(regs.label, crate::field::LABEL_HARDWARE_EXCEPTION);
+        assert_eq!(regs.data[0], 0xDEAD_0001, "ESR");
+        assert_eq!(regs.data[1], 0x0040_0000, "ELR");
+        assert_eq!(regs.data[2], 0xBAD0_CAFE, "FAR");
+        assert!(matches!(
+            faulting_obs.state,
+            crate::observer::PrimaryState::Faulted
+        ));
+    }
+
+    /// Integration: Block/Wake scheduler integrity — no duplicate enqueue.
+    #[test]
+    fn test_integration_block_wake_scheduler_no_duplicates() {
+        let ks = make_kernel_state();
+        let field_id = make_field_in_arena(&ks, 8);
+
+        let (mut receiver, _re) =
+            make_sender_with_cap(ObjectType::Field, field_id, Rights::RECEIVE, Badge(0), 0);
+        let receiver_ptr = NonNull::from(&mut receiver);
+
+        let (mut sender, _se) =
+            make_sender_with_cap(ObjectType::Field, field_id, Rights::SEND, Badge(0xAAAA), 0);
+        let sender_ptr = NonNull::from(&mut sender);
+
+        let mut bystander = make_observer();
+        let bystander_ptr = NonNull::from(&mut bystander);
+
+        let handle = encode_handle(0);
+
+        // Step 1: Receiver blocks.
+        crate::frame::cores::write_test_ipc_registers_via_observer(
+            receiver_ptr,
+            &crate::syscall::IpcRegisters {
+                data: [0; 4],
+                label: 0,
+                handle_or_badge: handle,
+                user_cap: u64::MAX,
+                reply_info: 0,
+            },
+        );
+        let mut core = make_core_state();
+        core.current = Some(receiver_ptr);
+        core.scheduler.enqueue(receiver_ptr);
+        core.scheduler.enqueue(sender_ptr);
+        core.scheduler.enqueue(bystander_ptr);
+
+        let result = core.dispatch_ipc(IpcOperation::Receive, &ks);
+        assert!(matches!(result, DispatchResult::Resume(_)));
+
+        // Step 2: Sender wakes receiver.
+        crate::frame::cores::write_test_ipc_registers_via_observer(
+            sender_ptr,
+            &crate::syscall::IpcRegisters {
+                data: [1, 2, 3, 4],
+                label: 0x55,
+                handle_or_badge: handle,
+                user_cap: u64::MAX,
+                reply_info: 0,
+            },
+        );
+        core.current = Some(sender_ptr);
+        let result = core.dispatch_ipc(IpcOperation::Send, &ks);
+        assert!(matches!(result, DispatchResult::Resume(_)));
+
+        // Queue must have exactly 3 entries (no duplicate receiver).
+        assert_eq!(core.scheduler.queue_depth(), 3);
+        core.scheduler.dequeue(receiver_ptr);
+        assert!(!core.scheduler.contains(receiver_ptr));
+        assert_eq!(core.scheduler.queue_depth(), 2);
+    }
 }
