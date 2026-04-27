@@ -842,6 +842,19 @@ pub fn observer_restore_info(observer_ptr: NonNull<Observer>) -> (*mut RegisterS
     }
 }
 
+/// Read an Observer's page table root and ASID (D88, D91).
+///
+/// Returns `(page_table_root, asid)` for use with map/unmap operations.
+#[cfg(any(target_os = "none", test))]
+pub fn observer_page_table_info(observer_ptr: NonNull<Observer>) -> (u64, u16) {
+    // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy.
+    unsafe {
+        let observer = observer_ptr.as_ref();
+
+        (observer.page_table_root, observer.asid)
+    }
+}
+
 /// Update PerCoreData.register_state_ptr for the next EL0 exception
 /// entry (D74, D83).
 ///

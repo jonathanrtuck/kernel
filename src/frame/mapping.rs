@@ -136,6 +136,62 @@ pub unsafe fn unmap_space_from_observer(
     }
 }
 
+// ── Safe wrappers for dispatch (D91) ────────────────────────────
+
+/// Wire a Space's L3 table into an Observer's page table (D91).
+///
+/// Safe wrapper around `map_space_in_observer` for the dispatch layer.
+/// Called when a Space cap is installed into an Observer's cap table.
+#[cfg(target_os = "none")]
+pub fn wire_space_mapping(
+    observer_page_table_root: u64,
+    space_va_base: usize,
+    space_l3_table_pa: u64,
+    kernel_state: &crate::kernel_state::KernelState,
+) -> Result<(), MapError> {
+    let mut sm = kernel_state.space_manager.acquire();
+
+    // SAFETY: observer_page_table_root is a valid TTBR0 value from the Observer.
+    // space_va_base and space_l3_table_pa are from the Space arena. The TTBR1
+    // linear map is active post-boot.
+    unsafe {
+        map_space_in_observer(
+            observer_page_table_root,
+            space_va_base,
+            space_l3_table_pa,
+            &mut sm,
+        )
+    }
+}
+
+/// Remove a Space's L3 table from an Observer's page table (D91).
+///
+/// Safe wrapper around `unmap_space_from_observer` for the dispatch layer.
+/// Called when the last cap to a Space is closed in an Observer.
+#[cfg(target_os = "none")]
+pub fn unwire_space_mapping(
+    observer_page_table_root: u64,
+    space_va_base: usize,
+    space_l3_table_pa: u64,
+    space_page_count: usize,
+    asid: u16,
+    kernel_state: &crate::kernel_state::KernelState,
+) {
+    let mut sm = kernel_state.space_manager.acquire();
+
+    // SAFETY: same preconditions as wire_space_mapping.
+    unsafe {
+        unmap_space_from_observer(
+            observer_page_table_root,
+            space_va_base,
+            space_l3_table_pa,
+            space_page_count,
+            asid,
+            &mut sm,
+        );
+    }
+}
+
 /// Populate a Space's L3 table at a physical address (D90).
 ///
 /// Called during Space creation (type conversion) to eagerly fill L3

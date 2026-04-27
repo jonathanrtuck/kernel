@@ -85,13 +85,13 @@
     },
     "1.3": {
       "name": "L3 table allocation",
-      "note": "",
-      "status": "in_progress"
+      "note": "allocate_space_l3, clear_space_l3_entries in boot.rs",
+      "status": "done"
     },
     "1.4": {
       "name": "Map/unmap wiring",
       "note": "",
-      "status": "pending"
+      "status": "in_progress"
     },
     "1.5": {
       "name": "VmFault translation",

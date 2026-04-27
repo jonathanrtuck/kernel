@@ -1178,6 +1178,7 @@ impl<S: Scheduler> CoreState<S> {
                 }
 
                 let target_ptr = NonNull::from(&mut *observer);
+                let target_page_table_root = observer.page_table_root;
 
                 drop(observers);
 
@@ -1194,7 +1195,26 @@ impl<S: Scheduler> CoreState<S> {
                     target_ptr,
                     &transferred,
                 ) {
-                    Ok(encoded_handle) => typed_ok(encoded_handle),
+                    Ok(encoded_handle) => {
+                        // D91: wire page table mapping when a Space cap is installed.
+                        #[cfg(target_os = "none")]
+                        if source_type == ObjectType::Space {
+                            let spaces = kernel_state.spaces.acquire();
+
+                            if let Some(space) = spaces.get(source_id)
+                                && space.l3_table_pa != 0
+                            {
+                                let _ = crate::frame::mapping::wire_space_mapping(
+                                    target_page_table_root,
+                                    space.va_base,
+                                    space.l3_table_pa,
+                                    kernel_state,
+                                );
+                            }
+                        }
+
+                        typed_ok(encoded_handle)
+                    }
                     Err(_) => typed_error(SyscallError::TableFull),
                 }
             }
@@ -1635,11 +1655,50 @@ impl<S: Scheduler> CoreState<S> {
                     crate::frame::cores::observer_close_cap(sender_ptr, handle.index);
 
                 match close_result {
-                    capability::CloseResult::Closed { .. } => {
-                        // D24 (bare-metal): when closed_type == Space,
-                        // scan for remaining Space caps via
-                        // observer_has_cap_to_object and unmap if none
-                        // remain (frame::mapping::unmap_space_from_observer).
+                    capability::CloseResult::Closed {
+                        object_type: closed_type,
+                        object_id: closed_id,
+                        ..
+                    } => {
+                        // D24/D91: when a Space cap is closed, check whether
+                        // any remaining caps to this Space exist. If not,
+                        // unmap the Space from this Observer's page table.
+                        #[cfg(target_os = "none")]
+                        if closed_type == ObjectType::Space {
+                            let still_held = crate::frame::cores::observer_has_cap_to_object(
+                                sender_ptr,
+                                ObjectType::Space,
+                                closed_id,
+                                u32::MAX,
+                            );
+
+                            if !still_held {
+                                let spaces = kernel_state.spaces.acquire();
+
+                                if let Some(space) = spaces.get(closed_id)
+                                    && space.l3_table_pa != 0
+                                {
+                                    let page_size = {
+                                        let sm = kernel_state.space_manager.acquire();
+
+                                        sm.root_pool.page_size
+                                    };
+                                    let (pt_root, asid) =
+                                        crate::frame::cores::observer_page_table_info(sender_ptr);
+
+                                    crate::frame::mapping::unwire_space_mapping(
+                                        pt_root,
+                                        space.va_base,
+                                        space.l3_table_pa,
+                                        space.size / page_size,
+                                        asid,
+                                        kernel_state,
+                                    );
+                                }
+                            }
+                        }
+                        #[cfg(not(target_os = "none"))]
+                        let _ = (closed_type, closed_id);
 
                         typed_ok(0)
                     }
