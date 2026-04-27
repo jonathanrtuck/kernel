@@ -110,8 +110,8 @@
     },
     "2.3": {
       "name": "Fault handling",
-      "note": "",
-      "status": "pending"
+      "note": "Handler Field + child Space; BRK #0x45 verifies VmFault data; fixed dispatch_fault scheduler dequeue bug",
+      "status": "done"
     },
     "2.4": {
       "name": "Timer fire",

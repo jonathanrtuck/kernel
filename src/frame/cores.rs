@@ -773,6 +773,23 @@ pub fn observer_read_pc(observer_ptr: NonNull<Observer>) -> u64 {
     }
 }
 
+/// Advance an Observer's saved PC by 4 bytes (one AArch64 instruction).
+///
+/// Used to resume past a BRK instruction in non-divergent test handlers.
+/// ARM ARM: BRK saves ELR_EL1 = BRK address (preferred return address
+/// is the faulting instruction). Advancing by 4 resumes at the next
+/// instruction.
+#[cfg(target_os = "none")]
+pub fn observer_advance_pc(observer_ptr: NonNull<Observer>) {
+    // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy.
+    unsafe {
+        let observer = observer_ptr.as_ref();
+        let rs = &mut *(observer.register_state.as_ptr().as_ptr() as *mut RegisterState);
+
+        rs.pc += 4;
+    }
+}
+
 /// D98: check whether an Observer's cap table has at least one free slot.
 /// Used by Destroy's upfront table-full check before marking the target dead.
 #[cfg(any(target_os = "none", test))]

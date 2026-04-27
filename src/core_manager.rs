@@ -2844,6 +2844,7 @@ impl<S: Scheduler> CoreState<S> {
             Some(ptr) => ptr,
             None => return DispatchResult::Idle,
         };
+
         let (observer_id, observer_generation) =
             crate::frame::cores::observer_fault_info(observer_ptr);
         let handler_entry = match crate::frame::cores::observer_read_full_cap_entry(
@@ -2906,6 +2907,11 @@ impl<S: Scheduler> CoreState<S> {
 
         drop(fields);
 
+        // The faulted Observer must be removed from the scheduler queue
+        // regardless of delivery outcome. It stays in Faulted state until
+        // the handler resumes it.
+        self.scheduler.dequeue(observer_ptr);
+
         match outcome {
             crate::fault::FaultDeliveryOutcome::Enqueued => self.schedule_next(),
             crate::fault::FaultDeliveryOutcome::WokeReceiver(receiver_ptr, message) => {
@@ -2933,8 +2939,6 @@ impl<S: Scheduler> CoreState<S> {
 
                 drop(fields);
 
-                // Dequeue faulted Observer from scheduler.
-                self.scheduler.dequeue(observer_ptr);
                 self.schedule_next()
             }
             crate::fault::FaultDeliveryOutcome::HandlerUnavailable => {

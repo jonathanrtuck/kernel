@@ -242,6 +242,8 @@ fn handle_el0_sync<S: crate::time_manager::Scheduler + 'static>(
                 child_scenario_passed::<S>()
             } else if imm == 0x44 {
                 verify_ipc_roundtrip::<S>()
+            } else if imm == 0x45 {
+                verify_fault_handling()
             } else {
                 handle_el0_fault::<S>(esr, far)
             }
@@ -404,16 +406,14 @@ fn child_scenario_passed<S: crate::time_manager::Scheduler + 'static>()
     core.schedule_next()
 }
 
-/// Phase 2.2 IPC roundtrip verification handler.
+/// Phase 2.2 IPC roundtrip verification handler (non-divergent).
 ///
 /// Called when the root Observer signals BRK #0x44 after completing an
-/// IPC Receive. Reads the Observer's register state and verifies that
-/// the received message matches the expected values:
-/// - x0–x3: data words (0xAA, 0xBB, 0xCC, 0xDD)
-/// - x4: label (0x42)
-/// - x5: badge (0x99, injected by kernel from Send cap)
+/// IPC Receive. Verifies message data, then advances PC by 4 and resumes
+/// the Observer so it can continue to the next test scenario.
 #[cfg(target_os = "none")]
-fn verify_ipc_roundtrip<S: crate::time_manager::Scheduler + 'static>() -> ! {
+fn verify_ipc_roundtrip<S: crate::time_manager::Scheduler + 'static>()
+-> crate::core_manager::DispatchResult {
     let core = crate::core_manager::current_core::<S>();
     let observer = core.current.expect("must have current observer");
     let regs = crate::frame::cores::read_ipc_registers(observer);
@@ -428,9 +428,6 @@ fn verify_ipc_roundtrip<S: crate::time_manager::Scheduler + 'static>() -> ! {
 
     if data_ok && label_ok && badge_ok {
         crate::println!("scenario: IPC roundtrip (4 data + label + badge) — PASS");
-        crate::println!();
-        crate::println!("TEST PASSED");
-        crate::println!();
     } else {
         crate::println!("scenario: IPC roundtrip — FAIL");
         crate::println!(
@@ -442,6 +439,61 @@ fn verify_ipc_roundtrip<S: crate::time_manager::Scheduler + 'static>() -> ! {
         );
         crate::println!("  label: {:#x} (expected 0x42)", regs.label,);
         crate::println!("  badge: {:#x} (expected 0x99)", regs.handle_or_badge,);
+        crate::println!();
+        crate::println!("TEST FAILED");
+        crate::println!();
+
+        super::psci::system_off()
+    }
+
+    // ARM ARM: BRK saves ELR_EL1 = BRK address. Advance by 4 to resume
+    // at the instruction after BRK.
+    crate::frame::cores::observer_advance_pc(observer);
+
+    crate::core_manager::DispatchResult::Resume(observer)
+}
+
+/// Phase 2.3 fault handling verification handler.
+///
+/// Called when the root Observer signals BRK #0x45 after receiving a
+/// VmFault message on the handler Field. Verifies that the fault message
+/// contains the correct fault type (VM_FAULT label), Space slot index,
+/// byte offset (0), and access type (Read).
+#[cfg(target_os = "none")]
+fn verify_fault_handling() -> ! {
+    use crate::field::LABEL_VM_FAULT;
+
+    let core = crate::core_manager::current_core::<crate::time_manager::round_robin::RoundRobin>();
+    let observer = core.current.expect("must have current observer");
+    let regs = crate::frame::cores::read_ipc_registers(observer);
+
+    // Expected: data[0] = space_slot (4 = child's Space cap slot),
+    // data[1] = byte_offset (0), data[2] = access type (0 = Read),
+    // label = LABEL_VM_FAULT.
+    let space_slot_ok = regs.data[0] == 4;
+    let offset_ok = regs.data[1] == 0;
+    let access_ok = regs.data[2] == 0;
+    let label_ok = regs.label == LABEL_VM_FAULT;
+
+    if space_slot_ok && offset_ok && access_ok && label_ok {
+        crate::println!("scenario: VmFault delivery (space slot + offset + access) — PASS");
+    } else {
+        crate::println!("scenario: VmFault delivery — FAIL");
+        crate::println!("  space_slot: {} (expected 4)", regs.data[0]);
+        crate::println!("  offset:    {} (expected 0)", regs.data[1]);
+        crate::println!("  access:    {} (expected 0 = Read)", regs.data[2]);
+        crate::println!(
+            "  label:     {:#x} (expected {:#x})",
+            regs.label,
+            LABEL_VM_FAULT,
+        );
+    }
+
+    if space_slot_ok && offset_ok && access_ok && label_ok {
+        crate::println!();
+        crate::println!("TEST PASSED");
+        crate::println!();
+    } else {
         crate::println!();
         crate::println!("TEST FAILED");
         crate::println!();

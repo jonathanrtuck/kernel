@@ -62,34 +62,52 @@ const USER_STACK_TOP: usize = USER_STACK_VA + PAGE_SIZE;
 // ── Fallback test binary (D94, Phase 2) ─────────────────────────
 //
 // Minimal EL0 program used when no DTB module is present.
-// Phase 2.2: IPC Receive on a Field, then verify via BRK #0x44.
+// Phase 2.2+2.3: IPC Receive, verify, then fault Receive, verify.
 //
-// 1. Loads handle = 4 into x5 (Receive cap at slot 4)
-// 2. Executes SVC #2 (Receive — blocks until child sends)
-// 3. After return from Receive, executes BRK #0x44
-//    (IPC verify handler checks x0–x5 match expected data)
+// 1. SVC #2 (Receive on IPC Field, handle = slot 4) — blocks until child sends
+// 2. BRK #0x44 — IPC verify (non-divergent, advances PC, resumes)
+// 3. SVC #2 (Receive on handler Field, handle = slot 5) — gets fault message
+// 4. BRK #0x45 — fault verify (divergent, system_off)
 
 #[cfg(target_os = "none")]
 const FALLBACK_BINARY: &[u8] = &{
-    let mut buf = [0u8; 12];
+    let mut buf = [0u8; 24];
 
-    // movz x5, #4           → 0xD2800085
+    // movz x5, #4           → 0xD2800085  (IPC Field Receive cap)
     buf[0] = 0x85;
     buf[1] = 0x00;
     buf[2] = 0x80;
     buf[3] = 0xD2;
 
-    // svc #2                → 0xD4000041
+    // svc #2                → 0xD4000041  (Receive)
     buf[4] = 0x41;
     buf[5] = 0x00;
     buf[6] = 0x00;
     buf[7] = 0xD4;
 
-    // brk #0x44             → 0xD4200880
+    // brk #0x44             → 0xD4200880  (IPC verify, non-divergent)
     buf[8] = 0x80;
     buf[9] = 0x08;
     buf[10] = 0x20;
     buf[11] = 0xD4;
+
+    // movz x5, #5           → 0xD28000A5  (handler Field Receive cap)
+    buf[12] = 0xA5;
+    buf[13] = 0x00;
+    buf[14] = 0x80;
+    buf[15] = 0xD2;
+
+    // svc #2                → 0xD4000041  (Receive)
+    buf[16] = 0x41;
+    buf[17] = 0x00;
+    buf[18] = 0x00;
+    buf[19] = 0xD4;
+
+    // brk #0x45             → 0xD42008A0  (fault verify, divergent)
+    buf[20] = 0xA0;
+    buf[21] = 0x08;
+    buf[22] = 0x20;
+    buf[23] = 0xD4;
 
     buf
 };
@@ -410,22 +428,25 @@ fn enqueue_observer(observer_ptr: NonNull<Observer>) {
     }
 }
 
-// ── Child Observer binary (Phase 2.2) ───────────────────────────
+// ── Child Observer binary (Phase 2.2+2.3) ──────────────────────
 //
-// Minimal EL0 program: IPC Send to a Field, then signal done.
+// Minimal EL0 program: IPC Send, then touch unmapped page for VmFault.
 // 1. Loads test data into x0–x3 (4 data words)
 // 2. Loads label 0x42 into x4
 // 3. Loads Send cap handle (slot 3) into x5
 // 4. Sets x6 = u64::MAX (no user cap), x7 = 0 (no reply info)
 // 5. Executes SVC #1 (Send)
-// 6. Executes BRK #0x43 (signals child completed)
+// 6. Loads address 0x200_0000 (child's unmapped null guard page)
+// 7. Loads from that address → data abort → VmFault
 //
 // Expected IPC data words: 0xAA, 0xBB, 0xCC, 0xDD.
 // Badge 0x99 is injected by the kernel from the cap entry.
+// After Send, the child faults and enters Faulted state. It never
+// reaches BRK #0x43 — the fault handler (root) receives the VmFault.
 
 #[cfg(target_os = "none")]
 const CHILD_BINARY: &[u8] = &{
-    let mut buf = [0u8; 40];
+    let mut buf = [0u8; 44];
 
     // movz x0, #0xAA        → 0xD2801540
     buf[0] = 0x40;
@@ -481,11 +502,17 @@ const CHILD_BINARY: &[u8] = &{
     buf[34] = 0x00;
     buf[35] = 0xD4;
 
-    // brk #0x43             → 0xD4200860
-    buf[36] = 0x60;
-    buf[37] = 0x08;
-    buf[38] = 0x20;
-    buf[39] = 0xD4;
+    // movz x0, #0x200, lsl #16 → 0xD2A04000  (x0 = 0x0200_0000, child null guard)
+    buf[36] = 0x00;
+    buf[37] = 0x40;
+    buf[38] = 0xA0;
+    buf[39] = 0xD2;
+
+    // ldr x1, [x0]          → 0xF9400001  (load from unmapped → VmFault)
+    buf[40] = 0x01;
+    buf[41] = 0x00;
+    buf[42] = 0x40;
+    buf[43] = 0xF9;
 
     buf
 };
@@ -493,13 +520,15 @@ const CHILD_BINARY: &[u8] = &{
 /// Create and enqueue a child Observer for Phase 2 integration tests.
 ///
 /// Allocates a code page (with CHILD_BINARY), stack page, L1 table,
-/// RegisterState, and cap table with a Send cap to the IPC Field.
+/// RegisterState, and cap table with IPC Send + fault handler + Space caps.
 /// Maps user pages via install_user_l3. The child Observer starts in
 /// Runnable state in the scheduler queue.
 #[cfg(target_os = "none")]
 fn create_child_observer(
     ks: &KernelState,
     ipc_field_id: crate::arena::ObjectId,
+    handler_field_id: crate::arena::ObjectId,
+    child_space_id: crate::arena::ObjectId,
 ) -> Result<NonNull<Observer>, AllocError> {
     let child_code_pa = alloc_zeroed_pages(ks, 1)?;
 
@@ -604,8 +633,9 @@ fn create_child_observer(
 
     drop(observers);
 
-    // Phase 2.2: set up child's cap table with Send cap to IPC Field.
-    let child_cap_entries = setup_child_cap_table(ks, child_id, ipc_field_id)?;
+    // Phase 2.2+2.3: set up child's cap table with IPC, fault handler, and Space caps.
+    let child_cap_entries =
+        setup_child_cap_table(ks, child_id, ipc_field_id, handler_field_id, child_space_id)?;
 
     // SAFETY: child_ptr was just created above and is exclusively ours.
     // Single-threaded boot context. No concurrent access.
@@ -614,8 +644,10 @@ fn create_child_observer(
 
         child.cap_table = child_cap_entries;
         child.cap_table_capacity = CHILD_CAP_TABLE_CAPACITY;
-        child.cap_table_free_head = Some(capability::SLOT_USER_START + 1);
-        child.cap_table_count = 2;
+        // Freelist starts at slot 5 (slots 0-4 occupied: handler, reply, self, ipc, space).
+        child.cap_table_free_head = Some(capability::SLOT_USER_START + 2);
+        // 4 installed caps: handler field, self, ipc field, space.
+        child.cap_table_count = 4;
     }
 
     enqueue_observer(child_ptr);
@@ -727,11 +759,15 @@ const IPC_FIELD_QUEUE_CAPACITY: u32 = 4;
 #[cfg(target_os = "none")]
 const CHILD_CAP_TABLE_CAPACITY: u32 = 8;
 
-/// Create a Field in the arena for Phase 2.2 IPC testing.
+/// Create a Field in the arena for boot-time testing.
 ///
 /// Allocates queue backing and returns the Field's ObjectId.
+/// Used for both the IPC Field (Phase 2.2) and the handler Field (Phase 2.3).
 #[cfg(target_os = "none")]
-fn create_ipc_field(ks: &KernelState) -> Result<crate::arena::ObjectId, AllocError> {
+fn create_boot_field(
+    ks: &KernelState,
+    refcount: u32,
+) -> Result<crate::arena::ObjectId, AllocError> {
     let queue = crate::frame::fields::allocate_field_queue(IPC_FIELD_QUEUE_CAPACITY)
         .ok_or(AllocError::OutOfMemory)?;
     let mut fields = ks.fields.acquire();
@@ -750,34 +786,66 @@ fn create_ipc_field(ks: &KernelState) -> Result<crate::arena::ObjectId, AllocErr
     field.back_pointer_head = None;
     field.backing_va_base = 0;
     field.backing_size = 0;
-    field.refcount = 2;
+    field.refcount = refcount;
     field.generation = AtomicU64::new(0);
 
     Ok(field_id)
 }
 
-/// Set up the child Observer's cap table with a Send cap to the IPC Field.
+/// Create a Space in the arena representing the child Observer's VA range.
 ///
-/// Slot 0 (fault handler): empty. Slot 1 (reply field): empty.
-/// Slot 2 (self): child self-cap. Slot 3 (user start): Send cap to Field
-/// with badge IPC_TEST_BADGE.
+/// The child's user pages live at L2 index 1 (VA 0x200_0000). We create
+/// a Space covering L3 indices 0–2 (3 pages) so that VmFault translation
+/// can find it when the child faults on the unmapped null guard page.
+#[cfg(target_os = "none")]
+fn create_child_space(ks: &KernelState) -> Result<crate::arena::ObjectId, AllocError> {
+    let mut spaces = ks.spaces.acquire();
+    let (space_id, space) = spaces.allocate()?;
+
+    space.va_base = 0x200_0000;
+    space.size = 3 * PAGE_SIZE;
+    space.l3_table_pa = 0;
+    space.refcount = 1;
+    space.generation = AtomicU64::new(0);
+
+    Ok(space_id)
+}
+
+/// Set up the child Observer's cap table.
+///
+/// Slot 0: fault handler — Send cap to handler Field (for VmFault delivery).
+/// Slot 1: reply field — empty.
+/// Slot 2: self-cap — Observer.
+/// Slot 3: Send cap to IPC Field (badge IPC_TEST_BADGE).
+/// Slot 4: Space cap (child's VA range, for VmFault translation).
 #[cfg(target_os = "none")]
 fn setup_child_cap_table(
     ks: &KernelState,
     child_id: crate::arena::ObjectId,
-    field_id: crate::arena::ObjectId,
+    ipc_field_id: crate::arena::ObjectId,
+    handler_field_id: crate::arena::ObjectId,
+    child_space_id: crate::arena::ObjectId,
 ) -> Result<NonNull<capability::Entry>, AllocError> {
     let cap_page_pa = alloc_zeroed_pages(ks, 1)?;
     let entries = NonNull::new(mmu::phys_to_virt(cap_page_pa) as *mut capability::Entry)
         .expect("cap_page_pa must be non-null");
-    let first_free = capability::SLOT_USER_START + 1;
+    // Freelist starts at slot 5 (slots 0-4 are all occupied).
+    let first_free = capability::SLOT_USER_START + 2;
 
     crate::frame::capabilities::init_freelist(entries, CHILD_CAP_TABLE_CAPACITY, first_free);
+    // Slot 0: handler Field Send cap for fault delivery (D21).
     crate::frame::capabilities::write_entry(
         entries,
         CHILD_CAP_TABLE_CAPACITY,
         capability::SLOT_FAULT_HANDLER,
-        capability::Entry::empty(SlotTag(0)),
+        capability::Entry {
+            object: Some((capability::ObjectType::Field, handler_field_id)),
+            rights: capability::Rights::SEND,
+            badge: Badge(0),
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        },
     );
     crate::frame::capabilities::write_entry(
         entries,
@@ -798,14 +866,29 @@ fn setup_child_cap_table(
             stored_generation: 0,
         },
     );
+    // Slot 3: Send cap to IPC Field.
     crate::frame::capabilities::write_entry(
         entries,
         CHILD_CAP_TABLE_CAPACITY,
         capability::SLOT_USER_START,
         capability::Entry {
-            object: Some((capability::ObjectType::Field, field_id)),
+            object: Some((capability::ObjectType::Field, ipc_field_id)),
             rights: capability::Rights::SEND,
             badge: Badge(IPC_TEST_BADGE),
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        },
+    );
+    // Slot 4: Space cap (child's VA range for VmFault translation).
+    crate::frame::capabilities::write_entry(
+        entries,
+        CHILD_CAP_TABLE_CAPACITY,
+        capability::SLOT_USER_START + 1,
+        capability::Entry {
+            object: Some((capability::ObjectType::Space, child_space_id)),
+            rights: capability::Rights::SPACE_ALL,
+            badge: Badge(0),
             slot_tag: SlotTag(0),
             send_once: false,
             stored_generation: 0,
@@ -909,17 +992,33 @@ pub fn enter_first_observer(ks: &KernelState) -> ! {
     //
     // Create a Field for IPC testing. Install a Receive cap in root's
     // table (slot 4) and a Send cap in child's table (slot 3).
-    let ipc_field_id = create_ipc_field(ks).expect("create IPC field");
+    let ipc_field_id = create_boot_field(ks, 2).expect("create IPC field");
 
-    // Install Receive cap at slot 4 (first free slot after root Space at slot 3).
-    let ipc_receive_slot = capability::SLOT_USER_START + 1;
+    // Phase 2.3: handler Field for fault delivery + child Space for VmFault.
+    let handler_field_id = create_boot_field(ks, 2).expect("create handler field");
+    let child_space_id = create_child_space(ks).expect("create child space");
 
+    // Install Receive cap at slot 4 (IPC Field).
     crate::frame::capabilities::write_entry(
         cap_entries,
         ROOT_CAP_TABLE_CAPACITY,
-        ipc_receive_slot,
+        capability::SLOT_USER_START + 1,
         capability::Entry {
             object: Some((capability::ObjectType::Field, ipc_field_id)),
+            rights: capability::Rights::RECEIVE,
+            badge: Badge(0),
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        },
+    );
+    // Install Receive cap at slot 5 (handler Field).
+    crate::frame::capabilities::write_entry(
+        cap_entries,
+        ROOT_CAP_TABLE_CAPACITY,
+        capability::SLOT_USER_START + 2,
+        capability::Entry {
+            object: Some((capability::ObjectType::Field, handler_field_id)),
             rights: capability::Rights::RECEIVE,
             badge: Badge(0),
             slot_tag: SlotTag(0),
@@ -936,14 +1035,14 @@ pub fn enter_first_observer(ks: &KernelState) -> ! {
 
         obs.cap_table = cap_entries;
         obs.cap_table_capacity = ROOT_CAP_TABLE_CAPACITY;
-        // Freelist starts at slot 5 (slots 3 and 4 are occupied).
-        obs.cap_table_free_head = Some(capability::SLOT_USER_START + 2);
-        obs.cap_table_count = 3;
+        // Freelist starts at slot 6 (slots 3, 4, 5 occupied).
+        obs.cap_table_free_head = Some(capability::SLOT_USER_START + 3);
+        obs.cap_table_count = 4;
         obs.clock_access = true;
     }
 
     crate::println!(
-        "boot: cap_table capacity={} installed=3 (self + root space + ipc field)",
+        "boot: cap_table capacity={} installed=4 (self + space + ipc + handler)",
         ROOT_CAP_TABLE_CAPACITY,
     );
 
@@ -952,14 +1051,15 @@ pub fn enter_first_observer(ks: &KernelState) -> ! {
 
     // ── Phase 2: child Observer for integration tests ────────────
     //
-    // Create a second Observer with its own address space, code, and
-    // stack. The child's CHILD_BINARY sends an IPC message then BRK
-    // #0x43. Root's FALLBACK_BINARY does Receive then BRK #0x44
-    // (IPC verify). Proves IPC roundtrip with full message fidelity.
+    // Create a second Observer with its own address space. The child's
+    // CHILD_BINARY sends an IPC message then touches an unmapped page
+    // (VmFault). Root's FALLBACK_BINARY does two Receives: first IPC
+    // (BRK #0x44 verify), then fault message (BRK #0x45 verify).
     //
     // Must be called AFTER init_bsp_per_core_data and set_current_observer
     // so that enqueue_observer operates on the initialized BSP_CORE_STATE.
-    let _child_ptr = create_child_observer(ks, ipc_field_id).expect("create child observer");
+    let _child_ptr = create_child_observer(ks, ipc_field_id, handler_field_id, child_space_id)
+        .expect("create child observer");
 
     crate::println!("boot: entering EL0 at {:#x}", USER_CODE_VA);
 
