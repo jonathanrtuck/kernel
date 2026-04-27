@@ -120,8 +120,8 @@
     },
     "2.5": {
       "name": "Observer destroy + cleanup",
-      "note": "Pre-flight: verify return_backing_space",
-      "status": "pending"
+      "note": "Cascade completes in one batch (4 child caps); x0=0 (no backing); BRK #0x47 verify",
+      "status": "done"
     },
     "3.1": {
       "name": "Cap table growth fault protocol",

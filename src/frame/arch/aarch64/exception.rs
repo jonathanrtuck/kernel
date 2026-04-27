@@ -245,7 +245,9 @@ fn handle_el0_sync<S: crate::time_manager::Scheduler + 'static>(
             } else if imm == 0x45 {
                 verify_fault_handling::<S>()
             } else if imm == 0x46 {
-                verify_timer_fire()
+                verify_timer_fire::<S>()
+            } else if imm == 0x47 {
+                verify_observer_destroy()
             } else {
                 handle_el0_fault::<S>(esr, far)
             }
@@ -500,18 +502,17 @@ fn verify_fault_handling<S: crate::time_manager::Scheduler + 'static>()
     crate::core_manager::DispatchResult::Resume(observer)
 }
 
-/// Phase 2.4 timer fire verification handler.
+/// Phase 2.4 timer fire verification handler (non-divergent).
 ///
 /// Called when the root Observer signals BRK #0x46 after receiving a
-/// timer_fire message on the timer Field. Verifies that the message
-/// carries the correct label (LABEL_TIMER_FIRE), badge (0xBEEF), and
-/// a non-zero fire time. This is the final test scenario — diverges
-/// via PSCI SYSTEM_OFF.
+/// timer_fire message on the timer Field. Verifies label, badge, and
+/// non-zero fire time. Advances PC and resumes for the destroy scenario.
 #[cfg(target_os = "none")]
-fn verify_timer_fire() -> ! {
+fn verify_timer_fire<S: crate::time_manager::Scheduler + 'static>()
+-> crate::core_manager::DispatchResult {
     use crate::field::LABEL_TIMER_FIRE;
 
-    let core = crate::core_manager::current_core::<crate::time_manager::round_robin::RoundRobin>();
+    let core = crate::core_manager::current_core::<S>();
     let observer = core.current.expect("must have current observer");
     let regs = crate::frame::cores::read_ipc_registers(observer);
 
@@ -533,9 +534,46 @@ fn verify_timer_fire() -> ! {
         );
         crate::println!("  badge:     {:#x} (expected 0xBEEF)", regs.handle_or_badge);
         crate::println!("  fire_time: {} (expected > 0)", regs.data[0]);
+        crate::println!();
+        crate::println!("TEST FAILED");
+        crate::println!();
+
+        super::psci::system_off()
     }
 
-    if label_ok && badge_ok && fire_time_ok {
+    crate::frame::cores::observer_advance_pc(observer);
+
+    crate::core_manager::DispatchResult::Resume(observer)
+}
+
+/// Phase 2.5 Observer destroy verification handler.
+///
+/// Called when the root Observer signals BRK #0x47 after destroying the
+/// child Observer via typed Destroy (SVC #0, op=7). Verifies x0 == 0
+/// (success, no backing Space returned because child had no backing).
+/// This is the final test scenario — diverges via PSCI SYSTEM_OFF.
+#[cfg(target_os = "none")]
+fn verify_observer_destroy() -> ! {
+    let core = crate::core_manager::current_core::<crate::time_manager::round_robin::RoundRobin>();
+    let observer = core.current.expect("must have current observer");
+    let regs = crate::frame::cores::read_typed_registers(observer);
+
+    // D98: Destroy returns the slot index of the returned Space cap,
+    // or 0 if no backing Space existed. Child had backing_size = 0.
+    let result_ok = regs.args[0] == 0;
+
+    if result_ok {
+        crate::println!("scenario: Observer destroy + cascade (x0=0, no backing) — PASS");
+    } else {
+        crate::println!("scenario: Observer destroy — FAIL");
+        crate::println!(
+            "  x0: {} (expected 0, got {:#x})",
+            regs.args[0] as i64,
+            regs.args[0],
+        );
+    }
+
+    if result_ok {
         crate::println!();
         crate::println!("TEST PASSED");
         crate::println!();

@@ -62,18 +62,20 @@ const USER_STACK_TOP: usize = USER_STACK_VA + PAGE_SIZE;
 // ── Fallback test binary (D94, Phase 2) ─────────────────────────
 //
 // Minimal EL0 program used when no DTB module is present.
-// Phase 2.2–2.4: IPC Receive, verify; fault Receive, verify; timer Receive, verify.
+// Phase 2.2–2.5: IPC, fault, timer, destroy.
 //
-// 1. SVC #2 (Receive on IPC Field, handle = slot 4) — blocks until child sends
-// 2. BRK #0x44 — IPC verify (non-divergent, advances PC, resumes)
-// 3. SVC #2 (Receive on handler Field, handle = slot 5) — gets fault message
-// 4. BRK #0x45 — fault verify (non-divergent, advances PC, resumes)
-// 5. SVC #2 (Receive on timer Field, handle = slot 6) — blocks until Pulsar fires
-// 6. BRK #0x46 — timer verify (divergent, system_off)
+// 1. SVC #2 (Receive on IPC Field, slot 4) — blocks until child sends
+// 2. BRK #0x44 — IPC verify (non-divergent)
+// 3. SVC #2 (Receive on handler Field, slot 5) — gets fault message
+// 4. BRK #0x45 — fault verify (non-divergent)
+// 5. SVC #2 (Receive on timer Field, slot 6) — blocks until Pulsar fires
+// 6. BRK #0x46 — timer verify (non-divergent)
+// 7. SVC #0 (Destroy child Observer, op=7, handle=slot 7)
+// 8. BRK #0x47 — destroy verify (divergent, system_off)
 
 #[cfg(target_os = "none")]
 const FALLBACK_BINARY: &[u8] = &{
-    let mut buf = [0u8; 36];
+    let mut buf = [0u8; 52];
 
     // movz x5, #4           → 0xD2800085  (IPC Field Receive cap)
     buf[0] = 0x85;
@@ -123,11 +125,35 @@ const FALLBACK_BINARY: &[u8] = &{
     buf[30] = 0x00;
     buf[31] = 0xD4;
 
-    // brk #0x46             → 0xD42008C0  (timer verify, divergent)
+    // brk #0x46             → 0xD42008C0  (timer verify, non-divergent)
     buf[32] = 0xC0;
     buf[33] = 0x08;
     buf[34] = 0x20;
     buf[35] = 0xD4;
+
+    // movz x4, #7           → 0xD28000E4  (Destroy op code)
+    buf[36] = 0xE4;
+    buf[37] = 0x00;
+    buf[38] = 0x80;
+    buf[39] = 0xD2;
+
+    // movz x5, #7           → 0xD28000E5  (child Observer cap, slot 7)
+    buf[40] = 0xE5;
+    buf[41] = 0x00;
+    buf[42] = 0x80;
+    buf[43] = 0xD2;
+
+    // svc #0                → 0xD4000001  (typed operation)
+    buf[44] = 0x01;
+    buf[45] = 0x00;
+    buf[46] = 0x00;
+    buf[47] = 0xD4;
+
+    // brk #0x47             → 0xD42008E0  (destroy verify, divergent)
+    buf[48] = 0xE0;
+    buf[49] = 0x08;
+    buf[50] = 0x20;
+    buf[51] = 0xD4;
 
     buf
 };
@@ -549,7 +575,7 @@ fn create_child_observer(
     ipc_field_id: crate::arena::ObjectId,
     handler_field_id: crate::arena::ObjectId,
     child_space_id: crate::arena::ObjectId,
-) -> Result<NonNull<Observer>, AllocError> {
+) -> Result<(crate::arena::ObjectId, NonNull<Observer>), AllocError> {
     let child_code_pa = alloc_zeroed_pages(ks, 1)?;
 
     // SAFETY: child_code_pa is a valid zeroed page. CHILD_BINARY fits
@@ -679,7 +705,7 @@ fn create_child_observer(
         child_code_va,
     );
 
-    Ok(child_ptr)
+    Ok((child_id, child_ptr))
 }
 
 // ── Cap table setup (Phase 5) ────────────────────────────────────
@@ -1154,14 +1180,14 @@ pub fn enter_first_observer(ks: &KernelState) -> ! {
 
         obs.cap_table = cap_entries;
         obs.cap_table_capacity = ROOT_CAP_TABLE_CAPACITY;
-        // Freelist starts at slot 7 (slots 3, 4, 5, 6 occupied).
-        obs.cap_table_free_head = Some(capability::SLOT_USER_START + 4);
-        obs.cap_table_count = 5;
+        // Freelist starts at slot 8 (slots 3–7 occupied).
+        obs.cap_table_free_head = Some(capability::SLOT_USER_START + 5);
+        obs.cap_table_count = 6;
         obs.clock_access = true;
     }
 
     crate::println!(
-        "boot: cap_table capacity={} installed=5 (self + space + ipc + handler + timer)",
+        "boot: cap_table capacity={} installed=6 (self+space+ipc+handler+timer+child)",
         ROOT_CAP_TABLE_CAPACITY,
     );
 
@@ -1189,8 +1215,25 @@ pub fn enter_first_observer(ks: &KernelState) -> ! {
     //
     // Must be called AFTER init_bsp_per_core_data and set_current_observer
     // so that enqueue_observer operates on the initialized BSP_CORE_STATE.
-    let _child_ptr = create_child_observer(ks, ipc_field_id, handler_field_id, child_space_id)
-        .expect("create child observer");
+    let (child_id, _child_ptr) =
+        create_child_observer(ks, ipc_field_id, handler_field_id, child_space_id)
+            .expect("create child observer");
+
+    // Phase 2.5: install child Observer cap at slot 7 in root's table
+    // so the root can issue Destroy. OBSERVER_ALL includes Destroy right.
+    crate::frame::capabilities::write_entry(
+        cap_entries,
+        ROOT_CAP_TABLE_CAPACITY,
+        capability::SLOT_USER_START + 4,
+        capability::Entry {
+            object: Some((capability::ObjectType::Observer, child_id)),
+            rights: capability::Rights::OBSERVER_ALL,
+            badge: Badge(0),
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        },
+    );
 
     crate::println!("boot: entering EL0 at {:#x}", USER_CODE_VA);
 
