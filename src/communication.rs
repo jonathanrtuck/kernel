@@ -2190,4 +2190,109 @@ mod tests {
             ReceiveOutcome::Blocked
         ));
     }
+
+    // ── D45: Split routing integration ──────────────────────────────
+    //
+    // These tests verify the pattern used by dispatch_ipc: resolve_route
+    // on the source Field, then send to the routed destination Field.
+    // dispatch_ipc does this re-resolution; communication::send always
+    // operates on the final (already-resolved) Field.
+
+    /// D45: when resolve_route returns a destination, send should target
+    /// that destination (not the source). Demonstrates the dispatch
+    /// pattern: resolve → re-target → send.
+    #[test]
+    fn test_d45_send_to_routed_field_not_source() {
+        use crate::arena::ObjectId;
+
+        let mut source_field = test_field(4);
+        let mut dest_field = test_field(4);
+
+        // Add a route: badges [100, 200] -> ObjectId(7).
+        source_field.add_route(100, 200, ObjectId(7), 0).unwrap();
+
+        // Simulate what dispatch_ipc does: resolve_route then send to dest.
+        let badge_value = 150u64;
+        let routed = source_field.resolve_route(badge_value);
+
+        assert_eq!(
+            routed,
+            Some(ObjectId(7)),
+            "D45: badge 150 must route to ObjectId(7)"
+        );
+
+        // Send to the destination field (the one dispatch_ipc would re-resolve to).
+        let msg = make_message(42, badge_value);
+        let result = send(&mut dest_field, msg).expect("send must succeed");
+
+        assert!(matches!(result, SendOutcome::Enqueued));
+        assert_eq!(
+            dest_field.queue_length, 1,
+            "D45: message must be in the destination field's queue"
+        );
+        assert_eq!(
+            source_field.queue_length, 0,
+            "D45: source field's queue must be empty"
+        );
+    }
+
+    /// D45: when resolve_route returns None (badge outside all ranges),
+    /// the message stays in the source field.
+    #[test]
+    fn test_d45_unrouted_badge_stays_in_source() {
+        use crate::arena::ObjectId;
+
+        let mut source_field = test_field(4);
+
+        // Route covers [100, 200] only.
+        source_field.add_route(100, 200, ObjectId(7), 0).unwrap();
+
+        // Badge 50 is outside the route range.
+        let routed = source_field.resolve_route(50);
+
+        assert!(
+            routed.is_none(),
+            "D45: badge 50 outside range must not route"
+        );
+
+        // Send to source (no re-targeting).
+        let msg = make_message(99, 50);
+        let result = send(&mut source_field, msg).expect("send must succeed");
+
+        assert!(matches!(result, SendOutcome::Enqueued));
+        assert_eq!(
+            source_field.queue_length, 1,
+            "D45: unrouted message must be in the source field's queue"
+        );
+    }
+
+    /// D45: routing applies to both Send and Call paths.
+    #[test]
+    fn test_d45_call_to_routed_field() {
+        use crate::arena::ObjectId;
+
+        let mut source_field = test_field(4);
+        let mut dest_field = test_field(4);
+
+        source_field.add_route(10, 20, ObjectId(3), 0).unwrap();
+
+        // Badge 15 is in the route range.
+        let routed = source_field.resolve_route(15);
+
+        assert_eq!(routed, Some(ObjectId(3)));
+
+        // Call goes to dest_field (what dispatch_ipc would resolve to).
+        let msg = make_message(77, 15);
+        let result = call(&mut dest_field, msg, Badge(0)).expect("call must succeed");
+
+        assert!(matches!(result, CallOutcome::Enqueued));
+        assert_eq!(
+            dest_field.queue_length, 1,
+            "D45: call must reach dest field"
+        );
+        assert_eq!(
+            source_field.queue_length, 0,
+            "D45: source must be untouched"
+        );
+    }
 }

@@ -408,6 +408,25 @@ impl<S: Scheduler> CoreState<S> {
 
         let badge = entry.badge;
 
+        // ── D45: resolve split routing ─────────────────────────────
+        //
+        // After resolving the primary Field, check the routing table
+        // for a badge-range match. If a route matches, re-resolve to
+        // the destination Field. If no route matches, deliver to the
+        // source (primary) Field as before.
+        let target_field = if let Some(dest_id) = target_field.resolve_route(badge.0) {
+            match fields_guard.get_mut(dest_id) {
+                Some(dest_field) => dest_field,
+                None => {
+                    // D55: stale routing entry — destination was freed.
+                    // Fall back to the source Field (already resolved).
+                    fields_guard.get_mut(object_id).unwrap()
+                }
+            }
+        } else {
+            target_field
+        };
+
         // ── Dispatch per operation ──────────────────────────────────
         match operation {
             crate::syscall::IpcOperation::Send => {
