@@ -255,6 +255,8 @@ fn handle_el0_sync<S: crate::time_manager::Scheduler + 'static>(
                 verify_timer_fire::<S>()
             } else if imm == 0x47 {
                 verify_observer_destroy()
+            } else if imm == 0x48 {
+                bench_emit::<S>()
             } else {
                 handle_el0_fault::<S>(esr, far)
             }
@@ -526,6 +528,33 @@ fn verify_observer_destroy() -> ! {
     }
 
     super::psci::system_off()
+}
+
+/// Benchmark data point emission handler.
+///
+/// Called when a benchmark binary executes BRK #0x48. Reads x0–x3 from
+/// the Observer's saved registers, prints a structured BENCH line to
+/// serial, advances PC past the BRK, and resumes the Observer.
+///
+/// The kernel does not interpret the register semantics — it just prints
+/// them as zero-padded hex for the host benchmark runner to parse.
+#[cfg(target_os = "none")]
+fn bench_emit<S: crate::time_manager::Scheduler + 'static>()
+-> crate::core_manager::DispatchResult {
+    let core = crate::core_manager::current_core::<S>();
+    let observer = core.current.expect("must have current observer");
+    let regs = crate::frame::cores::read_typed_registers(observer);
+
+    crate::println!(
+        "    BENCH {:016x} {:016x} {:016x} {:016x}",
+        regs.args[0],
+        regs.args[1],
+        regs.args[2],
+        regs.args[3],
+    );
+
+    crate::frame::cores::observer_advance_pc(observer);
+    crate::core_manager::DispatchResult::Resume(observer)
 }
 
 /// Fatal EL0 exception — dump state and halt.
