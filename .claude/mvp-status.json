@@ -11,7 +11,7 @@
     "0.10": {
       "name": "Scheduler duplicate prevention",
       "note": "",
-      "status": "pending"
+      "status": "in_progress"
     },
     "0.11": {
       "name": "Slab MaybeUninit soundness",
@@ -70,8 +70,8 @@
     },
     "0.9": {
       "name": "SlotTag u64 upgrade",
-      "note": "",
-      "status": "in_progress"
+      "note": "ABI carries 32 bits of tag; internal counter is u64",
+      "status": "done"
     },
     "1.1": {
       "name": "TTBR1 kernel linear map",

@@ -83,15 +83,10 @@ impl Scheduler for RoundRobin {
     /// before enqueuing, and Runnable → Runnable is not a valid
     /// transition).
     fn enqueue(&mut self, observer: NonNull<Observer>) {
-        debug_assert!(
-            (self.count as usize) < MAX_QUEUE_DEPTH,
-            "run queue overflow: {} observers already enqueued (max {MAX_QUEUE_DEPTH})",
-            self.count
-        );
-        debug_assert!(
-            !self.contains(observer),
-            "double-enqueue: Observer already in run queue"
-        );
+        // D2: idempotent enqueue — reject duplicates to prevent queue corruption.
+        if self.contains(observer) {
+            return;
+        }
 
         if (self.count as usize) >= MAX_QUEUE_DEPTH {
             return;
