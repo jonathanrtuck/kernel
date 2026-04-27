@@ -1373,6 +1373,14 @@ impl<S: Scheduler> CoreState<S> {
                         // D98: preemptible cascade — initiate and block destroyer.
                         if cap_capacity_target == 0 {
                             // No caps to cascade — complete immediately.
+                            // D98: dequeue from scheduler before freeing.
+                            if let Some(target_ptr) = crate::frame::cores::observer_ptr_from_arena(
+                                kernel_state,
+                                object_id,
+                            ) {
+                                self.scheduler.dequeue(target_ptr);
+                            }
+
                             {
                                 let mut observers = kernel_state.observers.acquire();
 
@@ -1414,6 +1422,14 @@ impl<S: Scheduler> CoreState<S> {
 
                             if cascade.is_empty() {
                                 // Cascade completed in the first batch.
+                                // D98: dequeue from scheduler before freeing.
+                                if let Some(ptr) = crate::frame::cores::observer_ptr_from_arena(
+                                    kernel_state,
+                                    object_id,
+                                ) {
+                                    self.scheduler.dequeue(ptr);
+                                }
+
                                 {
                                     let mut observers = kernel_state.observers.acquire();
 
@@ -2564,6 +2580,13 @@ impl<S: Scheduler> CoreState<S> {
             {
                 let cascade = self.cascade_continuation.take().unwrap();
                 let destroyer_ptr = cascade.destroyer_ptr;
+
+                // D98: dequeue from scheduler before freeing.
+                if let Some(target_ptr) =
+                    crate::frame::cores::observer_ptr_from_arena(kernel_state, cascade.target_id)
+                {
+                    self.scheduler.dequeue(target_ptr);
+                }
 
                 {
                     let mut observers = kernel_state.observers.acquire();
