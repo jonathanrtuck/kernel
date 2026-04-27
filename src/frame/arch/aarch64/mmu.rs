@@ -375,6 +375,14 @@ pub fn kernel_end_address() -> usize {
     linker_addr(&raw const __kernel_end)
 }
 
+/// Physical address of the kernel's L2 root table (D88, D89).
+///
+/// Per-Observer L1 tables chain to this via L1[0] → L2_ROOT to provide
+/// identity-mapped kernel code access. The L2 table covers VA 0..64 GiB.
+pub fn kernel_l2_root_pa() -> usize {
+    L2_ROOT.0.get() as usize
+}
+
 // ---------------------------------------------------------------------------
 // Initialization
 // ---------------------------------------------------------------------------

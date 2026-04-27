@@ -122,6 +122,29 @@ pub(super) fn alloc_zeroed_pages(ks: &KernelState, count: usize) -> Result<usize
     Ok(pa)
 }
 
+/// Allocate and initialize a per-Observer L1 page table (D89).
+///
+/// Allocates one zeroed page, sets L1\[0\] → kernel L2_ROOT (identity map
+/// for kernel code), and returns the physical address of the L1 table.
+/// The remaining L1 entries are zero (invalid) — user mappings are
+/// installed later via the map/unmap protocol (Phase 1.4).
+#[cfg(target_os = "none")]
+pub fn allocate_observer_l1(ks: &KernelState) -> Result<usize, AllocError> {
+    let l1_pa = alloc_zeroed_pages(ks, 1)?;
+    let l2_root_pa = mmu::kernel_l2_root_pa();
+
+    // SAFETY: l1_pa points to a zeroed page exclusively owned by us.
+    // D88: phys_to_virt converts to TTBR1 linear map VA. We write one
+    // L1 table descriptor at index 0 to chain to the kernel's L2 root.
+    unsafe {
+        let l1 = &mut *(mmu::phys_to_virt(l1_pa) as *mut [u64; page_table::ENTRIES_PER_TABLE]);
+
+        l1[0] = page_table::table_descriptor(l2_root_pa as u64);
+    }
+
+    Ok(l1_pa)
+}
+
 /// Build the user L3 table and install it in the kernel's L2 root (Phase E).
 ///
 /// Maps code_pa at USER_CODE_VA (RO, executable) and stack_pa at
@@ -485,8 +508,8 @@ pub fn enter_first_observer(ks: &KernelState) -> ! {
 
     let rs_pa = setup_register_state(ks).expect("allocate register state");
     let asid = crate::frame::cores::allocate_asid(ks);
-    let l1_root_pa = mmu::ttbr_base_address(mmu::current_ttbr0());
-    let page_table_root = mmu::make_ttbr0(asid, l1_root_pa);
+    let l1_pa = allocate_observer_l1(ks).expect("allocate root observer L1");
+    let page_table_root = mmu::make_ttbr0(asid, l1_pa as u64);
     let (obs_id, obs_ptr) =
         create_root_observer(ks, rs_pa, page_table_root, asid).expect("create root observer");
     // ── Root Space and cap table setup (Phase 5) ────────────────

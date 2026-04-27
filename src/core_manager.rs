@@ -2229,15 +2229,25 @@ impl<S: Scheduler> CoreState<S> {
                         Some(ptr) => ptr,
                         None => return typed_error(SyscallError::InsufficientResource),
                     };
+                #[cfg(target_os = "none")]
+                let l1_pa = match crate::frame::boot::allocate_observer_l1(kernel_state) {
+                    Ok(pa) => pa,
+                    Err(_) => return typed_error(SyscallError::InsufficientResource),
+                };
 
                 let observer_id = {
                     let mut observers = kernel_state.observers.acquire();
                     let asid = crate::frame::cores::allocate_asid(kernel_state);
+                    #[cfg(target_os = "none")]
+                    let page_table_root =
+                        { crate::frame::arch::mmu::make_ttbr0(asid, l1_pa as u64) };
+                    #[cfg(not(target_os = "none"))]
+                    let page_table_root = 0u64;
                     let new_obs = crate::observer::Observer {
                         object_id: ObjectId(0),
                         asid,
                         register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
-                        page_table_root: 0,
+                        page_table_root,
                         cap_table: cap_entries_new,
                         cap_table_capacity: cap_capacity_new,
                         cap_table_free_head: Some(crate::capability::SLOT_USER_START),
