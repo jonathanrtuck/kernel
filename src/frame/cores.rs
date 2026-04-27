@@ -805,6 +805,17 @@ pub fn observer_set_faulted(
     unsafe { (*observer_ptr.as_ptr()).fault() }
 }
 
+/// Transition an Observer from Inert/Faulted to Runnable (D39).
+///
+/// Returns Ok(()) on success, Err if the transition is invalid.
+#[cfg(any(target_os = "none", test))]
+pub fn observer_resume(
+    observer_ptr: NonNull<Observer>,
+) -> Result<(), crate::observer::ObserverError> {
+    // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy.
+    unsafe { (*observer_ptr.as_ptr()).resume() }
+}
+
 /// Read the faulting Observer's saved PC (D100 diagnostic output).
 ///
 /// Returns the ELR_EL1 value saved in RegisterState — the instruction

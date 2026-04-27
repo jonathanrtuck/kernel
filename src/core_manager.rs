@@ -1125,63 +1125,37 @@ impl<S: Scheduler> CoreState<S> {
         match operation {
             // ── Observer operations ──────────────────────────────────
             TypedOperation::ObserverResume => {
-                let mut observers = kernel_state.observers.acquire();
-                let observer = match observers.get_mut(object_id) {
-                    Some(o) => o,
-                    None => return typed_error(SyscallError::InvalidCap),
+                let obs_ptr = match validated_observer_ptr(kernel_state, object_id, entry) {
+                    Ok(ptr) => ptr,
+                    Err(e) => return typed_error(e),
                 };
-                let live_gen = observer.generation.load(Ordering::Acquire);
 
-                if !entry.check_generation(live_gen) {
-                    return typed_error(SyscallError::StaleCap);
+                if crate::frame::cores::observer_resume(obs_ptr).is_err() {
+                    return typed_error(SyscallError::InvalidState);
                 }
 
-                match observer.resume() {
-                    Ok(()) => {
-                        let obs_ptr = NonNull::from(&mut *observer);
-
-                        drop(observers);
-
-                        self.scheduler.enqueue(obs_ptr);
-
-                        typed_ok(0)
-                    }
-                    Err(_) => typed_error(SyscallError::InvalidState),
-                }
-            }
-            TypedOperation::ObserverSuspend => {
-                let mut observers = kernel_state.observers.acquire();
-                let observer = match observers.get_mut(object_id) {
-                    Some(o) => o,
-                    None => return typed_error(SyscallError::InvalidCap),
-                };
-                let live_gen = observer.generation.load(Ordering::Acquire);
-
-                if !entry.check_generation(live_gen) {
-                    return typed_error(SyscallError::StaleCap);
-                }
-
-                observer.suspend();
+                self.scheduler.enqueue(obs_ptr);
 
                 typed_ok(0)
+            }
+            TypedOperation::ObserverSuspend => {
+                match with_validated_observer_mut(kernel_state, object_id, entry, |observer| {
+                    observer.suspend();
+                }) {
+                    Ok(()) => typed_ok(0),
+                    Err(e) => typed_error(e),
+                }
             }
             TypedOperation::ObserverSetScheduling => {
                 let responsiveness = regs.args[0] as u8;
                 let throughput = regs.args[1] as u8;
-                let mut observers = kernel_state.observers.acquire();
-                let observer = match observers.get_mut(object_id) {
-                    Some(o) => o,
-                    None => return typed_error(SyscallError::InvalidCap),
-                };
-                let live_gen = observer.generation.load(Ordering::Acquire);
 
-                if !entry.check_generation(live_gen) {
-                    return typed_error(SyscallError::StaleCap);
-                }
-
-                match observer.set_scheduling(responsiveness, throughput) {
-                    Ok(()) => typed_ok(0),
-                    Err(_) => typed_error(SyscallError::InvalidProfile),
+                match with_validated_observer_mut(kernel_state, object_id, entry, |observer| {
+                    observer.set_scheduling(responsiveness, throughput)
+                }) {
+                    Ok(Ok(())) => typed_ok(0),
+                    Ok(Err(_)) => typed_error(SyscallError::InvalidProfile),
+                    Err(e) => typed_error(e),
                 }
             }
             TypedOperation::ObserverInstallCap => {
@@ -1197,21 +1171,10 @@ impl<S: Scheduler> CoreState<S> {
                     Some(pair) => pair,
                     None => return typed_error(SyscallError::InvalidCap),
                 };
-                let mut observers = kernel_state.observers.acquire();
-                let observer = match observers.get_mut(object_id) {
-                    Some(o) => o,
-                    None => return typed_error(SyscallError::InvalidCap),
+                let target_ptr = match validated_observer_ptr(kernel_state, object_id, entry) {
+                    Ok(ptr) => ptr,
+                    Err(e) => return typed_error(e),
                 };
-                let live_gen = observer.generation.load(Ordering::Acquire);
-
-                if !entry.check_generation(live_gen) {
-                    return typed_error(SyscallError::StaleCap);
-                }
-
-                let target_ptr = NonNull::from(&mut *observer);
-
-                drop(observers);
-
                 let transferred = capability::TransferredCap {
                     object_type: source_type,
                     object_id: source_id,
@@ -1231,21 +1194,10 @@ impl<S: Scheduler> CoreState<S> {
             }
             TypedOperation::ObserverWriteRegisters => {
                 // D103: inline register transfer — PC, SP, x0, PSTATE.
-                let mut observers = kernel_state.observers.acquire();
-                let observer = match observers.get_mut(object_id) {
-                    Some(o) => o,
-                    None => return typed_error(SyscallError::InvalidCap),
+                let target_ptr = match validated_observer_ptr(kernel_state, object_id, entry) {
+                    Ok(ptr) => ptr,
+                    Err(e) => return typed_error(e),
                 };
-                let live_gen = observer.generation.load(Ordering::Acquire);
-
-                if !entry.check_generation(live_gen) {
-                    return typed_error(SyscallError::StaleCap);
-                }
-
-                let target_ptr = NonNull::from(&mut *observer);
-
-                drop(observers);
-
                 // ABI: x0=PC, x1=SP, x2=target's x0, x3=PSTATE (masked).
                 const PSTATE_USER_MASK: u64 = 0xF000_0000;
                 let pc = regs.args[0];
@@ -1267,20 +1219,10 @@ impl<S: Scheduler> CoreState<S> {
             }
             TypedOperation::ObserverReadRegisters => {
                 // D103: inline register read — PC, SP, x0, PSTATE.
-                let mut observers = kernel_state.observers.acquire();
-                let observer = match observers.get_mut(object_id) {
-                    Some(o) => o,
-                    None => return typed_error(SyscallError::InvalidCap),
+                let target_ptr = match validated_observer_ptr(kernel_state, object_id, entry) {
+                    Ok(ptr) => ptr,
+                    Err(e) => return typed_error(e),
                 };
-                let live_gen = observer.generation.load(Ordering::Acquire);
-
-                if !entry.check_generation(live_gen) {
-                    return typed_error(SyscallError::StaleCap);
-                }
-
-                let target_ptr = NonNull::from(&mut *observer);
-
-                drop(observers);
 
                 match crate::frame::cores::observer_read_registers(target_ptr) {
                     Some((pc, sp, x0, pstate)) => {
@@ -1319,20 +1261,10 @@ impl<S: Scheduler> CoreState<S> {
 
                 let handler_badge = capability::Badge(regs.args[1]);
                 let handler_stored_gen = handler_entry.stored_generation;
-                let mut observers = kernel_state.observers.acquire();
-                let observer = match observers.get_mut(object_id) {
-                    Some(o) => o,
-                    None => return typed_error(SyscallError::InvalidCap),
+                let target_ptr = match validated_observer_ptr(kernel_state, object_id, entry) {
+                    Ok(ptr) => ptr,
+                    Err(e) => return typed_error(e),
                 };
-                let live_gen = observer.generation.load(Ordering::Acquire);
-
-                if !entry.check_generation(live_gen) {
-                    return typed_error(SyscallError::StaleCap);
-                }
-
-                let target_ptr = NonNull::from(&mut *observer);
-
-                drop(observers);
                 let new_handler = capability::Entry {
                     object: Some((ObjectType::Field, handler_id)),
                     rights: Rights::SEND,
@@ -1385,12 +1317,8 @@ impl<S: Scheduler> CoreState<S> {
 
                         // D98: table-full check BEFORE marking dead. Need a free
                         // slot for the return Space cap (if backing exists).
-                        if backing_sz > 0 {
-                            let has_free = crate::frame::cores::observer_has_free_slot(sender_ptr);
-
-                            if !has_free {
-                                return typed_error(SyscallError::TableFull);
-                            }
+                        if let Err(e) = check_destroy_backing(sender_ptr, backing_sz) {
+                            return typed_error(e);
                         }
 
                         {
@@ -1483,12 +1411,8 @@ impl<S: Scheduler> CoreState<S> {
                             return typed_error(SyscallError::StaleCap);
                         }
 
-                        if backing_sz > 0 {
-                            let has_free = crate::frame::cores::observer_has_free_slot(sender_ptr);
-
-                            if !has_free {
-                                return typed_error(SyscallError::TableFull);
-                            }
+                        if let Err(e) = check_destroy_backing(sender_ptr, backing_sz) {
+                            return typed_error(e);
                         }
 
                         {
@@ -1524,12 +1448,8 @@ impl<S: Scheduler> CoreState<S> {
                             return typed_error(SyscallError::StaleCap);
                         }
 
-                        if backing_sz > 0 {
-                            let has_free = crate::frame::cores::observer_has_free_slot(sender_ptr);
-
-                            if !has_free {
-                                return typed_error(SyscallError::TableFull);
-                            }
+                        if let Err(e) = check_destroy_backing(sender_ptr, backing_sz) {
+                            return typed_error(e);
                         }
 
                         // D99: remove Pulsar from per-core deadline array.
@@ -2927,6 +2847,84 @@ impl<S: Scheduler> CoreState<S> {
 
         DispatchResult::FatalFault
     }
+}
+
+// ── Validation helpers (D67, D77) ─────────────────────────────────
+//
+// These extract the repeated "acquire arena, look up object, check
+// generation" pattern used by typed operation dispatch. Each is a
+// single verification boundary: one function, one Verus contract.
+
+/// Acquire the observers arena, validate the target exists and the cap
+/// entry's generation matches, extract a NonNull pointer, and release
+/// the lock.
+///
+/// The pointer remains valid after lock release because arena slots are
+/// stable for the object's lifetime (D70: no compaction).
+///
+/// Verus contract:
+///   requires: object_id from a resolved cap entry
+///   ensures:  Ok(ptr) => ptr refers to an Observer whose generation
+///             matches entry.stored_generation
+///             Err(InvalidCap) => arena slot is empty
+///             Err(StaleCap) => object exists but generation mismatch
+#[cfg(any(target_os = "none", test))]
+fn validated_observer_ptr(
+    kernel_state: &KernelState,
+    object_id: ObjectId,
+    entry: &crate::capability::Entry,
+) -> Result<NonNull<Observer>, crate::syscall::SyscallError> {
+    let mut observers = kernel_state.observers.acquire();
+    let observer = observers
+        .get_mut(object_id)
+        .ok_or(crate::syscall::SyscallError::InvalidCap)?;
+    let live_gen = observer.generation.load(Ordering::Acquire);
+
+    if !entry.check_generation(live_gen) {
+        return Err(crate::syscall::SyscallError::StaleCap);
+    }
+
+    Ok(NonNull::from(&mut *observer))
+}
+
+/// Acquire the observers arena, validate the target, and call `f` with
+/// a mutable reference to the Observer while the lock is held.
+///
+/// For operations that need to mutate the Observer under the lock
+/// (ObserverSuspend, ObserverSetScheduling) rather than extracting a
+/// pointer for post-lock use.
+#[cfg(any(target_os = "none", test))]
+fn with_validated_observer_mut<R>(
+    kernel_state: &KernelState,
+    object_id: ObjectId,
+    entry: &crate::capability::Entry,
+    f: impl FnOnce(&mut Observer) -> R,
+) -> Result<R, crate::syscall::SyscallError> {
+    let mut observers = kernel_state.observers.acquire();
+    let observer = observers
+        .get_mut(object_id)
+        .ok_or(crate::syscall::SyscallError::InvalidCap)?;
+    let live_gen = observer.generation.load(Ordering::Acquire);
+
+    if !entry.check_generation(live_gen) {
+        return Err(crate::syscall::SyscallError::StaleCap);
+    }
+
+    Ok(f(observer))
+}
+
+/// Check that the sender has a free cap slot for the return Space cap
+/// before committing to a destroy operation (D98).
+#[cfg(any(target_os = "none", test))]
+fn check_destroy_backing(
+    sender_ptr: NonNull<Observer>,
+    backing_size: usize,
+) -> Result<(), crate::syscall::SyscallError> {
+    if backing_size > 0 && !crate::frame::cores::observer_has_free_slot(sender_ptr) {
+        return Err(crate::syscall::SyscallError::TableFull);
+    }
+
+    Ok(())
 }
 
 // ── Creation-path helpers (D95, D32) ────────────────────────────────
