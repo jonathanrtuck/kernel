@@ -1701,9 +1701,47 @@ impl<S: Scheduler> CoreState<S> {
                     sm.root_pool.page_size
                 };
 
+                let parent_l3_pa = space.l3_table_pa;
+
                 match space.split(split_size, page_size) {
                     Ok((new_va, rounded_size)) => {
+                        let parent_new_pages = space.size / page_size;
+
                         drop(spaces);
+
+                        // D90: allocate L3 for child Space and populate with
+                        // page descriptors for the split-off range.
+                        let child_page_count = rounded_size / page_size;
+                        #[cfg(target_os = "none")]
+                        let child_l3_pa = match crate::frame::boot::allocate_space_l3(
+                            kernel_state,
+                            new_va as u64,
+                            child_page_count,
+                        ) {
+                            Ok(pa) => {
+                                // Clear parent L3 entries for transferred pages.
+                                if parent_l3_pa != 0 {
+                                    crate::frame::boot::clear_space_l3_entries(
+                                        parent_l3_pa,
+                                        parent_new_pages,
+                                        parent_new_pages + child_page_count,
+                                    );
+                                }
+
+                                pa
+                            }
+                            Err(_) => {
+                                let mut spaces = kernel_state.spaces.acquire();
+
+                                if let Some(s) = spaces.get_mut(object_id) {
+                                    s.size += rounded_size;
+                                }
+
+                                return typed_error(SyscallError::InsufficientResource);
+                            }
+                        };
+                        #[cfg(not(target_os = "none"))]
+                        let child_l3_pa = 0u64;
 
                         let new_space_id = {
                             let mut spaces = kernel_state.spaces.acquire();
@@ -1712,7 +1750,7 @@ impl<S: Scheduler> CoreState<S> {
                                 Ok((id, new_space)) => {
                                     new_space.va_base = new_va;
                                     new_space.size = rounded_size;
-                                    new_space.l3_table_pa = 0;
+                                    new_space.l3_table_pa = child_l3_pa;
                                     new_space.refcount = 1;
                                     new_space.generation = core::sync::atomic::AtomicU64::new(0);
 
@@ -2383,6 +2421,27 @@ impl<S: Scheduler> CoreState<S> {
                         }
                     };
 
+                    // D90: allocate L3 for the new Space.
+                    #[cfg(target_os = "none")]
+                    let new_l3_pa = match crate::frame::boot::allocate_space_l3(
+                        kernel_state,
+                        new_va as u64,
+                        rounded_size / page_size,
+                    ) {
+                        Ok(pa) => pa,
+                        Err(_) => {
+                            let mut spaces = kernel_state.spaces.acquire();
+
+                            if let Some(s) = spaces.get_mut(object_id) {
+                                s.size += rounded_size;
+                            }
+
+                            return typed_error(SyscallError::InsufficientResource);
+                        }
+                    };
+                    #[cfg(not(target_os = "none"))]
+                    let new_l3_pa = 0u64;
+
                     let new_space_id = {
                         let mut spaces = kernel_state.spaces.acquire();
 
@@ -2390,7 +2449,7 @@ impl<S: Scheduler> CoreState<S> {
                             Ok((id, space)) => {
                                 space.va_base = new_va;
                                 space.size = rounded_size;
-                                space.l3_table_pa = 0;
+                                space.l3_table_pa = new_l3_pa;
                                 space.refcount = 1;
                                 space.generation = core::sync::atomic::AtomicU64::new(0);
 
@@ -2905,6 +2964,25 @@ fn return_backing_space(
         return 0;
     }
 
+    // D90: allocate L3 for the returned Space.
+    #[cfg(target_os = "none")]
+    let return_l3_pa = {
+        let page_size = {
+            let sm = kernel_state.space_manager.acquire();
+
+            sm.root_pool.page_size
+        };
+
+        crate::frame::boot::allocate_space_l3(
+            kernel_state,
+            backing_va as u64,
+            backing_size / page_size,
+        )
+        .unwrap_or(0)
+    };
+    #[cfg(not(target_os = "none"))]
+    let return_l3_pa = 0u64;
+
     let return_space_id = {
         let mut spaces = kernel_state.spaces.acquire();
 
@@ -2912,7 +2990,7 @@ fn return_backing_space(
             Ok((id, space)) => {
                 space.va_base = backing_va;
                 space.size = backing_size;
-                space.l3_table_pa = 0;
+                space.l3_table_pa = return_l3_pa;
                 space.refcount = 1;
                 space.generation = core::sync::atomic::AtomicU64::new(0);
                 id

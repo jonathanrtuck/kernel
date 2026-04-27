@@ -145,6 +145,54 @@ pub fn allocate_observer_l1(ks: &KernelState) -> Result<usize, AllocError> {
     Ok(l1_pa)
 }
 
+/// Allocate and populate an L3 page table for a Space (D90).
+///
+/// Allocates one zeroed page, fills it with user page descriptors for
+/// `page_count` pages starting at `pa_base`, and returns the L3 PA.
+/// Clamps to `ENTRIES_PER_TABLE` entries (2048 pages per L3).
+#[cfg(target_os = "none")]
+pub fn allocate_space_l3(
+    ks: &KernelState,
+    pa_base: u64,
+    page_count: usize,
+) -> Result<u64, AllocError> {
+    let l3_pa = alloc_zeroed_pages(ks, 1)?;
+
+    // SAFETY: l3_pa points to a zeroed page exclusively owned by us.
+    // populate_l3_at_pa converts PA to TTBR1 VA and writes page descriptors.
+    unsafe {
+        crate::frame::mapping::populate_l3_at_pa(l3_pa as u64, pa_base, page_count);
+    }
+
+    Ok(l3_pa as u64)
+}
+
+/// Clear L3 entries in a Space's L3 table after a split (D90).
+///
+/// Clears entries from `from_idx` to `to_idx` (exclusive), clamped to
+/// `ENTRIES_PER_TABLE`. Called on the parent Space after SpaceSplit to
+/// remove descriptors for pages transferred to the child.
+#[cfg(target_os = "none")]
+pub fn clear_space_l3_entries(l3_table_pa: u64, from_idx: usize, to_idx: usize) {
+    let clamped_to = to_idx.min(page_table::ENTRIES_PER_TABLE);
+
+    if from_idx >= clamped_to {
+        return;
+    }
+
+    // SAFETY: l3_table_pa points to a valid L3 page owned by this Space.
+    // D88: phys_to_virt converts to TTBR1 VA. We clear entries for pages
+    // that were transferred to the child Space.
+    unsafe {
+        let l3 = &mut *(mmu::phys_to_virt(l3_table_pa as usize)
+            as *mut [u64; page_table::ENTRIES_PER_TABLE]);
+
+        for i in from_idx..clamped_to {
+            page_table::clear_page_entry(l3, i);
+        }
+    }
+}
+
 /// Build the user L3 table and install it in the kernel's L2 root (Phase E).
 ///
 /// Maps code_pa at USER_CODE_VA (RO, executable) and stack_pa at
@@ -447,12 +495,20 @@ fn create_root_space(ks: &KernelState) -> Result<crate::arena::ObjectId, AllocEr
 
         (sm.next_va_base, sm.root_pool.free_bytes)
     };
+    let page_size = {
+        let sm = ks.space_manager.acquire();
+
+        sm.root_pool.page_size
+    };
+    let page_count = size / page_size;
+    let l3_pa = allocate_space_l3(ks, va_base as u64, page_count)?;
+
     let mut spaces = ks.spaces.acquire();
     let (space_id, space) = spaces.allocate()?;
 
     space.va_base = va_base;
     space.size = size;
-    space.l3_table_pa = 0;
+    space.l3_table_pa = l3_pa;
     space.refcount = 1;
     space.generation = AtomicU64::new(0);
 
