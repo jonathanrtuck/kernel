@@ -1,0 +1,193 @@
+#!/bin/bash
+# Run benchmark binaries and collect results.
+#
+# Builds the kernel and all bench_*.rs binaries, runs each under the
+# hypervisor, collects BENCH lines from serial output, and formats a
+# results table.
+#
+# ── Benchmark protocol ──────────────────────────────────────────────
+#
+# BRK #0x48 emits a data point: kernel prints
+#   BENCH <x0> <x1> <x2> <x3>  (16-char zero-padded hex)
+# then advances PC and resumes the Observer.
+#
+# Stats::emit produces 5 consecutive BENCH lines per group:
+#   tag+0=min, tag+1=median, tag+2=p99, tag+3=mean, tag+4=count.
+# The script detects these groups and formats them as summary lines.
+
+set -eo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+DIM='\033[2m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+info() { printf "${DIM}info${RESET}  %s\n" "$1"; }
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+TEST_DIR="$PROJECT_DIR/tests"
+KERNEL="$PROJECT_DIR/target/aarch64-unknown-none/debug/kernel"
+HYPERVISOR="$HOME/.local/bin/hypervisor"
+LLVM_OBJCOPY="$(find "$(rustc --print sysroot)/lib/rustlib" -name 'llvm-objcopy' 2>/dev/null | head -1)"
+TIMEOUT=30
+
+# ── Preflight checks ──────────────────────────────────────────────
+
+if [ ! -x "$HYPERVISOR" ]; then
+    echo "error: hypervisor not found at $HYPERVISOR" >&2
+    exit 1
+fi
+
+if [ -z "$LLVM_OBJCOPY" ] || [ ! -x "$LLVM_OBJCOPY" ]; then
+    echo "error: llvm-objcopy not found in rustc sysroot" >&2
+    exit 1
+fi
+
+# ── Build ──────────────────────────────────────────────────────────
+
+info "building kernel"
+if ! cargo build 2>/dev/null; then
+    echo "error: kernel build failed" >&2
+    exit 1
+fi
+
+info "building bench binaries"
+if ! cargo build --manifest-path "$TEST_DIR/Cargo.toml" 2>/dev/null; then
+    echo "error: bench build failed" >&2
+    exit 1
+fi
+
+# ── Run benchmarks ─────────────────────────────────────────────────
+
+RUST_TARGET="$TEST_DIR/target/aarch64-unknown-none/debug"
+TMPDIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR"' EXIT
+
+BENCH_COUNT=0
+ERROR_COUNT=0
+
+echo ""
+printf "${BOLD}%-35s  %s${RESET}\n" "benchmark" "results"
+printf "%-35s  %s\n" "-----------------------------------" "-------"
+
+for elf in "$RUST_TARGET"/bench_*; do
+    [ -f "$elf" ] || continue
+    file "$elf" 2>/dev/null | grep -q "ELF" || continue
+
+    name="$(basename "$elf")"
+    bin="$TMPDIR/${name}.bin"
+
+    if ! "$LLVM_OBJCOPY" -O binary "$elf" "$bin" 2>/dev/null; then
+        printf "%-35s  ${RED}SKIP${RESET} (objcopy failed)\n" "$name"
+        ERROR_COUNT=$((ERROR_COUNT + 1))
+        continue
+    fi
+
+    BENCH_COUNT=$((BENCH_COUNT + 1))
+
+    output=$("$HYPERVISOR" "$KERNEL" --module "$bin" --no-gpu --timeout "$TIMEOUT" 2>&1) || true
+
+    # Check for clean exit
+    if ! echo "$output" | grep -q "TEST PASSED"; then
+        printf "%-35s  ${RED}ERROR${RESET} (no TEST PASSED)\n" "$name"
+        ERROR_COUNT=$((ERROR_COUNT + 1))
+        continue
+    fi
+
+    # Extract BENCH lines
+    bench_lines=$(echo "$output" | grep 'BENCH ' | sed 's/^[[:space:]]*//' || true)
+
+    if [ -z "$bench_lines" ]; then
+        printf "%-35s  ${DIM}(no BENCH data)${RESET}\n" "$name"
+        continue
+    fi
+
+    # Collect all tag/value pairs into arrays for Stats group detection.
+    # Format: "BENCH <tag_hex_16> <val_hex_16> <m0_hex_16> <m1_hex_16>"
+    tags=()
+    values=()
+    while IFS= read -r line; do
+        # Parse the 4 hex fields after "BENCH"
+        read -r _ t v m0 m1 <<< "$line"
+        tags+=("$t")
+        values+=("$v")
+    done <<< "$bench_lines"
+
+    n=${#tags[@]}
+
+    # Try to detect Stats::emit groups (5 consecutive tags: base, base+1, ..., base+4)
+    # If the lines form complete groups, display summary format.
+    i=0
+    displayed=false
+
+    while [ $i -lt $n ]; do
+        remaining=$((n - i))
+
+        if [ $remaining -ge 5 ]; then
+            # Check if these 5 form a Stats group (consecutive tags)
+            base_tag=$((16#${tags[$i]}))
+            is_group=true
+
+            for offset in 1 2 3 4; do
+                idx=$((i + offset))
+                expected_tag=$((base_tag + offset))
+                actual_tag=$((16#${tags[$idx]}))
+
+                if [ "$actual_tag" -ne "$expected_tag" ]; then
+                    is_group=false
+                    break
+                fi
+            done
+
+            if $is_group; then
+                min_val=$((16#${values[$i]}))
+                median_val=$((16#${values[$((i+1))]}))
+                p99_val=$((16#${values[$((i+2))]}))
+                mean_val=$((16#${values[$((i+3))]}))
+                count_val=$((16#${values[$((i+4))]}))
+
+                if ! $displayed; then
+                    printf "%-35s  " "$name"
+                else
+                    printf "%-35s  " ""
+                fi
+
+                printf "min=%-8d  median=%-8d  p99=%-8d  mean=%-8d  (%d iters)\n" \
+                    "$min_val" "$median_val" "$p99_val" "$mean_val" "$count_val"
+
+                displayed=true
+                i=$((i + 5))
+                continue
+            fi
+        fi
+
+        # Not part of a Stats group — display raw
+        tag_dec=$((16#${tags[$i]}))
+        val_dec=$((16#${values[$i]}))
+
+        if ! $displayed; then
+            printf "%-35s  " "$name"
+        else
+            printf "%-35s  " ""
+        fi
+
+        printf "tag=0x%x  value=%d\n" "$tag_dec" "$val_dec"
+
+        displayed=true
+        i=$((i + 1))
+    done
+done
+
+# ── Summary ────────────────────────────────────────────────────────
+
+echo ""
+if [ "$BENCH_COUNT" -eq 0 ]; then
+    printf "${DIM}no bench_* binaries found${RESET}\n"
+elif [ "$ERROR_COUNT" -gt 0 ]; then
+    printf "${RED}%d of %d benchmarks had errors${RESET}\n" "$ERROR_COUNT" "$BENCH_COUNT"
+    exit 1
+else
+    printf "${GREEN}%d benchmark(s) completed${RESET}\n" "$BENCH_COUNT"
+fi
