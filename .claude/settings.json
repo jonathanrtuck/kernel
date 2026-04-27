@@ -15,6 +15,17 @@
       {
         "hooks": [
           {
+            "command": ".claude/hooks/check-reference-docs.sh",
+            "statusMessage": "checking reference docs…",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit|Write"
+      },
+      {
+        "hooks": [
+          {
             "command": "node .explore/trigger.js",
             "disabled": true,
             "timeout": 5,
