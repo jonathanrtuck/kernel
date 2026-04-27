@@ -709,6 +709,7 @@ fn esr_ec(esr: u64) -> u64 {
 }
 
 /// Extract the SVC immediate from ESR_EL1 (bits [15:0], valid when EC = 0x15).
+#[cfg(target_os = "none")]
 #[inline(always)]
 fn esr_svc_imm(esr: u64) -> u16 {
     (esr & 0xFFFF) as u16

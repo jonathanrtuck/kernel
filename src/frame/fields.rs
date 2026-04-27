@@ -495,8 +495,10 @@ pub fn remove_routes_to_destination(
 // ── E. Badge tracking operations (D17, D-3.2a) ──────────────────────────
 
 /// Initial capacity for badge map (D-3.2a).
+#[cfg(test)]
 const BADGE_MAP_INITIAL_CAPACITY: u32 = 8;
 /// Maximum capacity for badge map (D-3.2a test limit).
+#[cfg(test)]
 const BADGE_MAP_MAX_CAPACITY: u32 = 256;
 
 /// Allocate a new BadgeMap (D-3.2b).

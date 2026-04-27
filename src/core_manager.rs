@@ -1618,24 +1618,24 @@ impl<S: Scheduler> CoreState<S> {
 
                 match close_result {
                     capability::CloseResult::Closed {
-                        object_type: closed_type,
-                        object_id: closed_id,
+                        object_type: _closed_type,
+                        object_id: _closed_id,
                         ..
                     } => {
                         // D26 (bare-metal): when closing a Space cap, check
                         // whether the Observer still holds another cap to the
                         // same Space. If not, unwire the page table mapping.
                         #[cfg(target_os = "none")]
-                        if closed_type == ObjectType::Space {
+                        if _closed_type == ObjectType::Space {
                             let still_has = crate::frame::cores::observer_has_cap_to_object(
                                 sender_ptr,
                                 ObjectType::Space,
-                                closed_id,
+                                _closed_id,
                                 u32::MAX,
                             );
 
                             if !still_has {
-                                unwire_space_for_observer(sender_ptr, closed_id, kernel_state);
+                                unwire_space_for_observer(sender_ptr, _closed_id, kernel_state);
                             }
                         }
 
@@ -2424,6 +2424,7 @@ impl<S: Scheduler> CoreState<S> {
     /// Maps each operation to the specific Rights bit(s) that the caller's
     /// capability must contain. Generic operations use type-appropriate
     /// rights.
+    #[cfg(any(target_os = "none", test))]
     fn required_rights(
         operation: crate::syscall::TypedOperation,
         object_type: crate::capability::ObjectType,
@@ -3019,6 +3020,7 @@ fn return_backing_space(
 ///
 /// Shared by CreatePulsar (delivery field) and CreateObserver (handler field).
 /// Returns (field_id, stored_generation) on success.
+#[cfg(any(target_os = "none", test))]
 fn resolve_field_argument(
     handle: u64,
     cap_entries: NonNull<crate::capability::Entry>,
@@ -8340,7 +8342,7 @@ mod tests {
     fn test_d97_mint_cannot_escalate_rights() {
         let ks = make_kernel_state();
         let field_id = make_field_in_arena(&ks, 4);
-        let (mut sender, entries) =
+        let (mut sender, _entries) =
             make_sender_with_cap(ObjectType::Field, field_id, Rights::SEND, Badge(0), 0);
         let sender_ptr = NonNull::from(&mut sender);
         let handle = crate::capability::Handle {

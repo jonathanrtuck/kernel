@@ -235,6 +235,7 @@ pub fn read_typed_registers(observer_ptr: NonNull<Observer>) -> TypedRegisters {
 // HOW (RegisterState layout, SPSR bit positions).
 
 /// ARM64 SPSR carry flag position (NZCV: bits 31:28, C = bit 29).
+#[cfg(any(target_os = "none", test))]
 const SPSR_CARRY_BIT: u64 = 1 << 29;
 
 /// Write an IPC error to an Observer's saved register state (D49, D76).
@@ -1637,7 +1638,7 @@ mod tests {
         // through both field access and raw byte access.
         let rs_ptr = alloc_test_register_state();
         let stack_sentinel: u64 = 0xFFFF_0000_DEAD_CAFE;
-        let mut per_core = PerCoreData {
+        let per_core = PerCoreData {
             register_state_ptr: rs_ptr.as_ptr()
                 as *mut crate::frame::arch::register_state::RegisterState,
             core_state_ptr: core::ptr::null_mut(),
