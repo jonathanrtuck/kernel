@@ -2706,6 +2706,9 @@ impl<S: Scheduler> CoreState<S> {
             crate::fault::FaultDeliveryOutcome::Enqueued => self.schedule_next(),
             crate::fault::FaultDeliveryOutcome::WokeReceiver(receiver_ptr, message) => {
                 Self::deliver_message(receiver_ptr, &message);
+
+                let _ = crate::frame::cores::observer_unblock(receiver_ptr);
+
                 self.scheduler.enqueue(receiver_ptr);
                 self.schedule_next()
             }

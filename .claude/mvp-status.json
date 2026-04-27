@@ -40,13 +40,13 @@
     },
     "0.3": {
       "name": "Fault handler validation ordering",
-      "note": "D-0.3 settled: escalate=destroy Observer",
-      "status": "in_progress"
+      "note": "",
+      "status": "done"
     },
     "0.4": {
       "name": "Fault delivery unblock",
       "note": "",
-      "status": "pending"
+      "status": "in_progress"
     },
     "0.5": {
       "name": "IRQ message drop on full queue",
