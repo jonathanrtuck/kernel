@@ -382,6 +382,26 @@ pub fn route_add(
                     }
                 }
 
+                // D45: reject overlapping badge ranges.
+                // Check left neighbor: does the previous entry's range
+                // overlap with [low, high]?
+                if insert_at > 0 {
+                    let prev = &*entries.add(insert_at - 1);
+
+                    if prev.badge_high >= low {
+                        return Err(FieldError::RoutingTableFull);
+                    }
+                }
+                // Check right neighbor: does the next entry's range
+                // overlap with [low, high]?
+                if insert_at < count {
+                    let next = &*entries.add(insert_at);
+
+                    if high >= next.badge_low {
+                        return Err(FieldError::RoutingTableFull);
+                    }
+                }
+
                 // Shift entries after insert_at to make room.
                 if insert_at < count {
                     // SAFETY: We are shifting entries within the valid

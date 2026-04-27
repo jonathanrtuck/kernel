@@ -15,13 +15,13 @@
     },
     "0.11": {
       "name": "Slab MaybeUninit soundness",
-      "note": "",
-      "status": "in_progress"
+      "note": "insert() for NonNull types; allocate() remains for zero-safe types",
+      "status": "done"
     },
     "0.12": {
       "name": "Overlapping routing range prevention",
       "note": "",
-      "status": "pending"
+      "status": "in_progress"
     },
     "0.13": {
       "name": "Boot invariant promotion",

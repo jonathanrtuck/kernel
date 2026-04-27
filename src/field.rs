@@ -1458,7 +1458,7 @@ mod tests {
     /// add_route twice with overlapping ranges — what happens?
     /// At minimum: no crash, and the first-matching or last-added route wins.
     #[test]
-    fn test_adversarial_field_route_overlapping_ranges() {
+    fn test_adversarial_field_route_overlapping_ranges_rejected() {
         use crate::arena::ObjectId;
 
         let mut field = test_field(4);
@@ -1466,25 +1466,27 @@ mod tests {
         // Range A: [10, 50] -> ObjectId(1)
         field.add_route(10, 50, ObjectId(1), 0).unwrap();
         // Range B: [30, 70] -> ObjectId(2) (overlaps with A on [30, 50])
-        field.add_route(30, 70, ObjectId(2), 0).unwrap();
-
-        // Badge 20 is in A only.
-        let only_a = field.resolve_route(20);
-
-        assert_eq!(only_a, Some(ObjectId(1)), "badge 20 must match range A");
-
-        // Badge 60 is in B only.
-        let only_b = field.resolve_route(60);
-
-        assert_eq!(only_b, Some(ObjectId(2)), "badge 60 must match range B");
-
-        // Badge 40 is in the overlap — either ObjectId(1) or ObjectId(2) is
-        // acceptable, but it must return Some.
-        let overlap = field.resolve_route(40);
+        // D45: overlapping ranges must be rejected.
+        let result = field.add_route(30, 70, ObjectId(2), 0);
 
         assert!(
-            overlap.is_some(),
-            "badge in overlap region must resolve to some destination"
+            result.is_err(),
+            "D45: overlapping badge ranges must be rejected"
+        );
+
+        // Non-overlapping range must still succeed.
+        field.add_route(60, 80, ObjectId(3), 0).unwrap();
+
+        let a = field.resolve_route(20);
+
+        assert_eq!(a, Some(ObjectId(1)), "badge 20 must match range A");
+
+        let b = field.resolve_route(70);
+
+        assert_eq!(
+            b,
+            Some(ObjectId(3)),
+            "badge 70 must match non-overlapping range"
         );
     }
 
