@@ -405,8 +405,9 @@ __el0_exception_common:
 //   x2 = clock_access        (0 or 1 — CNTKCTL_EL1 bit 1)
 //
 // Performs:
-//   1. Conditional TTBR0 switch (skip if unchanged, full TLB invalidation
-//      if changed)
+//   1. Conditional TTBR0 switch (skip if unchanged; no TLB flush needed
+//      because epoch-based ASID allocation guarantees no aliasing —
+//      refresh_observer_asid runs before this, nG=1 on all user pages)
 //   2. CNTKCTL_EL1 update (branchless — BFI inserts clock_access bit)
 //   3. System register restore (SP_EL0, ELR_EL1, SPSR_EL1, TPIDR_EL0)
 //   4. FP/SIMD restore (FPCR, FPSR, q0-q31)
@@ -416,13 +417,15 @@ __el0_exception_common:
 .global __restore_observer
 __restore_observer:
     // 1. TTBR0 switch — skip if the page table root is unchanged.
+    //    No TLB flush: epoch-based ASID allocation (D101) ensures no
+    //    two live Observers share a hardware ASID. All user pages are
+    //    nG=1 (ASID-tagged), so stale entries from other Observers
+    //    cannot be served. refresh_observer_asid (called before this
+    //    function) re-allocates stale ASIDs; the wrap path flushes.
     mrs     x9, ttbr0_el1
     cmp     x9, x1
     b.eq    .Lskip_ttbr
     msr     ttbr0_el1, x1
-    isb
-    tlbi    vmalle1is
-    dsb     ish
     isb
 .Lskip_ttbr:
 

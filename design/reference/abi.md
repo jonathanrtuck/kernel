@@ -511,8 +511,11 @@ EL0 via `eret`. It receives three parameters:
 Restore sequence (D85):
 
 1. **Conditional TTBR0 switch.** Compare current `TTBR0_EL1` with `x1`. If
-   different: `msr ttbr0_el1, x1; isb; tlbi vmalle1is; dsb ish; isb`. If same:
-   skip (saves approximately 40-80 cycles).
+   different: `msr ttbr0_el1, x1; isb`. If same: skip. No TLB flush is needed
+   because epoch-based ASID allocation (D101) guarantees no two live Observers
+   share a hardware ASID, and all user pages carry the nG bit (ASID-tagged).
+   `refresh_observer_asid` runs before this function and re-allocates stale
+   ASIDs; the allocator wrap path issues the full broadcast flush.
 
 2. **CNTKCTL_EL1 update.** Branchless bit-field insert: `bfi x9, x2, #1, #1`
    copies the `clock_access` bit into `CNTKCTL_EL1[1]` (EL0 virtual counter
