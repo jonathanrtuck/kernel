@@ -746,15 +746,51 @@ impl<S: Scheduler> CoreState<S> {
         }
     }
 
+    fn deliver_kernel_message(
+        &mut self,
+        field: &mut field::Field,
+        message: field::Message,
+    ) -> Result<(), field::FieldError> {
+        if field.is_full() && field.waiters_head.is_none() {
+            field.pending_kernel_message = Some(message);
+
+            return Ok(());
+        }
+
+        self.deliver_kernel_message_inner(field, message)
+    }
+
     #[cfg(any(target_os = "none", test))]
-    /// D79 Row 1-2: Handle Send outcome — sender always continues.
-    ///
-    /// Row 1 (Enqueued): message entered queue, no receiver involved.
-    /// Row 2 (WokeReceiver): waiting receiver found, message delivered directly.
-    ///
-    /// D13: Send is fire-and-forget. The sender stays Runnable and continues.
-    /// If a receiver was woken, it joins the run queue (not direct-switch —
-    /// D50 condition 1 excludes Send from fast path).
+    fn deliver_kernel_message_inner(
+        &mut self,
+        field: &mut field::Field,
+        message: field::Message,
+    ) -> Result<(), field::FieldError> {
+        match crate::communication::send(field, message) {
+            Ok(crate::communication::SendOutcome::Enqueued) => Ok(()),
+            Ok(crate::communication::SendOutcome::WokeReceiver(receiver_ptr, msg)) => {
+                Self::deliver_message(receiver_ptr, &msg);
+
+                let _ = crate::frame::cores::observer_unblock(receiver_ptr);
+
+                self.scheduler.enqueue(receiver_ptr);
+
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    #[cfg(not(any(target_os = "none", test)))]
+    fn deliver_kernel_message_inner(
+        &mut self,
+        field: &mut field::Field,
+        message: field::Message,
+    ) -> Result<(), field::FieldError> {
+        field.enqueue(message)
+    }
+
+    #[cfg(any(target_os = "none", test))]
     pub fn dispatch_send_outcome(
         &mut self,
         sender_ptr: NonNull<Observer>,
@@ -2424,7 +2460,7 @@ impl<S: Scheduler> CoreState<S> {
                     let message = pulsar.fire_message(current_ticks);
 
                     if let Some(target_field) = fields.get_mut(entry.field_id)
-                        && target_field.enqueue(message).is_err()
+                        && self.deliver_kernel_message(target_field, message).is_err()
                     {
                         pulsar.record_overrun();
                     }
@@ -2660,10 +2696,16 @@ impl<S: Scheduler> CoreState<S> {
     ///
     /// D2/D59: delegates to `scheduler.pick_next()`. Returns `Idle`
     /// if no Observer is runnable (D46: core enters WFI).
-    pub fn schedule_next(&self) -> DispatchResult {
+    pub fn schedule_next(&mut self) -> DispatchResult {
         match self.scheduler.pick_next() {
-            Some(observer) => DispatchResult::Resume(observer),
-            None => DispatchResult::Idle,
+            Some(observer) => {
+                self.current = Some(observer);
+                DispatchResult::Resume(observer)
+            }
+            None => {
+                self.current = None;
+                DispatchResult::Idle
+            }
         }
     }
 
@@ -2741,10 +2783,18 @@ impl<S: Scheduler> CoreState<S> {
 
         drop(fields);
 
+        // The faulted Observer must be removed from the scheduler queue
+        // regardless of delivery outcome. It stays in Faulted state until
+        // the handler resumes it.
+        self.scheduler.dequeue(observer_ptr);
+
         match outcome {
             crate::fault::FaultDeliveryOutcome::Enqueued => self.schedule_next(),
             crate::fault::FaultDeliveryOutcome::WokeReceiver(receiver_ptr, message) => {
                 Self::deliver_message(receiver_ptr, &message);
+
+                let _ = crate::frame::cores::observer_unblock(receiver_ptr);
+
                 self.scheduler.enqueue(receiver_ptr);
                 self.schedule_next()
             }
@@ -2994,7 +3044,7 @@ mod tests {
 
     #[test]
     fn test_d46_schedule_next_returns_idle_when_empty() {
-        let core = make_core_state();
+        let mut core = make_core_state();
         let result = core.schedule_next();
 
         assert!(

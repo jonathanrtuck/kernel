@@ -65,3 +65,20 @@ for f in $SPEC_FILES; do
     fi
 done
 pass "speculation barriers present"
+
+# h: Bare-metal integration — boot the kernel and check test scenarios.
+if command -v hypervisor >/dev/null 2>&1; then
+    BM_OUTPUT=$(hypervisor --no-gpu --timeout 10 target/aarch64-unknown-none/debug/kernel 2>&1)
+
+    if echo "$BM_OUTPUT" | grep -q "TEST PASSED"; then
+        pass "bare-metal integration (hypervisor)"
+    elif echo "$BM_OUTPUT" | grep -qE "FAIL|FATAL FAULT"; then
+        echo "$BM_OUTPUT" | grep -E "scenario:|FAIL|FATAL" | head -5
+        fail "bare-metal integration (hypervisor)"
+    else
+        echo "$BM_OUTPUT" | tail -5
+        fail "bare-metal integration: no TEST PASSED/FAILED (timeout or crash)"
+    fi
+else
+    info "bare-metal integration skipped (hypervisor not found)"
+fi

@@ -649,6 +649,9 @@ fn create_child_observer(
     child_obs.throughput = crate::observer::DEFAULT_THROUGHPUT;
     child_obs.clock_access = false;
     child_obs.wait_state = crate::observer::WaitState::None;
+    child_obs.saved_syscall = crate::observer::SavedSyscallContext::None;
+    child_obs.backing_va_base = 0;
+    child_obs.backing_size = 0;
     child_obs.refcount = 1;
     child_obs.generation = AtomicU64::new(0);
 

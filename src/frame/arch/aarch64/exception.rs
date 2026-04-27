@@ -259,28 +259,45 @@ fn handle_el0_sync<S: crate::time_manager::Scheduler + 'static>(
     }
 }
 
-/// Route an EL0 exception to the fault delivery path (D100).
-///
-/// Constructs a HardwareException FaultType from ESR/ELR/FAR and
-/// delivers it via the Observer's handler Field at slot 0.
-///
-/// D61: data/instruction aborts from EL0 should become VmFault, but
-/// translating FAR → Space slot index + byte offset requires the
-/// Space mapping infrastructure (D26). Until that is wired, all
-/// EL0 faults are delivered as HardwareException with full register
-/// state — the handler has enough information to diagnose and resolve.
+/// D61: data/instruction aborts (EC 0x20, 0x24) are translated to VmFault.
+/// All other EL0 faults are delivered as HardwareException.
 #[cfg(target_os = "none")]
 fn handle_el0_fault<S: crate::time_manager::Scheduler + 'static>(
     esr: u64,
     far: u64,
 ) -> crate::core_manager::DispatchResult {
     use crate::core_manager;
+    use crate::fault::{AccessType, FaultType};
 
+    let ec = esr_ec(esr);
     let core = core_manager::current_core_mut::<S>();
     let ks = crate::frame::kernel_state();
     let observer = core.current.unwrap();
+
+    if (ec == 0x20 || ec == 0x24)
+        && let Some((space_slot, byte_offset)) =
+            crate::frame::cores::translate_vm_fault(observer, far, ks)
+    {
+        let access = if ec == 0x20 {
+            AccessType::Execute
+        } else if (esr >> 6) & 1 == 1 {
+            AccessType::Write
+        } else {
+            AccessType::Read
+        };
+
+        return core.dispatch_fault(
+            FaultType::VmFault {
+                space_slot,
+                byte_offset,
+                access,
+            },
+            ks,
+        );
+    }
+
     let elr = crate::frame::cores::observer_read_pc(observer);
-    let fault = crate::fault::FaultType::HardwareException {
+    let fault = FaultType::HardwareException {
         esr_el1: esr,
         elr_el1: elr,
         far_el1: far,
@@ -546,6 +563,11 @@ fn irq_handler(_frame: &mut TrapFrame) {
     match intid {
         super::gic::INTID_VTIMER => {
             super::timer::tick();
+            super::gic::end_of_interrupt(intid);
+
+            idle_wakeup_check();
+
+            return;
         }
         // D56: SGI received — cross-core IPI. Drain the local core's
         // mailbox and process each request. The EL1h handler cannot do
@@ -572,6 +594,38 @@ fn irq_handler(_frame: &mut TrapFrame) {
 
     super::gic::end_of_interrupt(intid);
 }
+
+/// Scan Pulsar deadlines during idle and wake Observers if needed.
+///
+/// Called from the EL1h IRQ handler when the timer fires while the core
+/// is idle (WFI). If a deadline has passed and the fire message wakes an
+/// Observer, diverge into restore_or_idle to context-switch to it.
+#[cfg(target_os = "none")]
+fn idle_wakeup_check() {
+    use crate::core_manager::{self, DispatchResult};
+    use crate::time_manager::round_robin::RoundRobin;
+
+    let core = core_manager::current_core_mut::<RoundRobin>();
+
+    if core.current.is_some() {
+        return;
+    }
+
+    let ks = crate::frame::kernel_state();
+    let current_ticks = sysreg::cntvct_el0();
+    let counter_freq = sysreg::cntfrq_el0();
+    let result = core.handle_timer(current_ticks, ks, counter_freq);
+
+    match result {
+        DispatchResult::Resume(_) | DispatchResult::ResumeFastPath(_) => {
+            restore_or_idle(result);
+        }
+        _ => {}
+    }
+}
+
+#[cfg(not(target_os = "none"))]
+fn idle_wakeup_check() {}
 
 // ---------------------------------------------------------------------------
 // Fatal exception — dump state and halt
