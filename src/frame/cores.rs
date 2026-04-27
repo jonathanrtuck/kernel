@@ -400,6 +400,43 @@ pub fn observer_cap_table(
     }
 }
 
+/// Translate a Fault Address Register value to VmFault parameters (D61).
+///
+/// Scans the Observer's cap table for Space caps whose VA range contains
+/// `far`. Returns `Some((slot_index, byte_offset))` if found, `None` if
+/// no Space covers the fault address.
+///
+/// D26: VAs are kernel-internal. The fault message carries the Space cap
+/// slot index and byte offset within that Space, not the raw VA.
+#[cfg(any(target_os = "none", test))]
+pub fn translate_vm_fault(
+    observer_ptr: NonNull<Observer>,
+    far: u64,
+    kernel_state: &crate::kernel_state::KernelState,
+) -> Option<(u32, u64)> {
+    let (cap_entries, cap_capacity) = observer_cap_table(observer_ptr);
+    let spaces = kernel_state.spaces.acquire();
+
+    for slot in 0..cap_capacity {
+        // SAFETY: cap_entries and cap_capacity are from a live Observer.
+        // slot < cap_capacity guarantees bounds. A4 non-reentrancy.
+        let entry = unsafe { &*cap_entries.as_ptr().add(slot as usize) };
+
+        if let Some((crate::capability::ObjectType::Space, space_id)) = entry.object
+            && let Some(space) = spaces.get(space_id)
+        {
+            let space_start = space.va_base as u64;
+            let space_end = space_start + space.size as u64;
+
+            if far >= space_start && far < space_end {
+                return Some((slot, far - space_start));
+            }
+        }
+    }
+
+    None
+}
+
 /// Prepare an Observer's wait_state for a blocking Receive (D18, D13).
 ///
 /// Sets observer.wait_state = WaitState::Single(WaitEntry{...}) with the

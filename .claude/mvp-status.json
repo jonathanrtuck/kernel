@@ -90,13 +90,13 @@
     },
     "1.4": {
       "name": "Map/unmap wiring",
-      "note": "",
-      "status": "in_progress"
+      "note": "wire_space_mapping/unwire_space_mapping in mapping.rs",
+      "status": "done"
     },
     "1.5": {
       "name": "VmFault translation",
       "note": "",
-      "status": "pending"
+      "status": "in_progress"
     },
     "2.1": {
       "name": "Two-Observer boot",

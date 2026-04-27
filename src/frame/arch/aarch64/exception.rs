@@ -251,26 +251,48 @@ fn handle_el0_sync<S: crate::time_manager::Scheduler + 'static>(
 
 /// Route an EL0 exception to the fault delivery path (D100).
 ///
-/// Constructs a HardwareException FaultType from ESR/ELR/FAR and
-/// delivers it via the Observer's handler Field at slot 0.
-///
-/// D61: data/instruction aborts from EL0 should become VmFault, but
-/// translating FAR → Space slot index + byte offset requires the
-/// Space mapping infrastructure (D26). Until that is wired, all
-/// EL0 faults are delivered as HardwareException with full register
-/// state — the handler has enough information to diagnose and resolve.
+/// D61: data/instruction aborts (EC 0x20, 0x24) are translated to VmFault
+/// by scanning the Observer's cap table for the Space whose VA range
+/// contains FAR. If no Space covers the address, falls back to
+/// HardwareException. All other EL0 faults are HardwareException.
 #[cfg(target_os = "none")]
 fn handle_el0_fault<S: crate::time_manager::Scheduler + 'static>(
     esr: u64,
     far: u64,
 ) -> crate::core_manager::DispatchResult {
     use crate::core_manager;
+    use crate::fault::{AccessType, FaultType};
 
+    let ec = esr_ec(esr);
     let core = core_manager::current_core_mut::<S>();
     let ks = crate::frame::kernel_state();
     let observer = core.current.unwrap();
+
+    // D61: translate data/instruction aborts to VmFault.
+    if (ec == 0x20 || ec == 0x24)
+        && let Some((space_slot, byte_offset)) =
+            crate::frame::cores::translate_vm_fault(observer, far, ks)
+    {
+        // ARM ARM: ESR_EL1.ISS bit 6 (WnR) = 1 for writes.
+        // EC 0x20 = instruction abort → Execute.
+        let access = if ec == 0x20 {
+            AccessType::Execute
+        } else if (esr >> 6) & 1 == 1 {
+            AccessType::Write
+        } else {
+            AccessType::Read
+        };
+        let fault = FaultType::VmFault {
+            space_slot,
+            byte_offset,
+            access,
+        };
+
+        return core.dispatch_fault(fault, ks);
+    }
+
     let elr = crate::frame::cores::observer_read_pc(observer);
-    let fault = crate::fault::FaultType::HardwareException {
+    let fault = FaultType::HardwareException {
         esr_el1: esr,
         elr_el1: elr,
         far_el1: far,
