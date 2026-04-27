@@ -379,6 +379,7 @@ mod tests {
             pending_head: None,
             pending_kernel_message: None,
             badge_tracking: false,
+            badge_map: None,
             back_pointer_head: None,
             refcount: 1,
             generation: AtomicU64::new(0),

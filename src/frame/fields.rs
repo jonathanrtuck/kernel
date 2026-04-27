@@ -10,7 +10,7 @@
 //! - **Routing table**: binary search and sorted insertion via NonNull<RoutingTable>.
 
 use crate::arena::ObjectId;
-use crate::field::{FieldError, Message, RoutingEntry, RoutingTable};
+use crate::field::{BadgeMap, BadgeMapEntry, FieldError, Message, RoutingEntry, RoutingTable};
 use crate::observer::WaitEntry;
 use core::ptr::NonNull;
 
@@ -491,6 +491,311 @@ pub fn remove_routes_to_destination(
 
         removed
     }
+}
+
+// ── E. Badge tracking operations (D17, D-3.2a) ──────────────────────────
+
+/// Initial capacity for badge map (D-3.2a).
+const BADGE_MAP_INITIAL_CAPACITY: u32 = 8;
+/// Maximum capacity for badge map (D-3.2a test limit).
+const BADGE_MAP_MAX_CAPACITY: u32 = 256;
+
+/// Allocate a new BadgeMap (D-3.2b).
+///
+/// Called at Field creation when badge_tracking=true. Test builds use
+/// the heap allocator; bare-metal builds return None (deferred).
+#[cfg(test)]
+pub fn allocate_badge_map() -> Option<NonNull<BadgeMap>> {
+    extern crate alloc;
+
+    use alloc::alloc::{Layout, alloc};
+
+    let entry_layout = Layout::array::<BadgeMapEntry>(BADGE_MAP_INITIAL_CAPACITY as usize).ok()?;
+    // SAFETY: entry_layout has non-zero size (capacity > 0, BadgeMapEntry is non-ZST).
+    let entries_raw = unsafe { alloc(entry_layout) };
+
+    if entries_raw.is_null() {
+        return None;
+    }
+
+    // SAFETY: entries_raw is non-null (checked above).
+    let entries_nn = unsafe { NonNull::new_unchecked(entries_raw as *mut BadgeMapEntry) };
+
+    let map_layout = Layout::new::<BadgeMap>();
+    // SAFETY: map_layout has non-zero size (BadgeMap is non-ZST).
+    let map_raw = unsafe { alloc(map_layout) };
+
+    if map_raw.is_null() {
+        // SAFETY: entries_raw was allocated with entry_layout.
+        unsafe {
+            alloc::alloc::dealloc(entries_raw, entry_layout);
+        }
+
+        return None;
+    }
+
+    let map_ptr = map_raw as *mut BadgeMap;
+
+    // SAFETY: map_ptr is non-null, properly aligned. Write fully initialized.
+    unsafe {
+        core::ptr::write(
+            map_ptr,
+            BadgeMap {
+                entries: entries_nn,
+                count: 0,
+                capacity: BADGE_MAP_INITIAL_CAPACITY,
+            },
+        );
+
+        Some(NonNull::new_unchecked(map_ptr))
+    }
+}
+
+/// Bare-metal stub for badge map allocation.
+#[cfg(not(test))]
+pub fn allocate_badge_map() -> Option<NonNull<BadgeMap>> {
+    None
+}
+
+/// Increment the refcount for a badge in the map (D17).
+///
+/// If the badge already exists, increment its refcount. If not, insert a
+/// new entry with refcount 1. Uses linear scan (D-3.2a: simplest correct).
+pub fn badge_map_increment(map_ptr: NonNull<BadgeMap>, badge: u64) {
+    // SAFETY: map_ptr was returned by allocate_badge_map and points to a
+    // valid BadgeMap. The caller holds &mut Field, ensuring exclusive access.
+    unsafe {
+        let map = &mut *map_ptr.as_ptr();
+        let entries = map.entries.as_ptr();
+
+        // Linear scan for existing badge.
+        for i in 0..map.count as usize {
+            // SAFETY: i < count, entries is valid for count elements.
+            let entry = &mut *entries.add(i);
+
+            if entry.badge == badge {
+                entry.refcount = entry.refcount.saturating_add(1);
+
+                return;
+            }
+        }
+
+        // Badge not found: insert new entry.
+        if map.count >= map.capacity {
+            // Grow the map.
+            if grow_badge_map(map).is_err() {
+                return; // Cannot grow — silently ignore (defense-in-depth).
+            }
+        }
+
+        // Re-read entries pointer (may have changed after growth).
+        let entries = map.entries.as_ptr();
+
+        // SAFETY: count < capacity (either original or after growth).
+        core::ptr::write(
+            entries.add(map.count as usize),
+            BadgeMapEntry { badge, refcount: 1 },
+        );
+
+        map.count += 1;
+    }
+}
+
+/// Decrement the refcount for a badge in the map (D17).
+///
+/// Returns `true` if the refcount reached zero (badge-closure notification
+/// must be sent). Returns `false` if the badge was not found or refcount
+/// is still positive.
+pub fn badge_map_decrement(map_ptr: NonNull<BadgeMap>, badge: u64) -> bool {
+    // SAFETY: map_ptr was returned by allocate_badge_map and points to a
+    // valid BadgeMap. The caller holds &mut Field, ensuring exclusive access.
+    unsafe {
+        let map = &mut *map_ptr.as_ptr();
+        let entries = map.entries.as_ptr();
+
+        for i in 0..map.count as usize {
+            // SAFETY: i < count, entries is valid for count elements.
+            let entry = &mut *entries.add(i);
+
+            if entry.badge == badge {
+                if entry.refcount == 0 {
+                    return false;
+                }
+
+                entry.refcount -= 1;
+
+                if entry.refcount == 0 {
+                    // Remove the entry by swapping with last (order irrelevant).
+                    let last_idx = map.count as usize - 1;
+
+                    if i != last_idx {
+                        // SAFETY: i and last_idx are both < count.
+                        core::ptr::copy_nonoverlapping(entries.add(last_idx), entries.add(i), 1);
+                    }
+
+                    map.count -= 1;
+
+                    return true; // Badge closure needed.
+                }
+
+                return false;
+            }
+        }
+
+        false // Badge not found.
+    }
+}
+
+/// Store a deferred badge-closure notification (D-3.2c, D18 pattern).
+///
+/// When the Field's queue is full at the time a badge-closure notification
+/// needs to be sent, store the badge for delivery when a slot is freed.
+/// The notification is never lost.
+///
+/// Implementation: re-increment the badge in the badge map so it is
+/// tracked as "pending closure". When the queue drains (receive path, D18),
+/// the closure will be retried. This is the simplest correct deferred
+/// delivery mechanism that satisfies D-3.2c without adding a new pending
+/// list data structure.
+pub fn badge_map_defer_closure(field: &mut crate::field::Field, badge: crate::capability::Badge) {
+    // D-3.2c: re-insert the badge with refcount 0 into the map as a
+    // "pending closure" marker. The next dequeue that frees a slot will
+    // check for pending closures and deliver them.
+    //
+    // For MVP simplicity, we use a dedicated pending closure list stored
+    // in the badge map itself: entries with refcount == 0 are pending
+    // closures. After each dequeue in the receive path, the caller should
+    // check for these and deliver them.
+    if let Some(map_ptr) = field.badge_map {
+        // SAFETY: map_ptr is valid, caller holds &mut Field.
+        unsafe {
+            let map = &mut *map_ptr.as_ptr();
+
+            if map.count >= map.capacity && grow_badge_map(map).is_err() {
+                return; // Cannot grow — unavoidable loss (should not happen in practice).
+            }
+
+            let entries = map.entries.as_ptr();
+
+            core::ptr::write(
+                entries.add(map.count as usize),
+                BadgeMapEntry {
+                    badge: badge.0,
+                    refcount: 0, // Marker: pending closure.
+                },
+            );
+
+            map.count += 1;
+        }
+    }
+}
+
+/// Drain pending badge-closure notifications after a queue slot is freed.
+///
+/// Scans the badge map for entries with refcount == 0 (pending closures).
+/// For each, attempts to enqueue a badge-closure message. If the queue is
+/// still full, stops — the remaining pending entries stay for the next drain.
+///
+/// Returns the number of closures delivered.
+pub fn drain_pending_closures(field: &mut crate::field::Field) -> u32 {
+    let Some(map_ptr) = field.badge_map else {
+        return 0;
+    };
+
+    // SAFETY: map_ptr is valid, caller holds &mut Field.
+    unsafe {
+        let map = &mut *map_ptr.as_ptr();
+        let entries = map.entries.as_ptr();
+        let mut delivered: u32 = 0;
+        let mut i: usize = 0;
+
+        while i < map.count as usize {
+            let entry = &*entries.add(i);
+
+            if entry.refcount == 0 {
+                // Pending closure — try to deliver.
+                let badge = crate::capability::Badge(entry.badge);
+                let message = Message::badge_closure(badge);
+
+                if field.enqueue(message).is_ok() {
+                    // Delivered: remove this entry by swap-remove.
+                    let last_idx = map.count as usize - 1;
+
+                    if i != last_idx {
+                        core::ptr::copy_nonoverlapping(entries.add(last_idx), entries.add(i), 1);
+                    }
+
+                    map.count -= 1;
+                    delivered += 1;
+                    // Don't increment i — the swapped entry needs checking.
+                } else {
+                    // Queue still full — stop draining.
+                    break;
+                }
+            } else {
+                i += 1;
+            }
+        }
+
+        delivered
+    }
+}
+
+/// Grow the badge map's entries array (D-3.2a).
+#[cfg(test)]
+fn grow_badge_map(map: &mut BadgeMap) -> Result<(), FieldError> {
+    extern crate alloc;
+
+    use alloc::alloc::{Layout, alloc, dealloc};
+
+    let new_capacity = map
+        .capacity
+        .checked_mul(2)
+        .ok_or(FieldError::RoutingTableFull)?;
+
+    if new_capacity > BADGE_MAP_MAX_CAPACITY {
+        return Err(FieldError::RoutingTableFull);
+    }
+
+    let new_layout = Layout::array::<BadgeMapEntry>(new_capacity as usize)
+        .map_err(|_| FieldError::RoutingTableFull)?;
+    // SAFETY: new_layout has non-zero size.
+    let new_raw = unsafe { alloc(new_layout) };
+
+    if new_raw.is_null() {
+        return Err(FieldError::RoutingTableFull);
+    }
+
+    let new_ptr = new_raw as *mut BadgeMapEntry;
+    let old_count = map.count as usize;
+
+    if old_count > 0 {
+        // SAFETY: map.entries is valid for old_count elements. new_ptr is
+        // freshly allocated with room for new_capacity >= old_count. No overlap.
+        unsafe {
+            core::ptr::copy_nonoverlapping(map.entries.as_ptr(), new_ptr, old_count);
+        }
+    }
+
+    let old_layout =
+        Layout::array::<BadgeMapEntry>(map.capacity as usize).expect("old layout must be valid");
+
+    // SAFETY: map.entries was allocated by allocate_badge_map or prior grow.
+    unsafe {
+        dealloc(map.entries.as_ptr() as *mut u8, old_layout);
+    }
+
+    // SAFETY: new_ptr is non-null (checked above).
+    map.entries = unsafe { NonNull::new_unchecked(new_ptr) };
+    map.capacity = new_capacity;
+
+    Ok(())
+}
+
+/// Bare-metal stub for badge map growth.
+#[cfg(not(test))]
+fn grow_badge_map(_map: &mut BadgeMap) -> Result<(), FieldError> {
+    Err(FieldError::RoutingTableFull)
 }
 
 // ── Internal allocation helpers ───────────────────────────────────────

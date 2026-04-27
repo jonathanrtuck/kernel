@@ -190,6 +190,11 @@ pub fn receive(field: &mut Field, receiver: &mut WaitEntry) -> ReceiveOutcome {
             let _ = field.enqueue(placeholder);
         }
 
+        // D-3.2c/D18: drain any pending badge-closure notifications that
+        // were deferred because the queue was full when the last send cap
+        // with a particular badge was closed.
+        crate::frame::fields::drain_pending_closures(field);
+
         return ReceiveOutcome::Received(message);
     }
 
@@ -343,6 +348,7 @@ mod tests {
             pending_head: None,
             pending_kernel_message: None,
             badge_tracking: false,
+            badge_map: None,
             back_pointer_head: None,
             refcount: 1,
             generation: AtomicU64::new(0),

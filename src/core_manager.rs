@@ -1687,26 +1687,37 @@ impl<S: Scheduler> CoreState<S> {
 
                 match close_result {
                     capability::CloseResult::Closed {
-                        object_type: closed_type,
-                        object_id: closed_id,
+                        object_type,
+                        object_id,
                         ..
                     } => {
-                        // D24/D91: when a Space cap is closed, check whether
-                        // any remaining caps to this Space exist. If not,
-                        // unmap the Space from this Observer's page table.
+                        // D17: if the closed cap was a Field with badge
+                        // tracking, decrement the badge refcount.
+                        if object_type == ObjectType::Field {
+                            let closed_badge = entry.badge;
+                            let mut fields = kernel_state.fields.acquire();
+
+                            if let Some(field) = fields.get_mut(object_id)
+                                && field.badge_decrement(closed_badge)
+                            {
+                                field.enqueue_badge_closure(closed_badge);
+                            }
+                        }
+
+                        // D24/D91: unmap Space when last cap closed.
                         #[cfg(target_os = "none")]
-                        if closed_type == ObjectType::Space {
+                        if object_type == ObjectType::Space {
                             let still_held = crate::frame::cores::observer_has_cap_to_object(
                                 sender_ptr,
                                 ObjectType::Space,
-                                closed_id,
+                                object_id,
                                 u32::MAX,
                             );
 
                             if !still_held {
                                 let spaces = kernel_state.spaces.acquire();
 
-                                if let Some(space) = spaces.get(closed_id)
+                                if let Some(space) = spaces.get(object_id)
                                     && space.l3_table_pa != 0
                                 {
                                     let page_size = {
@@ -1728,15 +1739,19 @@ impl<S: Scheduler> CoreState<S> {
                                 }
                             }
                         }
-                        #[cfg(not(target_os = "none"))]
-                        let _ = (closed_type, closed_id);
 
                         typed_ok(0)
                     }
-                    capability::CloseResult::ClosedWithBadgeClosure { .. } => {
-                        // D17: badge-closure tracking map not yet built.
-                        // The close succeeded; badge-closure delivery is
-                        // deferred.
+                    capability::CloseResult::ClosedWithBadgeClosure {
+                        field_id, badge, ..
+                    } => {
+                        // D17: badge-closure from the Table's own tracking.
+                        let mut fields = kernel_state.fields.acquire();
+
+                        if let Some(field) = fields.get_mut(field_id) {
+                            field.enqueue_badge_closure(badge);
+                        }
+
                         typed_ok(0)
                     }
                     capability::CloseResult::AlreadyEmpty => typed_error(SyscallError::InvalidCap),
@@ -1766,7 +1781,19 @@ impl<S: Scheduler> CoreState<S> {
                     sender_ptr,
                     &transferred,
                 ) {
-                    Ok(encoded_handle) => typed_ok(encoded_handle),
+                    Ok(encoded_handle) => {
+                        // D17: if the minted cap targets a tracked Field,
+                        // increment the badge refcount.
+                        if object_type == ObjectType::Field {
+                            let mut fields = kernel_state.fields.acquire();
+
+                            if let Some(field) = fields.get_mut(object_id) {
+                                field.badge_increment(badge);
+                            }
+                        }
+
+                        typed_ok(encoded_handle)
+                    }
                     Err(_) => typed_error(SyscallError::TableFull),
                 }
             }

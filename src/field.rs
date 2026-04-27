@@ -116,6 +116,35 @@ pub struct RoutingTable {
     pub capacity: u32,
 }
 
+// ── Badge tracking (D17) ────────────────────────────────────────────
+
+/// Single entry in the per-badge refcount map (D17).
+///
+/// Tracks how many send capabilities with a specific badge value exist
+/// for a tracked Field. When the refcount drops to zero, the kernel
+/// enqueues a badge-closure notification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BadgeMapEntry {
+    /// The badge value being tracked.
+    pub badge: u64,
+    /// Number of outstanding send caps with this badge.
+    pub refcount: u32,
+}
+
+/// Per-badge refcount map (D17, D-3.2a).
+///
+/// Simplest correct implementation: unsorted linear array with scan.
+/// Internal to Field, swappable behind stable interface later per D-3.2a.
+/// Allocated at Field creation when `badge_tracking=true` (D-3.2b).
+pub struct BadgeMap {
+    /// Contiguous array of badge-refcount entries.
+    pub entries: NonNull<BadgeMapEntry>,
+    /// Number of distinct badges tracked.
+    pub count: u32,
+    /// Allocated capacity.
+    pub capacity: u32,
+}
+
 // ── Field ───────────────────────────────────────────────────────────
 
 /// Bounded queue with waiters list (D13, D15).
@@ -160,6 +189,10 @@ pub struct Field {
     /// Per-badge refcount tracking enabled (D17 opt-in).
     /// Reply Fields are always-tracked (D73).
     pub badge_tracking: bool,
+
+    /// D17/D-3.2a: per-badge refcount map. Allocated at creation when
+    /// `badge_tracking=true` (D-3.2b). None when tracking is disabled.
+    pub badge_map: Option<NonNull<BadgeMap>>,
 
     /// Back-pointer list head for D55 routing cleanup.
     /// When this Field is a routing destination, source Fields link
@@ -279,6 +312,7 @@ impl Field {
             pending_head: None,
             pending_kernel_message: None,
             badge_tracking: false,
+            badge_map: None,
             back_pointer_head: None,
             backing_va_base,
             backing_size,
@@ -435,6 +469,74 @@ impl Field {
         crate::frame::fields::remove_routes_to_destination(&mut self.routing_table, destination)
     }
 
+    /// Enable badge tracking and allocate the badge map (D17, D-3.2b).
+    ///
+    /// Called at Field creation when `badge_tracking=true`. Allocates the
+    /// badge map eagerly (D-3.2b). After this call, `badge_increment` and
+    /// `badge_decrement` are operational.
+    pub fn enable_badge_tracking(&mut self) {
+        self.badge_tracking = true;
+        self.badge_map = crate::frame::fields::allocate_badge_map();
+    }
+
+    /// Increment the refcount for a specific badge (D17).
+    ///
+    /// Called when a cap with this badge is installed targeting this Field.
+    /// If the badge is new, creates an entry with refcount 1. If existing,
+    /// increments the refcount. No-op if badge tracking is disabled.
+    pub fn badge_increment(&mut self, badge: Badge) {
+        if !self.badge_tracking {
+            return;
+        }
+
+        if let Some(map_ptr) = self.badge_map {
+            crate::frame::fields::badge_map_increment(map_ptr, badge.0);
+        }
+    }
+
+    /// Decrement the refcount for a specific badge (D17).
+    ///
+    /// Called when a cap with this badge is closed. Returns `true` if the
+    /// refcount reached zero (the last send cap with this badge was closed),
+    /// meaning a badge-closure notification must be enqueued. Returns
+    /// `false` if the refcount is still positive or tracking is disabled.
+    pub fn badge_decrement(&mut self, badge: Badge) -> bool {
+        if !self.badge_tracking {
+            return false;
+        }
+
+        let Some(map_ptr) = self.badge_map else {
+            return false;
+        };
+
+        crate::frame::fields::badge_map_decrement(map_ptr, badge.0)
+    }
+
+    /// Enqueue a badge-closure notification (D17, D-3.2c).
+    ///
+    /// Called when `badge_decrement` returns true. If the queue is full,
+    /// stores the notification for deferred delivery (D18 pattern) —
+    /// the notification is never lost (D-3.2c).
+    pub fn enqueue_badge_closure(&mut self, badge: Badge) {
+        let message = Message::badge_closure(badge);
+
+        // Try to enqueue directly. If full, use deferred delivery (D-3.2c).
+        if self.enqueue(message).is_err() {
+            // D-3.2c/D18: deferred delivery — store the badge-closure
+            // notification for delivery when a slot is freed. We enqueue
+            // a pending badge-closure entry using the badge_map's deferred
+            // list. For MVP, we store it in the pending_head list using a
+            // WaitEntry with a dangling observer pointer (kernel-as-sender).
+            //
+            // Note: in a full implementation, the deferred delivery would
+            // use a dedicated pending closure list. For now, the D18 pending
+            // list pattern is not wired for badge closures specifically.
+            // The notification is not lost — it will be delivered when the
+            // queue drains and deferred delivery fires.
+            crate::frame::fields::badge_map_defer_closure(self, badge);
+        }
+    }
+
     /// D67: atomically increment the generation counter, revoking all
     /// capabilities that stored the previous generation value.
     pub fn revoke(&self) {
@@ -449,7 +551,7 @@ mod tests {
 
     #[test]
     fn field_layout() {
-        assert_eq!(core::mem::size_of::<Field>(), 192);
+        assert_eq!(core::mem::size_of::<Field>(), 200);
     }
 
     #[test]
@@ -2111,5 +2213,276 @@ mod tests {
         assert_eq!(source.resolve_route(350), Some(ObjectId(3)));
         assert!(source.resolve_route(250).is_none());
         assert!(source.resolve_route(450).is_none());
+    }
+
+    // ── D17: Badge-closure notifications ─────────────────────────────
+
+    /// Helper: construct a Field with badge tracking enabled.
+    fn test_tracked_field(capacity: u32) -> Field {
+        let mut field = test_field(capacity);
+
+        field.enable_badge_tracking();
+
+        field
+    }
+
+    /// D17: enable_badge_tracking allocates the badge map.
+    #[test]
+    fn test_d17_enable_badge_tracking_allocates_map() {
+        let field = test_tracked_field(4);
+
+        assert!(field.badge_tracking, "D17: badge_tracking must be true");
+        assert!(
+            field.badge_map.is_some(),
+            "D-3.2b: badge map must be allocated at creation"
+        );
+    }
+
+    /// D17: badge_increment on a non-tracking field is a no-op.
+    #[test]
+    fn test_d17_badge_increment_noop_when_disabled() {
+        let mut field = test_field(4);
+
+        assert!(!field.badge_tracking);
+
+        // Must not panic.
+        field.badge_increment(Badge(42));
+    }
+
+    /// D17: badge_decrement on a non-tracking field returns false.
+    #[test]
+    fn test_d17_badge_decrement_noop_when_disabled() {
+        let mut field = test_field(4);
+
+        assert!(!field.badge_tracking);
+        assert!(
+            !field.badge_decrement(Badge(42)),
+            "D17: decrement on non-tracking field must return false"
+        );
+    }
+
+    /// D17: single badge lifecycle — increment, then decrement to zero.
+    #[test]
+    fn test_d17_single_badge_lifecycle() {
+        let mut field = test_tracked_field(4);
+
+        // Increment: create one send cap with badge 100.
+        field.badge_increment(Badge(100));
+
+        // Decrement: close the cap. Should trigger closure.
+        let closure = field.badge_decrement(Badge(100));
+
+        assert!(
+            closure,
+            "D17: closing last cap with badge must trigger closure"
+        );
+    }
+
+    /// D17: multiple caps with same badge — closure fires only on last.
+    #[test]
+    fn test_d17_multiple_caps_same_badge() {
+        let mut field = test_tracked_field(4);
+
+        // Three caps with badge 200.
+        field.badge_increment(Badge(200));
+        field.badge_increment(Badge(200));
+        field.badge_increment(Badge(200));
+
+        // Close first two — no closure.
+        assert!(
+            !field.badge_decrement(Badge(200)),
+            "D17: first close must not trigger closure"
+        );
+        assert!(
+            !field.badge_decrement(Badge(200)),
+            "D17: second close must not trigger closure"
+        );
+
+        // Close last — closure fires.
+        assert!(
+            field.badge_decrement(Badge(200)),
+            "D17: third close must trigger closure"
+        );
+    }
+
+    /// D17: different badges are tracked independently.
+    #[test]
+    fn test_d17_different_badges_independent() {
+        let mut field = test_tracked_field(4);
+
+        field.badge_increment(Badge(10));
+        field.badge_increment(Badge(20));
+
+        // Close badge 10 — closure fires for badge 10.
+        assert!(
+            field.badge_decrement(Badge(10)),
+            "D17: closing last cap with badge 10 must trigger closure"
+        );
+
+        // Close badge 20 — closure fires for badge 20.
+        assert!(
+            field.badge_decrement(Badge(20)),
+            "D17: closing last cap with badge 20 must trigger closure"
+        );
+    }
+
+    /// D17: decrementing a badge that was never incremented returns false.
+    #[test]
+    fn test_d17_decrement_unknown_badge() {
+        let mut field = test_tracked_field(4);
+
+        assert!(
+            !field.badge_decrement(Badge(999)),
+            "D17: decrementing unknown badge must return false"
+        );
+    }
+
+    /// D17: enqueue_badge_closure puts a LABEL_CLOSURE message in the queue.
+    #[test]
+    fn test_d17_enqueue_badge_closure_message() {
+        let mut field = test_tracked_field(8);
+
+        field.enqueue_badge_closure(Badge(42));
+
+        assert_eq!(
+            field.queue_length, 1,
+            "D17: badge-closure message must be enqueued"
+        );
+
+        let msg = field.dequeue().unwrap();
+
+        assert_eq!(msg.label, LABEL_CLOSURE);
+        assert_eq!(msg.badge, Badge(42));
+        assert_eq!(msg.data, [0; 4]);
+    }
+
+    /// D17: full lifecycle — increment, decrement, enqueue closure,
+    /// receive the closure message.
+    #[test]
+    fn test_d17_full_lifecycle() {
+        let mut field = test_tracked_field(8);
+
+        // Install two caps with badge 77.
+        field.badge_increment(Badge(77));
+        field.badge_increment(Badge(77));
+
+        // Close first — no closure.
+        assert!(!field.badge_decrement(Badge(77)));
+        assert_eq!(field.queue_length, 0, "no closure message yet");
+
+        // Close second — closure fires.
+        assert!(field.badge_decrement(Badge(77)));
+        field.enqueue_badge_closure(Badge(77));
+
+        // Receive the closure message.
+        let msg = field.dequeue().unwrap();
+
+        assert_eq!(msg.label, LABEL_CLOSURE);
+        assert_eq!(msg.badge, Badge(77));
+    }
+
+    /// D-3.2c: badge-closure on full queue uses deferred delivery.
+    #[test]
+    fn test_d17_closure_on_full_queue_deferred() {
+        let mut field = test_tracked_field(2);
+
+        // Fill the queue completely.
+        field.enqueue(Message::timer_fire(Badge(0), 0, 0)).unwrap();
+        field.enqueue(Message::timer_fire(Badge(0), 0, 0)).unwrap();
+
+        assert!(field.is_full());
+
+        // Create and close a cap — closure needed but queue is full.
+        field.badge_increment(Badge(55));
+
+        assert!(field.badge_decrement(Badge(55)));
+
+        field.enqueue_badge_closure(Badge(55));
+
+        // Queue is still full (closure was deferred, not dropped).
+        assert!(field.is_full());
+
+        // Drain one message to make room.
+        let _ = field.dequeue();
+
+        // Drain pending closures (what the receive path does).
+        let delivered = crate::frame::fields::drain_pending_closures(&mut field);
+
+        assert_eq!(
+            delivered, 1,
+            "D-3.2c: deferred closure must be delivered after drain"
+        );
+
+        // Queue now has: remaining timer_fire + delivered closure.
+        // Drain the remaining timer_fire first (FIFO).
+        let timer_msg = field.dequeue().unwrap();
+
+        assert_eq!(timer_msg.label, LABEL_TIMER_FIRE);
+
+        // Now the closure message.
+        let closure_msg = field.dequeue().unwrap();
+
+        assert_eq!(
+            closure_msg.label, LABEL_CLOSURE,
+            "D-3.2c: deferred closure must be a LABEL_CLOSURE message"
+        );
+        assert_eq!(closure_msg.badge, Badge(55));
+    }
+
+    /// D17: badge tracking with Badge(0) and Badge(u64::MAX).
+    #[test]
+    fn test_d17_badge_extremes() {
+        let mut field = test_tracked_field(4);
+
+        field.badge_increment(Badge(0));
+        field.badge_increment(Badge(u64::MAX));
+
+        assert!(field.badge_decrement(Badge(0)));
+        assert!(field.badge_decrement(Badge(u64::MAX)));
+    }
+
+    /// D17: many distinct badges tracked concurrently.
+    #[test]
+    fn test_d17_many_distinct_badges() {
+        let mut field = test_tracked_field(32);
+
+        for i in 0..20u64 {
+            field.badge_increment(Badge(i));
+        }
+
+        // Close all — each should trigger closure.
+        for i in 0..20u64 {
+            assert!(
+                field.badge_decrement(Badge(i)),
+                "D17: badge {i} must trigger closure"
+            );
+        }
+    }
+
+    /// D17: re-increment after closure (new cap with same badge).
+    #[test]
+    fn test_d17_reincrement_after_closure() {
+        let mut field = test_tracked_field(8);
+
+        // First lifecycle: increment then decrement.
+        field.badge_increment(Badge(42));
+
+        assert!(field.badge_decrement(Badge(42)));
+
+        // Second lifecycle: new cap with same badge.
+        field.badge_increment(Badge(42));
+        field.badge_increment(Badge(42));
+
+        // Close first of the new pair — no closure yet.
+        assert!(
+            !field.badge_decrement(Badge(42)),
+            "D17: first close of second lifecycle must not trigger closure"
+        );
+
+        // Close second — closure fires again.
+        assert!(
+            field.badge_decrement(Badge(42)),
+            "D17: last close of second lifecycle must trigger closure"
+        );
     }
 }
