@@ -608,7 +608,7 @@ through which all other objects are accessed.
 The table is a contiguous array of `Entry` structs with an intrusive freelist
 through empty slots.
 
-```rs
+```rust
 Entry {
     object:            Option<(ObjectType, ObjectId)>,  -- target, or None if empty
     rights:            Rights,                          -- per-cap rights bitmask
@@ -692,7 +692,7 @@ capabilities).
 
 The cascade state is stored in `CascadeContinuation` within `CoreState`:
 
-```rs
+```rust
 CascadeContinuation {
     levels: [Option<CascadeLevel>; 4],  -- stack of active cascade levels
     depth: usize,                        -- number of active levels

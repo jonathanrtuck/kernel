@@ -578,7 +578,7 @@ server runs a ReplyRecv loop.
 
 **Client:**
 
-```rs
+```rust
 loop {
     // Prepare request in x0-x4
     // x5 = server field handle
@@ -591,7 +591,7 @@ loop {
 
 **Server:**
 
-```rs
+```rust
 // Initial receive to get the first request
 SVC #2  // Receive on service field (x5 = service field handle)
 loop {
@@ -616,7 +616,7 @@ scheduler approves the switch.
 Fire-and-forget events. The sender deposits a message and continues without
 waiting for a response.
 
-```rs
+```rust
 // x0-x3 = event data
 // x4 = event label (protocol-defined)
 // x5 = target field handle
@@ -633,7 +633,7 @@ Otherwise, the message waits in the queue.
 An Observer transfers a capability to another Observer by including it in a
 message.
 
-```rs
+```rust
 // x0-x3 = protocol data
 // x4 = label indicating "here is a resource"
 // x5 = target field handle

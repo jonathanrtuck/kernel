@@ -237,6 +237,7 @@ asm!(
     result = out(reg) result,
     // ... register operands ...
 );
+
 let is_error = (result & (1 << 29)) != 0;
 ```
 
@@ -264,6 +265,7 @@ tbnz    x0, #63, .error // Branch if bit 63 set (negative = error)
 
 ```rust
 let result = typed_syscall(op_code, target, args);
+
 if result.0 < 0 {
     // error: result.0 is the negative error code
 } else {
@@ -640,6 +642,7 @@ Total: 24 bytes. `#[repr(C)]` with compile-time offset and size assertions.
 ```rust
 pub fn typed_syscall(op_code: u16, target: u64, args: [u64; 4]) -> i64 {
     let result: u64;
+
     unsafe {
         core::arch::asm!(
             "svc #0",
@@ -657,6 +660,7 @@ pub fn typed_syscall(op_code: u16, target: u64, args: [u64; 4]) -> i64 {
             lateout("x7") _,
         );
     }
+
     result as i64
 }
 ```
@@ -666,6 +670,7 @@ pub fn typed_syscall(op_code: u16, target: u64, args: [u64; 4]) -> i64 {
 ```rust
 pub fn send(handle: u64, label: u64, data: [u64; 4]) -> bool {
     let nzcv: u64;
+
     unsafe {
         core::arch::asm!(
             "svc #1",
@@ -681,6 +686,7 @@ pub fn send(handle: u64, label: u64, data: [u64; 4]) -> bool {
             in("x7") 0u64,
         );
     }
+
     // Carry is bit 29 of NZCV. Clear = success.
     (nzcv & (1 << 29)) == 0
 }
