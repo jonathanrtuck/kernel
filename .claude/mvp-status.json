@@ -6,7 +6,7 @@
     "0.1": {
       "name": "Send-once cap consumption",
       "note": "",
-      "status": "in_progress"
+      "status": "done"
     },
     "0.10": {
       "name": "Scheduler duplicate prevention",
@@ -36,7 +36,7 @@
     "0.2": {
       "name": "Unified message delivery path",
       "note": "",
-      "status": "pending"
+      "status": "in_progress"
     },
     "0.3": {
       "name": "Fault handler validation ordering",

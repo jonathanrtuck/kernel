@@ -739,6 +739,45 @@ impl<S: Scheduler> CoreState<S> {
         }
     }
 
+    /// Deliver a kernel-originated message to a Field (D13, D18).
+    ///
+    /// Unified delivery path for timer fires, IRQ messages, and any
+    /// future kernel-as-sender producers. Uses `communication::send()`
+    /// to check for blocked waiters before enqueuing — if a receiver is
+    /// waiting, the message is delivered directly and the receiver is
+    /// woken (unblocked + enqueued to scheduler).
+    ///
+    /// Returns Ok(()) on successful delivery, Err on queue full with no waiter.
+    #[cfg(any(target_os = "none", test))]
+    fn deliver_kernel_message(
+        &mut self,
+        field: &mut field::Field,
+        message: field::Message,
+    ) -> Result<(), field::FieldError> {
+        match crate::communication::send(field, message) {
+            Ok(crate::communication::SendOutcome::Enqueued) => Ok(()),
+            Ok(crate::communication::SendOutcome::WokeReceiver(receiver_ptr, msg)) => {
+                Self::deliver_message(receiver_ptr, &msg);
+
+                let _ = crate::frame::cores::observer_unblock(receiver_ptr);
+
+                self.scheduler.enqueue(receiver_ptr);
+
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    #[cfg(not(any(target_os = "none", test)))]
+    fn deliver_kernel_message(
+        &mut self,
+        field: &mut field::Field,
+        message: field::Message,
+    ) -> Result<(), field::FieldError> {
+        field.enqueue(message)
+    }
+
     #[cfg(any(target_os = "none", test))]
     /// D79 Row 1-2: Handle Send outcome — sender always continues.
     ///
@@ -2417,7 +2456,7 @@ impl<S: Scheduler> CoreState<S> {
                     let message = pulsar.fire_message(current_ticks);
 
                     if let Some(target_field) = fields.get_mut(entry.field_id)
-                        && target_field.enqueue(message).is_err()
+                        && self.deliver_kernel_message(target_field, message).is_err()
                     {
                         pulsar.record_overrun();
                     }
@@ -2546,7 +2585,7 @@ impl<S: Scheduler> CoreState<S> {
                     // D18: if the queue is full, the message is dropped.
                     // IRQ messages are edge-triggered — the interrupt stays
                     // masked until explicitly acked. No pending list needed.
-                    let _ = target_field.enqueue(message);
+                    let _ = self.deliver_kernel_message(target_field, message);
                 }
                 // else: stale route — generation mismatch, silently ignore.
             }
@@ -3791,6 +3830,93 @@ mod tests {
 
         assert_eq!(msg.label, field::LABEL_TIMER_FIRE);
         assert_eq!(msg.badge, Badge(0x42));
+    }
+
+    /// D13/D81: when a timer fires and a receiver is blocked on the target
+    /// Field, the receiver must be woken (message delivered to registers,
+    /// unblocked, re-enqueued to scheduler). This is the unified delivery
+    /// path fix — previously, handle_timer called enqueue() directly,
+    /// leaving blocked receivers stranded.
+    #[test]
+    fn test_d81_handle_timer_wakes_blocked_receiver() {
+        let ks = make_kernel_state();
+        let (pulsar_id, field_id) = {
+            let mut pulsars = ks.pulsars.acquire();
+            let (pid, pulsar) = pulsars.allocate().expect("allocate pulsar");
+
+            *pulsar = crate::pulsar::Pulsar::new(
+                ObjectId(0),
+                Badge(0x77),
+                1_000_000,
+                0, // one-shot
+                TEST_COUNTER_FREQ,
+                0,
+            );
+
+            let mut fields = ks.fields.acquire();
+            let (fid, field) = fields.allocate().expect("allocate field");
+
+            field.queue = crate::frame::fields::alloc_test_queue(8);
+            field.queue_capacity = 8;
+            pulsar.delivery_field = fid;
+
+            (pid, fid)
+        };
+
+        // Create a receiver Observer with registers (needed for message delivery).
+        let mut receiver = make_observer_with_registers();
+        let receiver_ptr = NonNull::from(&mut receiver);
+
+        // Block the receiver on the target Field.
+        {
+            let mut fields = ks.fields.acquire();
+            let target = fields.get_mut(field_id).unwrap();
+            let field_ptr = NonNull::from(&*target);
+            let wait_entry = crate::frame::cores::observer_prepare_wait(receiver_ptr, field_ptr);
+
+            target.add_waiter(wait_entry);
+        }
+
+        // Set receiver to Blocked state (as dispatch_receive_outcome would).
+        let _ = crate::frame::cores::observer_set_blocked(receiver_ptr);
+
+        let mut core = make_core_state();
+        // The running Observer (not the receiver).
+        let mut current = make_observer();
+
+        core.scheduler.enqueue(NonNull::from(&mut current));
+
+        // Install deadline.
+        core.deadlines[0] = Some(DeadlineEntry {
+            deadline_ticks: 24,
+            pulsar_id,
+            field_id,
+        });
+        core.deadline_count = 1;
+
+        // Fire timer — should wake the blocked receiver.
+        core.handle_timer(100, &ks, TEST_COUNTER_FREQ);
+
+        // The message must NOT be in the queue (delivered directly to waiter).
+        let mut fields = ks.fields.acquire();
+        let target = fields.get_mut(field_id).unwrap();
+
+        assert_eq!(
+            target.queue_length, 0,
+            "unified delivery: message must bypass queue when waiter is present"
+        );
+        // Waiter list must be empty (receiver was popped).
+        assert!(
+            target.waiters_head.is_none(),
+            "unified delivery: waiter must be popped after direct delivery"
+        );
+        drop(fields);
+
+        // The receiver must have been unblocked (transitioned from Blocked to Runnable).
+        assert!(
+            matches!(receiver.state, crate::observer::PrimaryState::Runnable),
+            "unified delivery: receiver must be Runnable after timer fire wakeup"
+        );
     }
 
     #[test]
