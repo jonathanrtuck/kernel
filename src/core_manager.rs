@@ -955,19 +955,28 @@ impl<S: Scheduler> CoreState<S> {
                 // Row 6: D50 fast path. Consult scheduler.
                 if self.scheduler.should_switch_to(receiver_ptr) {
                     // Approved: direct-switch to receiver.
-                    // D74: x0-x3 pass through in physical registers.
                     // D50: no user cap (0-cap gate).
+                    //
+                    // D74 intended x0-x3 to pass through in physical
+                    // registers, but __restore_observer performs a full
+                    // RegisterState load for both Resume and ResumeFastPath.
+                    // Until the assembly implements a dedicated fast-path
+                    // restore that skips x0-x3, we must write the sender's
+                    // data words into the receiver's RegisterState.
+                    let sender_regs = crate::frame::cores::read_ipc_registers(sender_ptr);
                     let user_cap_slot = crate::capability::CAP_ABSENT;
                     let reply_cap_slot =
                         Self::install_cap_or_absent(receiver_ptr, reply_cap.as_ref());
 
-                    crate::frame::cores::write_metadata_to_registers(
+                    crate::frame::cores::write_message_to_registers(
                         receiver_ptr,
+                        &sender_regs.data,
                         label,
                         badge,
                         user_cap_slot,
                         reply_cap_slot,
                     );
+                    crate::frame::cores::clear_ipc_carry(receiver_ptr);
 
                     // Dequeue sender (it's blocking). Receiver bypasses queue.
                     let _ = crate::frame::cores::observer_set_blocked(sender_ptr);
@@ -4630,6 +4639,69 @@ mod tests {
         assert!(
             !core.scheduler.contains(receiver_ptr),
             "D79 Row 6: receiver must not be in run queue (direct switch bypasses it)"
+        );
+    }
+
+    /// D79 Row 6: DirectSwitch must write sender's data words (x0-x3)
+    /// to receiver's RegisterState. Without this, the receiver gets
+    /// stale x0-x3 from its last SVC entry — visible as data corruption
+    /// on the second Call in a Call+ReplyRecv loop.
+    #[test]
+    fn test_d79_call_direct_switch_writes_data_to_receiver() {
+        let mut core = make_core_state();
+        let mut sender = make_observer_with_registers();
+        let mut receiver = make_observer_with_registers();
+        let sender_ptr = NonNull::from(&mut sender);
+        let receiver_ptr = NonNull::from(&mut receiver);
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+
+        // Set distinct data words in the sender's saved registers.
+        crate::frame::cores::write_message_to_registers(
+            sender_ptr,
+            &[0x11, 0x22, 0x33, 0x44],
+            7,
+            0,
+            u64::MAX,
+            0,
+        );
+        // Set different data in receiver to detect stale-register bugs.
+        crate::frame::cores::write_message_to_registers(
+            receiver_ptr,
+            &[0xDE, 0xAD, 0xBE, 0xEF],
+            0,
+            0,
+            u64::MAX,
+            0,
+        );
+
+        let outcome = crate::communication::CallOutcome::DirectSwitch(receiver_ptr);
+        let result = core.dispatch_call_outcome_with_metadata(
+            sender_ptr, outcome, 7,    // label
+            0x42, // badge
+            None, // no reply cap
+        );
+
+        assert!(
+            matches!(result, DispatchResult::ResumeFastPath(_)),
+            "DirectSwitch approved must return ResumeFastPath"
+        );
+
+        let regs = crate::frame::cores::read_ipc_registers(receiver_ptr);
+
+        assert_eq!(
+            regs.data,
+            [0x11, 0x22, 0x33, 0x44],
+            "DirectSwitch must write sender's data words to receiver (x0-x3)"
+        );
+        assert_eq!(
+            regs.label, 7,
+            "DirectSwitch must write label to receiver (x4)"
+        );
+        assert_eq!(
+            regs.handle_or_badge, 0x42,
+            "DirectSwitch must write badge to receiver (x5)"
         );
     }
 
