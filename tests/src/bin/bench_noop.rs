@@ -14,6 +14,7 @@ use userspace_rs::pass;
 #[unsafe(link_section = ".text.start")]
 extern "C" fn _start() -> ! {
     bench_emit(0x1, 42, 0, 0);
+
     pass();
 }
 
