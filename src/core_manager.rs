@@ -461,6 +461,13 @@ impl<S: Scheduler> CoreState<S> {
 
                 drop(fields_guard);
 
+                // D51: consume send-once cap after successful send.
+                if entry.is_send_once() {
+                    let slot_index = crate::capability::Handle::decode(raw_handle).index;
+
+                    crate::frame::cores::observer_close_cap(sender_ptr, slot_index);
+                }
+
                 // Step 8: dispatch outcome per D79 matrix.
                 self.dispatch_send_outcome(sender_ptr, outcome)
             }
@@ -552,6 +559,13 @@ impl<S: Scheduler> CoreState<S> {
                 };
 
                 drop(fields_guard);
+
+                // D51: consume send-once cap after successful call.
+                if entry.is_send_once() {
+                    let slot_index = crate::capability::Handle::decode(raw_handle).index;
+
+                    crate::frame::cores::observer_close_cap(sender_ptr, slot_index);
+                }
 
                 // Pass label, badge, and reply_cap for outcome handling.
                 self.dispatch_call_outcome_with_metadata(
@@ -710,6 +724,13 @@ impl<S: Scheduler> CoreState<S> {
                 }
 
                 drop(fields_guard);
+
+                // D51: consume send-once reply cap after successful reply.
+                if entry.is_send_once() {
+                    let slot_index = crate::capability::Handle::decode(raw_handle).index;
+
+                    crate::frame::cores::observer_close_cap(sender_ptr, slot_index);
+                }
 
                 self.dispatch_reply_recv_outcome(sender_ptr, outcome)
             }
@@ -6050,6 +6071,97 @@ mod tests {
             msg.badge,
             Badge(0x5555),
             "D17: badge injected from cap entry"
+        );
+    }
+
+    // ── D51: Send-once cap consumed after successful Send ──────────
+
+    /// D51: when a send-once cap is used for Send, the slot must be
+    /// closed after the send succeeds. A second send using the same
+    /// handle must fail with InvalidCap (slot is now empty).
+    #[test]
+    fn test_d51_send_once_cap_consumed_after_send() {
+        let ks = make_kernel_state();
+        let field_id = make_field_in_arena(&ks, 8);
+        let (mut sender, entries) = make_sender_with_cap(
+            crate::capability::ObjectType::Field,
+            field_id,
+            crate::capability::Rights::SEND,
+            Badge(0x1234),
+            0,
+        );
+        // Mark the cap as send-once.
+        let entry = crate::frame::capabilities::entry_mut(entries, 16, 0).unwrap();
+
+        entry.send_once = true;
+
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        crate::frame::cores::write_test_ipc_registers_via_observer(
+            sender_ptr,
+            &crate::syscall::IpcRegisters {
+                data: [1, 2, 3, 4],
+                label: 0xFACE,
+                handle_or_badge: handle,
+                user_cap: u64::MAX,
+                reply_info: 0,
+            },
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+
+        // First send must succeed.
+        let result = core.dispatch_ipc(IpcOperation::Send, &ks);
+
+        assert!(
+            matches!(result, DispatchResult::Resume(_)),
+            "D51: first send with send-once cap must succeed"
+        );
+
+        let (carry, _) = crate::frame::cores::read_ipc_carry_and_x0(sender_ptr);
+
+        assert!(!carry, "D51: first send must not set carry (success)");
+
+        // The slot must now be empty (consumed by send-once).
+        let consumed_entry = crate::frame::capabilities::entry_ref(entries, 16, 0).unwrap();
+
+        assert!(
+            !consumed_entry.is_occupied(),
+            "D51: send-once slot must be empty after successful send"
+        );
+
+        // Second send with same handle must fail (slot is empty).
+        crate::frame::cores::write_test_ipc_registers_via_observer(
+            sender_ptr,
+            &crate::syscall::IpcRegisters {
+                data: [5, 6, 7, 8],
+                label: 0xBEEF,
+                handle_or_badge: handle,
+                user_cap: u64::MAX,
+                reply_info: 0,
+            },
+        );
+
+        let result2 = core.dispatch_ipc(IpcOperation::Send, &ks);
+
+        assert!(
+            matches!(result2, DispatchResult::Resume(_)),
+            "D51: second send must resume sender (with error)"
+        );
+
+        let (carry2, _) = crate::frame::cores::read_ipc_carry_and_x0(sender_ptr);
+
+        assert!(
+            carry2,
+            "D51: second send on consumed send-once cap must set carry (error)"
         );
     }
 

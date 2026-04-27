@@ -6,7 +6,7 @@
     "0.1": {
       "name": "Send-once cap consumption",
       "note": "",
-      "status": "pending"
+      "status": "in_progress"
     },
     "0.10": {
       "name": "Scheduler duplicate prevention",
@@ -198,7 +198,7 @@
   "phases": {
     "0": {
       "name": "Correctness",
-      "status": "pending"
+      "status": "in_progress"
     },
     "1": {
       "name": "Memory Pipeline",
