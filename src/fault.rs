@@ -377,6 +377,7 @@ mod tests {
             waiters_tail: None,
             routing_table: None,
             pending_head: None,
+            pending_kernel_message: None,
             badge_tracking: false,
             back_pointer_head: None,
             refcount: 1,

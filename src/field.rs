@@ -150,6 +150,13 @@ pub struct Field {
     /// the deferred message is delivered.
     pub pending_head: Option<NonNull<crate::observer::WaitEntry>>,
 
+    /// D18: single pending kernel-as-sender message (IRQ, timer).
+    /// Used when the queue is full and no waiter is present. The next
+    /// receive() drains this before checking pending_head. At most one
+    /// message — if a second arrives, the first is overwritten (acceptable
+    /// for edge-triggered IRQs where only the latest matters).
+    pub pending_kernel_message: Option<Message>,
+
     /// Per-badge refcount tracking enabled (D17 opt-in).
     /// Reply Fields are always-tracked (D73).
     pub badge_tracking: bool,
@@ -270,6 +277,7 @@ impl Field {
             waiters_tail: None,
             routing_table: None,
             pending_head: None,
+            pending_kernel_message: None,
             badge_tracking: false,
             back_pointer_head: None,
             backing_va_base,
@@ -429,7 +437,7 @@ mod tests {
 
     #[test]
     fn field_layout() {
-        assert_eq!(core::mem::size_of::<Field>(), 96);
+        assert_eq!(core::mem::size_of::<Field>(), 192);
     }
 
     #[test]

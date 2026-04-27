@@ -46,12 +46,12 @@
     "0.4": {
       "name": "Fault delivery unblock",
       "note": "",
-      "status": "in_progress"
+      "status": "done"
     },
     "0.5": {
       "name": "IRQ message drop on full queue",
       "note": "",
-      "status": "pending"
+      "status": "in_progress"
     },
     "0.6": {
       "name": "ResourceRequest split rollback",

@@ -748,12 +748,30 @@ impl<S: Scheduler> CoreState<S> {
     /// woken (unblocked + enqueued to scheduler).
     ///
     /// Returns Ok(()) on successful delivery, Err on queue full with no waiter.
+    /// Deliver a kernel-originated message to a Field (D13, D18).
+    ///
+    /// Unified delivery path for timer fires, IRQ messages, and any
+    /// future kernel-as-sender producers. Uses `communication::send()`
+    /// to check for blocked waiters before enqueuing — if a receiver is
+    /// waiting, the message is delivered directly and the receiver is
+    /// woken (unblocked + enqueued to scheduler).
+    ///
+    /// On queue full with no waiter: stores the message in the Field's
+    /// pending_kernel_message slot (D18). The next receive() drains it.
     #[cfg(any(target_os = "none", test))]
     fn deliver_kernel_message(
         &mut self,
         field: &mut field::Field,
         message: field::Message,
     ) -> Result<(), field::FieldError> {
+        // D18: if queue is full and no waiter present, store as pending
+        // rather than passing to send() which would consume the message.
+        if field.is_full() && field.waiters_head.is_none() {
+            field.pending_kernel_message = Some(message);
+
+            return Ok(());
+        }
+
         match crate::communication::send(field, message) {
             Ok(crate::communication::SendOutcome::Enqueued) => Ok(()),
             Ok(crate::communication::SendOutcome::WokeReceiver(receiver_ptr, msg)) => {
@@ -775,6 +793,12 @@ impl<S: Scheduler> CoreState<S> {
         field: &mut field::Field,
         message: field::Message,
     ) -> Result<(), field::FieldError> {
+        if field.is_full() {
+            field.pending_kernel_message = Some(message);
+
+            return Ok(());
+        }
+
         field.enqueue(message)
     }
 

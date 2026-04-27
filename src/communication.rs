@@ -164,9 +164,12 @@ pub fn send(field: &mut Field, message: Message) -> Result<SendOutcome, FieldErr
 pub fn receive(field: &mut Field, receiver: &mut WaitEntry) -> ReceiveOutcome {
     // D13: dequeue before blocking.
     if let Some(message) = field.dequeue() {
-        // D18: after dequeue frees a slot, check pending list for deferred
-        // kernel-as-sender messages that were waiting for space.
-        if let Some(pending_ptr) = field.pending_head {
+        // D18: after dequeue frees a slot, check pending kernel message
+        // first (IRQ/timer that couldn't be enqueued), then pending list
+        // (Observer fault deferred delivery).
+        if let Some(pending_msg) = field.pending_kernel_message.take() {
+            let _ = field.enqueue(pending_msg);
+        } else if let Some(pending_ptr) = field.pending_head {
             // Consume the pending entry: advance pending_head to the next entry.
             let next = crate::frame::fields::waiter_next(pending_ptr);
 
@@ -338,6 +341,7 @@ mod tests {
             waiters_tail: None,
             routing_table: None,
             pending_head: None,
+            pending_kernel_message: None,
             badge_tracking: false,
             back_pointer_head: None,
             refcount: 1,
