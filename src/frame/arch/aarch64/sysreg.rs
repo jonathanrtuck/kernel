@@ -245,6 +245,23 @@ pub fn disable_irqs() {
     }
 }
 
+/// Mask all asynchronous exceptions: SError (A), IRQ (I), and FIQ (F).
+///
+/// Used in fatal exception paths to prevent re-entry during crash
+/// diagnostics. Debug exceptions (D) are left unmasked for BRK-based
+/// debugging.
+///
+/// DAIFSet immediate bits: bit 0 = F, bit 1 = I, bit 2 = A.
+/// #7 = 0b111 = F + I + A.
+#[inline(always)]
+pub fn disable_all_async_exceptions() {
+    // SAFETY: DAIFSet with immediate #7 sets A, I, and F bits in PSTATE.
+    // ARM ARM D1.7.1: MSR DAIFSet is a hint-class system instruction.
+    unsafe {
+        core::arch::asm!("msr daifset, #7", options(nostack));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MMU and address translation
 // ---------------------------------------------------------------------------

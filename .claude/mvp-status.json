@@ -1,7 +1,7 @@
 {
   "blockers": [],
-  "completed_items": 20,
-  "current_phase": 2,
+  "completed_items": 28,
+  "current_phase": 3,
   "items": {
     "0.1": {
       "name": "Send-once cap consumption",
@@ -130,33 +130,33 @@
     },
     "3.2": {
       "name": "Badge-closure notifications",
-      "note": "Requires D-3.2a/b/c decisions",
-      "status": "pending"
+      "note": "BadgeMap per Field (D-3.2a linear scan); refcount inc/dec on mint/close; deferred delivery on full queue (D-3.2c)",
+      "status": "done"
     },
     "3.3": {
       "name": "Field split routing",
-      "note": "",
-      "status": "pending"
+      "note": "resolve_route wired into dispatch_ipc Send/Call paths; stale route falls back to source Field",
+      "status": "done"
     },
     "3.4": {
       "name": "Field destroy routing cleanup",
-      "note": "",
-      "status": "pending"
+      "note": "Arena-wide scan via for_each_mut removes routes to destroyed Field; back-pointer list not used (growable array invalidation)",
+      "status": "done"
     },
     "3.5": {
       "name": "Space unmap on last cap close",
-      "note": "",
-      "status": "pending"
+      "note": "Close handler checks observer_has_cap_to_object; calls unwire_space_mapping when last cap closed (D24/D91)",
+      "status": "done"
     },
     "3.6": {
       "name": "Destroy returns Space cap",
-      "note": "",
-      "status": "pending"
+      "note": "Verified in Phase 2.5 (D-2.5); return_backing_space called in all 3 cascade paths",
+      "status": "done"
     },
     "3.7": {
       "name": "Nested fault handling",
-      "note": "",
-      "status": "pending"
+      "note": "dispatch_fault returns FatalFault on double-fault (observer_set_faulted Err); system_off for MVP (D-0.3 destroy deferred to post-MVP multi-supervisor)",
+      "status": "done"
     },
     "4.0": {
       "name": "IPI interface design",
@@ -165,13 +165,13 @@
     },
     "4.1": {
       "name": "Fix TPIDR_EL1 secondary cores",
-      "note": "",
-      "status": "pending"
+      "note": "init_secondary_per_core_data: static PerCoreData+CoreState arrays indexed by core_id-1; set_tpidr_el1(pcd ptr)",
+      "status": "done"
     },
     "4.2": {
       "name": "Fix fatal_exception masking",
-      "note": "",
-      "status": "pending"
+      "note": "disable_all_async_exceptions (DAIFSet #7: A+I+F) replaces disable_irqs in both fatal paths; Debug left unmasked for BRK",
+      "status": "done"
     },
     "4.3": {
       "name": "Secondary core boot",
@@ -206,15 +206,15 @@
     },
     "2": {
       "name": "Integration Proof",
-      "status": "in_progress"
+      "status": "complete"
     },
     "3": {
       "name": "Protocol Completeness",
-      "status": "pending"
+      "status": "in_progress"
     },
     "4": {
       "name": "SMP",
-      "status": "pending"
+      "status": "in_progress"
     }
   },
   "total_items": 38

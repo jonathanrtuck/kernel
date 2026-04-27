@@ -591,7 +591,7 @@ fn verify_observer_destroy() -> ! {
 fn fatal_exception_el0(source: u64, esr: u64, far: u64) -> ! {
     let ec = esr_ec(esr);
 
-    sysreg::disable_irqs();
+    sysreg::disable_all_async_exceptions();
 
     crate::println!();
     crate::println!(
@@ -685,8 +685,8 @@ fn idle_wakeup_check() {}
 // ---------------------------------------------------------------------------
 
 fn fatal_exception(frame: &TrapFrame, source: u64) -> ! {
-    // Mask IRQs to prevent timer ticks from interleaving diagnostic output.
-    sysreg::disable_irqs();
+    // Mask all async exceptions to prevent re-entry during crash diagnostics.
+    sysreg::disable_all_async_exceptions();
 
     let ec = esr_ec(frame.esr);
 

@@ -7,6 +7,14 @@
 use super::{platform, sysreg};
 use crate::config;
 #[cfg(target_os = "none")]
+use crate::core_manager::{CoreState, MAX_DEADLINES_PER_CORE};
+#[cfg(target_os = "none")]
+use crate::frame::cores::PerCoreData;
+#[cfg(target_os = "none")]
+use crate::time_manager::CoreId;
+#[cfg(target_os = "none")]
+use crate::time_manager::round_robin::RoundRobin;
+#[cfg(target_os = "none")]
 use core::cell::UnsafeCell;
 #[cfg(target_os = "none")]
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -42,6 +50,81 @@ static CORE_STACKS: CoreStacks = CoreStacks(UnsafeCell::new(
 /// Number of secondary cores that have completed initialization.
 #[cfg(target_os = "none")]
 static CORES_ONLINE: AtomicUsize = AtomicUsize::new(0);
+
+// ---------------------------------------------------------------------------
+// Secondary core per-core data (D83)
+// ---------------------------------------------------------------------------
+
+/// Per-core data for secondary cores. Index 0 = core 1, index 1 = core 2, etc.
+/// BSP (core 0) uses separate statics in boot.rs.
+#[cfg(target_os = "none")]
+static mut SECONDARY_PER_CORE_DATA: [PerCoreData; config::MAX_CORES - 1] = [const {
+    PerCoreData {
+        register_state_ptr: core::ptr::null_mut(),
+        core_state_ptr: core::ptr::null_mut(),
+        kernel_stack_top: core::ptr::null_mut(),
+    }
+};
+    config::MAX_CORES - 1];
+
+#[cfg(target_os = "none")]
+static mut SECONDARY_CORE_STATES: [CoreState<RoundRobin>; config::MAX_CORES - 1] = [const {
+    CoreState {
+        core_id: CoreId(0),
+        current: None,
+        scheduler: RoundRobin::new(),
+        deadlines: [None; MAX_DEADLINES_PER_CORE],
+        deadline_count: 0,
+        cascade_continuation: None,
+    }
+};
+    config::MAX_CORES - 1];
+
+/// Initialize a secondary core's PerCoreData and write TPIDR_EL1.
+///
+/// Mirrors boot.rs `init_bsp_per_core_data` for secondary cores.
+/// D83: TPIDR_EL1 → PerCoreData → CoreState. Must be called before
+/// any exception handler runs on this core.
+#[cfg(target_os = "none")]
+fn init_secondary_per_core_data(core_id: usize) {
+    assert!((1..config::MAX_CORES).contains(&core_id));
+    let idx = core_id - 1;
+    let stacks_base = CORE_STACKS.0.get() as usize;
+    let stack_top = stack_top_for_core(core_id, stacks_base);
+
+    // SAFETY: Each secondary core exclusively owns its slot (indexed by
+    // core_id - 1). No concurrent access: this runs once per core during
+    // boot before the core accepts exceptions. Raw pointer writes avoid
+    // Edition 2024's prohibition on references to mutable statics.
+    unsafe {
+        let cs = &raw mut SECONDARY_CORE_STATES[idx];
+
+        core::ptr::write(
+            cs,
+            CoreState {
+                core_id: CoreId(core_id as u16),
+                current: None,
+                scheduler: RoundRobin::new(),
+                deadlines: [None; MAX_DEADLINES_PER_CORE],
+                deadline_count: 0,
+                cascade_continuation: None,
+            },
+        );
+
+        let pcd = &raw mut SECONDARY_PER_CORE_DATA[idx];
+
+        core::ptr::write(
+            pcd,
+            PerCoreData {
+                register_state_ptr: core::ptr::null_mut(),
+                core_state_ptr: cs as *mut u8,
+                kernel_stack_top: stack_top as *mut u8,
+            },
+        );
+
+        sysreg::set_tpidr_el1(pcd as u64);
+    }
+}
 
 /// Extract the linear core ID from an MPIDR_EL1 value.
 ///
@@ -131,7 +214,7 @@ extern "C" fn secondary_main(core_id: usize) -> ! {
     super::exception::init();
     super::mmu::init_secondary();
     super::gic::init_per_core(core_id);
-    super::sysreg::set_tpidr_el1(core_id as u64);
+    init_secondary_per_core_data(core_id);
 
     crate::println!("core {}: alive", core_id);
 
