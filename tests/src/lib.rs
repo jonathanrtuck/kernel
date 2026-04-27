@@ -149,6 +149,120 @@ pub fn receive(handle: u64) -> Message {
     }
 }
 
+/// Call: send a message and block until reply (SVC #3).
+///
+/// Sends data to the Field at `handle` and blocks until the server replies.
+/// This is the client-side fast path for ping-pong IPC.
+pub fn call(
+    handle: u64,
+    label: u64,
+    data: [u64; 4],
+    user_cap: u64,
+    reply_badge: u64,
+) -> Message {
+    let d0: u64;
+    let d1: u64;
+    let d2: u64;
+    let d3: u64;
+    let rlabel: u64;
+    let badge: u64;
+    let ruser_cap: u64;
+    let reply_cap: u64;
+    // SAFETY: SVC #3 = Call (D48). Sends message then blocks on reply.
+    // Register layout per D47:
+    //   Entry: x0-x3 = data, x4 = label, x5 = handle, x6 = user cap, x7 = reply badge.
+    //   Return: x0-x3 = reply data, x4 = reply label, x5 = badge, x6 = user cap, x7 = reply cap.
+    // All eight registers are both inputs and outputs. Using `lateout` is correct
+    // because the SVC traps into the kernel before any register is modified.
+    unsafe {
+        asm!(
+            "svc #3",
+            in("x0") data[0],
+            in("x1") data[1],
+            in("x2") data[2],
+            in("x3") data[3],
+            in("x4") label,
+            in("x5") handle,
+            in("x6") user_cap,
+            in("x7") reply_badge,
+            lateout("x0") d0,
+            lateout("x1") d1,
+            lateout("x2") d2,
+            lateout("x3") d3,
+            lateout("x4") rlabel,
+            lateout("x5") badge,
+            lateout("x6") ruser_cap,
+            lateout("x7") reply_cap,
+        );
+    }
+    Message {
+        data: [d0, d1, d2, d3],
+        label: rlabel,
+        badge,
+        user_cap: ruser_cap,
+        reply_cap,
+    }
+}
+
+/// ReplyRecv: reply to previous caller and receive next message (SVC #4).
+///
+/// Sends a reply on `reply_handle` (a send-once cap from a previous Receive)
+/// and simultaneously waits for the next message on `recv_handle`. This is
+/// the server-side fast path — the server never blocks between handling one
+/// request and waiting for the next.
+pub fn reply_receive(
+    reply_handle: u64,
+    recv_handle: u64,
+    label: u64,
+    data: [u64; 4],
+    user_cap: u64,
+) -> Message {
+    let d0: u64;
+    let d1: u64;
+    let d2: u64;
+    let d3: u64;
+    let rlabel: u64;
+    let badge: u64;
+    let ruser_cap: u64;
+    let reply_cap: u64;
+    // SAFETY: SVC #4 = ReplyRecv (D48). Replies then blocks on receive.
+    // Register layout per D47:
+    //   Entry: x0-x3 = reply data, x4 = reply label, x5 = reply handle (send-once),
+    //          x6 = user cap, x7 = receive handle.
+    //   Return: x0-x3 = new message data, x4 = label, x5 = badge, x6 = user cap,
+    //           x7 = reply cap.
+    // Note the asymmetry: x5 entry = reply handle, x7 entry = receive handle.
+    // On return: x5 = badge (new message), x7 = reply cap (new message).
+    unsafe {
+        asm!(
+            "svc #4",
+            in("x0") data[0],
+            in("x1") data[1],
+            in("x2") data[2],
+            in("x3") data[3],
+            in("x4") label,
+            in("x5") reply_handle,
+            in("x6") user_cap,
+            in("x7") recv_handle,
+            lateout("x0") d0,
+            lateout("x1") d1,
+            lateout("x2") d2,
+            lateout("x3") d3,
+            lateout("x4") rlabel,
+            lateout("x5") badge,
+            lateout("x6") ruser_cap,
+            lateout("x7") reply_cap,
+        );
+    }
+    Message {
+        data: [d0, d1, d2, d3],
+        label: rlabel,
+        badge,
+        user_cap: ruser_cap,
+        reply_cap,
+    }
+}
+
 // ── Typed syscalls (SVC #0) ─────────────────────────────────────
 
 /// Result of a typed syscall. Negative = error, non-negative = success.
