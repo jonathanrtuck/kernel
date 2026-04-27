@@ -2813,10 +2813,16 @@ impl<S: Scheduler> CoreState<S> {
     ///
     /// D2/D59: delegates to `scheduler.pick_next()`. Returns `Idle`
     /// if no Observer is runnable (D46: core enters WFI).
-    pub fn schedule_next(&self) -> DispatchResult {
+    pub fn schedule_next(&mut self) -> DispatchResult {
         match self.scheduler.pick_next() {
-            Some(observer) => DispatchResult::Resume(observer),
-            None => DispatchResult::Idle,
+            Some(observer) => {
+                self.current = Some(observer);
+                DispatchResult::Resume(observer)
+            }
+            None => {
+                self.current = None;
+                DispatchResult::Idle
+            }
         }
     }
 
@@ -3189,7 +3195,7 @@ mod tests {
 
     #[test]
     fn test_d46_schedule_next_returns_idle_when_empty() {
-        let core = make_core_state();
+        let mut core = make_core_state();
         let result = core.schedule_next();
 
         assert!(

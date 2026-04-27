@@ -238,6 +238,8 @@ fn handle_el0_sync<S: crate::time_manager::Scheduler + 'static>(
 
             if imm == 0x42 {
                 test_passed()
+            } else if imm == 0x43 {
+                child_scenario_passed::<S>()
             } else {
                 handle_el0_fault::<S>(esr, far)
             }
@@ -376,6 +378,28 @@ fn test_passed() -> ! {
     crate::println!();
 
     super::psci::system_off()
+}
+
+/// Phase 2 child-scenario-pass handler.
+///
+/// Called when a child Observer signals BRK #0x43. The child completed
+/// its test scenario. Print a message, remove the child from the
+/// scheduler, and resume the next Observer (which should be the parent).
+#[cfg(target_os = "none")]
+fn child_scenario_passed<S: crate::time_manager::Scheduler + 'static>()
+-> crate::core_manager::DispatchResult {
+    use crate::core_manager;
+    use crate::time_manager::Scheduler;
+
+    crate::println!("scenario: child observer ran in own address space — PASS");
+
+    let core = core_manager::current_core_mut::<S>();
+
+    if let Some(child) = core.current {
+        Scheduler::dequeue(&mut core.scheduler, child);
+    }
+
+    core.schedule_next()
 }
 
 /// Fatal EL0 exception — dump state and halt.

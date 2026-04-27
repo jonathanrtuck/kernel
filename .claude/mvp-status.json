@@ -1,7 +1,7 @@
 {
   "blockers": [],
-  "completed_items": 14,
-  "current_phase": 1,
+  "completed_items": 19,
+  "current_phase": 2,
   "items": {
     "0.1": {
       "name": "Send-once cap consumption",
@@ -95,13 +95,13 @@
     },
     "1.5": {
       "name": "VmFault translation",
-      "note": "",
-      "status": "in_progress"
+      "note": "translate_vm_fault in cores.rs; EC 0x20/0x24 → VmFault",
+      "status": "done"
     },
     "2.1": {
       "name": "Two-Observer boot",
       "note": "",
-      "status": "pending"
+      "status": "in_progress"
     },
     "2.2": {
       "name": "IPC roundtrip",
@@ -202,11 +202,11 @@
     },
     "1": {
       "name": "Memory Pipeline",
-      "status": "in_progress"
+      "status": "complete"
     },
     "2": {
       "name": "Integration Proof",
-      "status": "pending"
+      "status": "in_progress"
     },
     "3": {
       "name": "Protocol Completeness",

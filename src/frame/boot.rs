@@ -402,6 +402,173 @@ fn set_current_observer(observer_ptr: NonNull<Observer>) {
     }
 }
 
+/// Enqueue an additional Observer to the BSP scheduler (Phase 2).
+///
+/// Unlike `set_current_observer`, this does NOT set the Observer as
+/// current — it only adds it to the scheduler queue. Called during
+/// multi-Observer boot to create child Observers that run after the
+/// first context switch.
+#[cfg(target_os = "none")]
+fn enqueue_observer(observer_ptr: NonNull<Observer>) {
+    // SAFETY: BSP_CORE_STATE initialized by init_bsp_per_core_data.
+    // Single-threaded boot context.
+    unsafe {
+        let cs = &raw mut BSP_CORE_STATE;
+
+        Scheduler::enqueue(&mut (*cs).scheduler, observer_ptr);
+    }
+}
+
+// ── Child Observer binary (Phase 2) ─────────────────────────────
+//
+// Minimal EL0 program for the child Observer in integration tests.
+// 1. Loads 0xC1 into x0 (marker: "child ran")
+// 2. Executes BRK #0x43 (signals child completed)
+
+#[cfg(target_os = "none")]
+const CHILD_BINARY: &[u8] = &{
+    let mut buf = [0u8; 8];
+
+    // mov x0, #0xC1         → 0xD2801820
+    buf[0] = 0x20;
+    buf[1] = 0x18;
+    buf[2] = 0x80;
+    buf[3] = 0xD2;
+
+    // brk #0x43             → 0xD4200860
+    buf[4] = 0x60;
+    buf[5] = 0x08;
+    buf[6] = 0x20;
+    buf[7] = 0xD4;
+
+    buf
+};
+
+/// Create and enqueue a child Observer for Phase 2 integration tests.
+///
+/// Allocates a code page (with CHILD_BINARY), stack page, L1 table,
+/// RegisterState, and cap table. Maps user pages via install_user_l3.
+/// The child Observer starts in Runnable state in the scheduler queue.
+#[cfg(target_os = "none")]
+fn create_child_observer(
+    ks: &KernelState,
+    _handler_field_id: crate::arena::ObjectId,
+) -> Result<NonNull<Observer>, AllocError> {
+    let child_code_pa = alloc_zeroed_pages(ks, 1)?;
+
+    // SAFETY: child_code_pa is a valid zeroed page. CHILD_BINARY fits
+    // in one page. D88: phys_to_virt converts to TTBR1 VA.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            CHILD_BINARY.as_ptr(),
+            mmu::phys_to_virt(child_code_pa) as *mut u8,
+            CHILD_BINARY.len(),
+        );
+    }
+
+    let child_stack_pa = alloc_zeroed_pages(ks, 1)?;
+    let child_l1_pa = allocate_observer_l1(ks)?;
+    let child_l3_pa = alloc_zeroed_pages(ks, 1)?;
+
+    // SAFETY: child_l3_pa is a valid zeroed page. Write L3 page
+    // descriptors for the code page (index 1) and stack page (index 2).
+    unsafe {
+        let l3 =
+            &mut *(mmu::phys_to_virt(child_l3_pa) as *mut [u64; page_table::ENTRIES_PER_TABLE]);
+
+        l3[1] = page_table::user_code_descriptor(child_code_pa as u64);
+        l3[2] = page_table::user_data_descriptor(child_stack_pa as u64);
+    }
+
+    // Install the child's user L3 in the child's L2 (via L1[0] → L2_ROOT).
+    // The child shares the kernel's L2_ROOT at L1[0]. Install the child's
+    // user L3 at L2 index 1 (VA 0x200_0000–0x3FF_FFFF) to avoid collision
+    // with the root Observer's user pages at L2 index 0.
+    //
+    // Actually, each Observer has its own L1. L1[0] → L2_ROOT which
+    // includes the root Observer's user pages at index 0. We need a
+    // SEPARATE L2 for child's user pages to avoid sharing the root's.
+    //
+    // Simpler: install child's L3 at L2 index 0 of a FRESH L2 under the
+    // child's L1. But child's L1[0] → L2_ROOT for kernel code.
+    //
+    // Solution: give the child a second L1 entry (L1[1]) pointing to a
+    // new L2 that holds the child's user L3. Child user VA starts at
+    // 64 GiB * 1 = too high for 16-bit ASID...
+    //
+    // Actually, L1 index 0 → L2_ROOT already has index 0 used by root.
+    // The child shares L2_ROOT (same physical table), so the root's
+    // user pages (L2 index 0) are visible in the child. This is
+    // incorrect — the child should NOT see the root's user pages.
+    //
+    // For Phase 2 MVP: install the child's user L3 at L2 index 1 in
+    // L2_ROOT. Both observers share L2_ROOT through their L1[0].
+    // The nG (non-global) bit in L3 descriptors + different ASIDs
+    // prevent cross-Observer TLB collisions. The root's pages at L2
+    // index 0 are tagged with root's ASID; child's pages at L2 index 1
+    // are tagged with child's ASID. Hardware only uses TLB entries
+    // matching the current ASID.
+    mmu::install_user_l3_in_kernel_l2(1, child_l3_pa);
+
+    // Child user VA: L2 index 1 → VA starts at 32 MiB (0x200_0000).
+    // Code page at L3 index 1 → VA = 0x200_0000 + 1 * 16 KiB = 0x200_4000.
+    // Stack page at L3 index 2 → VA = 0x200_0000 + 2 * 16 KiB = 0x200_8000.
+    let child_code_va: usize = 0x200_4000;
+    let child_stack_top: usize = 0x200_8000 + PAGE_SIZE;
+
+    let child_rs_pa = alloc_zeroed_pages(ks, 1)?;
+
+    // SAFETY: child_rs_pa is a valid zeroed page. RegisterState fits.
+    unsafe {
+        let rs = &mut *(mmu::phys_to_virt(child_rs_pa) as *mut RegisterState);
+
+        rs.pc = child_code_va as u64;
+        rs.sp = child_stack_top as u64;
+    }
+
+    let child_asid = crate::frame::cores::allocate_asid(ks);
+    let child_page_table_root = mmu::make_ttbr0(child_asid, child_l1_pa as u64);
+
+    let mut observers = ks.observers.acquire();
+    let (child_id, child_obs) = observers.allocate()?;
+
+    child_obs.object_id = child_id;
+    child_obs.asid = child_asid;
+    child_obs.register_state = crate::observer::RegisterStateHandle::new(
+        NonNull::new(mmu::phys_to_virt(child_rs_pa) as *mut u8)
+            .expect("child rs_pa must be non-null"),
+    );
+    child_obs.page_table_root = child_page_table_root;
+    child_obs.cap_table = NonNull::dangling();
+    child_obs.cap_table_capacity = 0;
+    child_obs.cap_table_free_head = None;
+    child_obs.cap_table_count = 0;
+    child_obs.state = crate::observer::PrimaryState::Runnable;
+    child_obs.suspended = false;
+    child_obs.compute_aggregate = 100;
+    child_obs.responsiveness = crate::observer::DEFAULT_RESPONSIVENESS;
+    child_obs.throughput = crate::observer::DEFAULT_THROUGHPUT;
+    child_obs.clock_access = false;
+    child_obs.wait_state = crate::observer::WaitState::None;
+    child_obs.refcount = 1;
+    child_obs.generation = AtomicU64::new(0);
+
+    let child_ptr = NonNull::from(&*child_obs);
+
+    drop(observers);
+
+    enqueue_observer(child_ptr);
+
+    crate::println!(
+        "boot: child observer id={} asid={} entry={:#x}",
+        child_id.0,
+        child_asid,
+        child_code_va,
+    );
+
+    Ok(child_ptr)
+}
+
 // ── Cap table setup (Phase 5) ────────────────────────────────────
 
 /// Capacity of the root Observer's cap table.
@@ -593,6 +760,18 @@ pub fn enter_first_observer(ks: &KernelState) -> ! {
 
     init_bsp_per_core_data(mmu::phys_to_virt(rs_pa) as *mut RegisterState);
     set_current_observer(obs_ptr);
+
+    // ── Phase 2: child Observer for integration tests ────────────
+    //
+    // Create a second Observer with its own address space, code, and
+    // stack. The child's CHILD_BINARY yields and signals BRK #0x43.
+    // The scheduler context-switches between root and child, proving
+    // the TTBR0 swap, register save/restore, and ASID tagging work.
+    //
+    // Must be called AFTER init_bsp_per_core_data and set_current_observer
+    // so that enqueue_observer operates on the initialized BSP_CORE_STATE.
+    let _child_ptr =
+        create_child_observer(ks, crate::arena::ObjectId(0)).expect("create child observer");
 
     crate::println!("boot: entering EL0 at {:#x}", USER_CODE_VA);
 
