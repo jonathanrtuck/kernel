@@ -220,6 +220,22 @@ path.
 - **Status:** tentative — accepted to enable further derivation.
 - **Journal:** `journal/001-per-core-hot-path.md`.
 
+#### D1 IPI interface (settled 2026-04-26)
+
+Cross-core coordination mechanism for D1's per-core hot path. Three decisions:
+
+- **Fire-and-forget semantics.** Core A sends SGI and continues. No
+  acknowledgment, no synchronous wait. Eventual consistency by next scheduler
+  round. D56 work-stealing checks are stale by definition — scheduling quality
+  issue, not correctness.
+- **Per-core circular queue.** Not a single-entry mailbox. Multiple IPIs can be
+  in-flight simultaneously (TLB invalidation + work steal + Observer migration).
+  Queue depth bounded by request types, not traffic.
+- **Typed enum requests.**
+  `IpiRequest { WorkSteal, ObserverMigration, TlbInvalidation, RoutingEntryCleanup }`.
+  Type-safe, no encoding overhead at exception level. The enum is
+  kernel-internal (O2) and can grow without ABI impact.
+
 ### D2 — Per-core schedulers may run different algorithms
 
 The scheduler that selects which Observer resumes on a core is per-core (direct

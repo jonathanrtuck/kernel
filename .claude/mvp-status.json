@@ -1,6 +1,6 @@
 {
   "blockers": [],
-  "completed_items": 29,
+  "completed_items": 31,
   "current_phase": 3,
   "items": {
     "0.1": {
@@ -160,8 +160,8 @@
     },
     "4.0": {
       "name": "IPI interface design",
-      "note": "Requires D-4.0a/b/c decisions (fresh derivation)",
-      "status": "pending"
+      "note": "Fire-and-forget SGI (D-4.0a), per-core circular queue (D-4.0b), typed enum IpiRequest (D-4.0c); recorded in spec.md under D1",
+      "status": "done"
     },
     "4.1": {
       "name": "Fix TPIDR_EL1 secondary cores",
@@ -175,8 +175,8 @@
     },
     "4.3": {
       "name": "Secondary core boot",
-      "note": "",
-      "status": "pending"
+      "note": "PSCI CPU_ON in activate_secondaries; init_secondary_per_core_data (4.1); __enter_idle for IRQ-enabled WFI idle",
+      "status": "done"
     },
     "4.4": {
       "name": "Cross-core scheduling",

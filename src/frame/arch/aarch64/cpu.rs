@@ -220,9 +220,14 @@ extern "C" fn secondary_main(core_id: usize) -> ! {
 
     CORES_ONLINE.fetch_add(1, Ordering::Release);
 
-    loop {
-        super::halt();
-    }
+    // Enter the idle loop — unmasks IRQs and WFIs until an IPI or
+    // timer wakes this core. Same path as the BSP when no Observer
+    // is runnable.
+    // SAFETY: PerCoreData is initialized (kernel_stack_top is valid),
+    // exception vectors are installed (exception::init above), GIC
+    // is configured for this core. __enter_idle resets SP from
+    // PerCoreData.kernel_stack_top and never returns.
+    unsafe { super::exception::__enter_idle() }
 }
 
 #[cfg(test)]
