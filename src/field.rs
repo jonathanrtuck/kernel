@@ -423,6 +423,18 @@ impl Field {
         )
     }
 
+    /// Remove all routing entries targeting a specific destination (D55).
+    ///
+    /// Called on source Fields when a split destination Field is destroyed.
+    /// Prevents use-after-free: stale routing entries in the source's table
+    /// would otherwise dereference freed arena memory on the next badge
+    /// match.
+    ///
+    /// Returns the number of entries removed.
+    pub fn remove_routes_to(&mut self, destination: ObjectId) -> u32 {
+        crate::frame::fields::remove_routes_to_destination(&mut self.routing_table, destination)
+    }
+
     /// D67: atomically increment the generation counter, revoking all
     /// capabilities that stored the previous generation value.
     pub fn revoke(&self) {
@@ -1993,5 +2005,111 @@ mod tests {
         let gen_after = field.generation.load(core::sync::atomic::Ordering::Acquire);
 
         assert_eq!(gen_after, gen_before + 1);
+    }
+
+    // ── D55: Routing cleanup on destroy ──────────────────────────────
+
+    /// D55: remove_routes_to removes entries targeting a destroyed Field.
+    #[test]
+    fn test_d55_remove_routes_to_clears_matching_entries() {
+        use crate::arena::ObjectId;
+
+        let mut source = test_field(4);
+        let dest_id = ObjectId(7);
+
+        source.add_route(100, 200, dest_id, 0).unwrap();
+        source.add_route(300, 400, ObjectId(8), 0).unwrap();
+
+        // Before cleanup, badge 150 routes to dest_id.
+        assert_eq!(source.resolve_route(150), Some(dest_id));
+
+        // Destroy dest_id: remove its routing entries.
+        let removed = source.remove_routes_to(dest_id);
+
+        assert_eq!(removed, 1, "D55: one entry targeting dest must be removed");
+        // Badge 150 no longer routes anywhere.
+        assert!(
+            source.resolve_route(150).is_none(),
+            "D55: routing to destroyed field must be gone"
+        );
+        // Badge 350 still routes to ObjectId(8).
+        assert_eq!(
+            source.resolve_route(350),
+            Some(ObjectId(8)),
+            "D55: unrelated route must be preserved"
+        );
+    }
+
+    /// D55: remove_routes_to on a field with no routing table is a no-op.
+    #[test]
+    fn test_d55_remove_routes_to_no_routing_table() {
+        use crate::arena::ObjectId;
+
+        let mut field = test_field(4);
+
+        assert!(field.routing_table.is_none());
+
+        let removed = field.remove_routes_to(ObjectId(1));
+
+        assert_eq!(removed, 0, "D55: no routing table means nothing to remove");
+    }
+
+    /// D55: remove_routes_to removes all entries when all target same dest.
+    #[test]
+    fn test_d55_remove_routes_to_removes_all_matching() {
+        use crate::arena::ObjectId;
+
+        let mut source = test_field(4);
+        let dest_id = ObjectId(5);
+
+        source.add_route(10, 20, dest_id, 0).unwrap();
+        source.add_route(30, 40, dest_id, 0).unwrap();
+        source.add_route(50, 60, dest_id, 0).unwrap();
+
+        let removed = source.remove_routes_to(dest_id);
+
+        assert_eq!(removed, 3, "D55: all three entries must be removed");
+        assert!(source.resolve_route(15).is_none());
+        assert!(source.resolve_route(35).is_none());
+        assert!(source.resolve_route(55).is_none());
+    }
+
+    /// D55: remove_routes_to with non-matching dest removes nothing.
+    #[test]
+    fn test_d55_remove_routes_to_no_match() {
+        use crate::arena::ObjectId;
+
+        let mut source = test_field(4);
+
+        source.add_route(10, 20, ObjectId(1), 0).unwrap();
+        source.add_route(30, 40, ObjectId(2), 0).unwrap();
+
+        let removed = source.remove_routes_to(ObjectId(99));
+
+        assert_eq!(removed, 0, "D55: no entries target ObjectId(99)");
+        assert_eq!(source.resolve_route(15), Some(ObjectId(1)));
+        assert_eq!(source.resolve_route(35), Some(ObjectId(2)));
+    }
+
+    /// D55: after removing some routes, remaining routes are still sorted
+    /// and resolvable via binary search.
+    #[test]
+    fn test_d55_remove_routes_to_preserves_sort_order() {
+        use crate::arena::ObjectId;
+
+        let mut source = test_field(4);
+
+        source.add_route(100, 199, ObjectId(1), 0).unwrap();
+        source.add_route(200, 299, ObjectId(2), 0).unwrap(); // will be removed
+        source.add_route(300, 399, ObjectId(3), 0).unwrap();
+        source.add_route(400, 499, ObjectId(2), 0).unwrap(); // will be removed
+
+        source.remove_routes_to(ObjectId(2));
+
+        // Remaining routes must still resolve correctly.
+        assert_eq!(source.resolve_route(150), Some(ObjectId(1)));
+        assert_eq!(source.resolve_route(350), Some(ObjectId(3)));
+        assert!(source.resolve_route(250).is_none());
+        assert!(source.resolve_route(450).is_none());
     }
 }

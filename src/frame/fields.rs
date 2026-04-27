@@ -438,6 +438,61 @@ pub fn route_add(
     }
 }
 
+/// Remove all routing entries targeting a specific destination (D55).
+///
+/// When a split Field is destroyed, source Fields that have routing entries
+/// pointing to it must have those entries removed to prevent use-after-free.
+/// This function scans the routing table and compacts it, removing any entry
+/// whose `destination` matches `dest_id`.
+///
+/// Returns the number of entries removed.
+pub fn remove_routes_to_destination(
+    table_ptr: &mut Option<NonNull<RoutingTable>>,
+    dest_id: ObjectId,
+) -> u32 {
+    let Some(table) = *table_ptr else {
+        return 0;
+    };
+
+    // SAFETY: table was set by a prior route_add and points to a valid
+    // RoutingTable. The caller holds &mut on the Field, ensuring exclusive
+    // access to the routing table.
+    unsafe {
+        let table_ref = &mut *table.as_ptr();
+        let count = table_ref.count as usize;
+        let entries = table_ref.entries.as_ptr();
+        let mut write_pos: usize = 0;
+        let mut removed: u32 = 0;
+
+        // Compact: copy entries that do NOT target dest_id.
+        for read_pos in 0..count {
+            // SAFETY: read_pos < count, entries is valid for count elements.
+            let entry = &*entries.add(read_pos);
+
+            if entry.destination == dest_id {
+                removed += 1;
+            } else {
+                if write_pos != read_pos {
+                    // SAFETY: write_pos < read_pos < count, both within the
+                    // valid entries array. The source and destination do not
+                    // overlap (write_pos < read_pos after at least one removal).
+                    core::ptr::copy_nonoverlapping(
+                        entries.add(read_pos),
+                        entries.add(write_pos),
+                        1,
+                    );
+                }
+
+                write_pos += 1;
+            }
+        }
+
+        table_ref.count = write_pos as u32;
+
+        removed
+    }
+}
+
 // ── Internal allocation helpers ───────────────────────────────────────
 
 /// Allocate a new RoutingTable with the given entry capacity.

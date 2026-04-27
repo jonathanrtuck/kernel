@@ -108,6 +108,17 @@ impl<T> Arena<T> {
     pub fn free(&mut self, id: ObjectId) {
         self.store.free(id);
     }
+
+    /// Iterate over all occupied slots with mutable access.
+    ///
+    /// D55: used by Field destroy to scan all Fields for stale routing
+    /// entries pointing to the destroyed destination. The callback
+    /// receives each occupied slot's ObjectId and a mutable reference.
+    ///
+    /// **Caller must hold this arena's lock (D53).**
+    pub fn for_each_mut(&mut self, f: impl FnMut(ObjectId, &mut T)) {
+        self.store.for_each_mut(f);
+    }
 }
 
 #[cfg(test)]

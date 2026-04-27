@@ -138,6 +138,17 @@ impl<T> SlabStore<T> {
             self.freelist.push(id.0);
         }
     }
+
+    /// Iterate over all occupied slots, calling `f` with the ObjectId and
+    /// a mutable reference to each. Used by D55 routing cleanup: on Field
+    /// destroy, scan all Fields to remove stale routing entries.
+    pub fn for_each_mut(&mut self, mut f: impl FnMut(ObjectId, &mut T)) {
+        for (index, slot) in self.slots.iter_mut().enumerate() {
+            if let Some(value) = slot.as_mut() {
+                f(ObjectId(index as u32), value);
+            }
+        }
+    }
 }
 
 // ── Bare-metal build: page-backed slab (D70, D93) ────────────────
@@ -461,6 +472,29 @@ impl<T> SlabStore<T> {
 
         self.mark_free(index);
         self.free_head = index;
+    }
+
+    /// Iterate over all occupied slots, calling `f` with the ObjectId and
+    /// a mutable reference to each. Used by D55 routing cleanup: on Field
+    /// destroy, scan all Fields to remove stale routing entries.
+    pub fn for_each_mut(&mut self, mut f: impl FnMut(ObjectId, &mut T)) {
+        if self.base.is_null() {
+            return;
+        }
+
+        for index in 0..self.capacity {
+            if self.is_occupied(index) {
+                let ptr = self.slot_ptr(index);
+
+                // SAFETY: index < capacity (loop bound), slot is occupied
+                // (bitmap checked). &mut self ensures exclusive access to
+                // all slots. The callback receives a mutable reference that
+                // is valid for the duration of the call — no aliasing.
+                let value = unsafe { &mut *(ptr as *mut T) };
+
+                f(ObjectId(index), value);
+            }
+        }
     }
 }
 

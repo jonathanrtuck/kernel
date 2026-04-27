@@ -1522,6 +1522,18 @@ impl<S: Scheduler> CoreState<S> {
                                 field.revoke();
                             }
 
+                            // D55: remove routing entries in all source Fields
+                            // that pointed to this destroyed Field. Without this,
+                            // subsequent messages matching those badge ranges would
+                            // dereference freed arena memory (use-after-free).
+                            let destroyed_id = object_id;
+
+                            fields.for_each_mut(|field_id, field| {
+                                if field_id != destroyed_id {
+                                    field.remove_routes_to(destroyed_id);
+                                }
+                            });
+
                             fields.free(object_id);
                         }
 
