@@ -578,14 +578,6 @@ fn create_child_observer(
 
 // ── Cap table setup (Phase 5) ────────────────────────────────────
 
-/// Capacity of the root Observer's cap table.
-///
-/// 16 entries: slots 0–2 reserved (fault handler, reply, self-cap),
-/// slot 3 = root Space cap, slots 4–15 = free. Matches the test helper
-/// convention in frame/capabilities.rs.
-#[cfg(target_os = "none")]
-const ROOT_CAP_TABLE_CAPACITY: u32 = 16;
-
 /// Allocate a cap table page and initialize it for the root Observer.
 ///
 /// Returns `(entries_ptr, capacity)`. The page is zeroed first, then:
@@ -593,42 +585,43 @@ const ROOT_CAP_TABLE_CAPACITY: u32 = 16;
 /// - Slot 2 (SLOT_SELF): self-cap pointing to the Observer.
 /// - Slot 3 (first user slot): root Space cap with full rights.
 ///
-/// The cap table page comes from the physical allocator (identity-mapped).
-/// A 16 KiB page fits `16384 / size_of::<Entry>()` entries; we use 16.
+/// Capacity is derived from the page: `PAGE_SIZE / size_of::<Entry>()`,
+/// same formula CreateObserver uses for child cap tables.
 #[cfg(target_os = "none")]
 fn setup_root_cap_table(
     ks: &KernelState,
     observer_id: crate::arena::ObjectId,
     root_space_id: crate::arena::ObjectId,
-) -> Result<NonNull<capability::Entry>, AllocError> {
+) -> Result<(NonNull<capability::Entry>, u32), AllocError> {
     let cap_page_pa = alloc_zeroed_pages(ks, 1)?;
     // cap_page_pa is a valid physical address returned by alloc_zeroed_pages,
     // zeroed, and exclusively ours. D88: phys_to_virt converts to TTBR1 VA.
     let entries = NonNull::new(mmu::phys_to_virt(cap_page_pa) as *mut capability::Entry)
         .expect("cap_page_pa must be non-null");
+    let capacity = (PAGE_SIZE / core::mem::size_of::<capability::Entry>()) as u32;
     let first_free = capability::SLOT_USER_START + 1;
 
-    crate::frame::capabilities::init_freelist(entries, ROOT_CAP_TABLE_CAPACITY, first_free);
+    crate::frame::capabilities::init_freelist(entries, capacity, first_free);
     // Slots 0-1 must be explicitly empty. Zeroed memory is NOT equivalent
     // to Entry { object: None, .. } because Option<(ObjectType, ObjectId)>
     // represents Some((Space, ObjectId(0))) as all-zero bytes (Space = 0,
     // ObjectId(0) = 0). Without this, slot 0 looks like a valid Space cap.
     crate::frame::capabilities::write_entry(
         entries,
-        ROOT_CAP_TABLE_CAPACITY,
+        capacity,
         capability::SLOT_FAULT_HANDLER,
         capability::Entry::empty(SlotTag(0)),
     );
     crate::frame::capabilities::write_entry(
         entries,
-        ROOT_CAP_TABLE_CAPACITY,
+        capacity,
         capability::SLOT_REPLY_FIELD,
         capability::Entry::empty(SlotTag(0)),
     );
     // Slot 2 (SLOT_SELF): self-cap with full Observer rights.
     crate::frame::capabilities::write_entry(
         entries,
-        ROOT_CAP_TABLE_CAPACITY,
+        capacity,
         capability::SLOT_SELF,
         capability::Entry {
             object: Some((ObjectType::Observer, observer_id)),
@@ -642,7 +635,7 @@ fn setup_root_cap_table(
     // Slot 3 (first user slot): root Space cap with full Space rights.
     crate::frame::capabilities::write_entry(
         entries,
-        ROOT_CAP_TABLE_CAPACITY,
+        capacity,
         capability::SLOT_USER_START,
         capability::Entry {
             object: Some((ObjectType::Space, root_space_id)),
@@ -654,7 +647,7 @@ fn setup_root_cap_table(
         },
     );
 
-    Ok(entries)
+    Ok((entries, capacity))
 }
 
 // ── IPC Field setup (Phase 2.2) ─────────────────────────────────
@@ -963,7 +956,7 @@ pub fn enter_first_observer(ks: &KernelState) -> ! {
         .expect("create root observer");
     // ── Root Space and cap table setup (Phase 5) ────────────────
     let root_space_id = create_root_space(ks).expect("create root space");
-    let cap_entries =
+    let (cap_entries, root_cap_capacity) =
         setup_root_cap_table(ks, obs_id, root_space_id).expect("setup root cap table");
     // ── Phase 2.2: IPC Field for integration tests ────────────────
     //
@@ -977,7 +970,7 @@ pub fn enter_first_observer(ks: &KernelState) -> ! {
     // Install Receive cap at slot 4 (IPC Field).
     crate::frame::capabilities::write_entry(
         cap_entries,
-        ROOT_CAP_TABLE_CAPACITY,
+        root_cap_capacity,
         capability::SLOT_USER_START + 1,
         capability::Entry {
             object: Some((capability::ObjectType::Field, ipc_field_id)),
@@ -991,7 +984,7 @@ pub fn enter_first_observer(ks: &KernelState) -> ! {
     // Install Receive cap at slot 5 (handler Field).
     crate::frame::capabilities::write_entry(
         cap_entries,
-        ROOT_CAP_TABLE_CAPACITY,
+        root_cap_capacity,
         capability::SLOT_USER_START + 2,
         capability::Entry {
             object: Some((capability::ObjectType::Field, handler_field_id)),
@@ -1015,7 +1008,7 @@ pub fn enter_first_observer(ks: &KernelState) -> ! {
     // Install Receive cap at slot 6 (timer Field).
     crate::frame::capabilities::write_entry(
         cap_entries,
-        ROOT_CAP_TABLE_CAPACITY,
+        root_cap_capacity,
         capability::SLOT_USER_START + 3,
         capability::Entry {
             object: Some((capability::ObjectType::Field, timer_field_id)),
@@ -1034,7 +1027,7 @@ pub fn enter_first_observer(ks: &KernelState) -> ! {
         let obs = &mut *obs_ptr.as_ptr();
 
         obs.cap_table = cap_entries;
-        obs.cap_table_capacity = ROOT_CAP_TABLE_CAPACITY;
+        obs.cap_table_capacity = root_cap_capacity;
         // Freelist starts at slot 8 (slots 3–7 occupied).
         obs.cap_table_free_head = Some(capability::SLOT_USER_START + 5);
         obs.cap_table_count = 6;
@@ -1043,7 +1036,7 @@ pub fn enter_first_observer(ks: &KernelState) -> ! {
 
     crate::println!(
         "boot: cap_table capacity={} installed=6 (self+space+ipc+handler+timer+child)",
-        ROOT_CAP_TABLE_CAPACITY,
+        root_cap_capacity,
     );
 
     init_bsp_per_core_data(mmu::phys_to_virt(rs_pa) as *mut RegisterState);
@@ -1069,7 +1062,6 @@ pub fn enter_first_observer(ks: &KernelState) -> ! {
     let (child_id, child_ptr) =
         create_child_observer(ks, ipc_field_id, handler_field_id, child_space_id)
             .expect("create child observer");
-
     // Schedule the child Observer. When a secondary core is online,
     // migrate the child there via IPI — this exercises the full SMP
     // path (PSCI boot, SGI delivery, mailbox drain, Observer migration,
@@ -1094,7 +1086,7 @@ pub fn enter_first_observer(ks: &KernelState) -> ! {
     // so the root can issue Destroy. OBSERVER_ALL includes Destroy right.
     crate::frame::capabilities::write_entry(
         cap_entries,
-        ROOT_CAP_TABLE_CAPACITY,
+        root_cap_capacity,
         capability::SLOT_USER_START + 4,
         capability::Entry {
             object: Some((capability::ObjectType::Observer, child_id)),
