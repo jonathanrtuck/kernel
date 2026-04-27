@@ -189,26 +189,28 @@ pub struct Handle {
 
 // ── Handle encoding (D77) ───────────────────────────────────────────
 
+/// Maximum cap table index encodable in the handle ABI.
+/// The 16/48 split gives 65536 addressable slots and 2^48 tag space
+/// (~281 trillion reuses before ABA aliasing).
+pub const MAX_HANDLE_INDEX: u32 = 0xFFFF;
+
 impl Handle {
     /// Encode a Handle into the u64 ABI representation (D77).
     ///
-    /// Lower 32 bits = index, upper 32 bits = slot_tag.
+    /// Lower 16 bits = index, upper 48 bits = slot_tag.
     /// This is the format userspace presents in registers (x5 for IPC,
-    /// x5 for typed ops). Index in low bits for cheap extraction: a
-    /// single AND masks the low 32.
+    /// x5 for typed ops). Index in low bits for cheap extraction.
     pub const fn encode(self) -> u64 {
-        (self.index as u64) | ((self.slot_tag.0 & 0xFFFF_FFFF) << 32)
+        (self.index as u64 & 0xFFFF) | ((self.slot_tag.0 & 0xFFFF_FFFF_FFFF) << 16)
     }
 
     /// Decode a u64 ABI value into a Handle (D77).
     ///
-    /// Lower 32 bits = index, upper 32 bits = slot_tag (lower 32 of u64).
-    /// The handle carries a truncated tag; resolution compares against the
-    /// entry's full u64 tag using only the lower 32 bits.
+    /// Lower 16 bits = index, upper 48 bits = slot_tag.
     pub const fn decode(raw: u64) -> Handle {
         Handle {
-            index: raw as u32,
-            slot_tag: SlotTag((raw >> 32) & 0xFFFF_FFFF),
+            index: (raw & 0xFFFF) as u32,
+            slot_tag: SlotTag((raw >> 16) & 0xFFFF_FFFF_FFFF),
         }
     }
 }
@@ -224,11 +226,11 @@ impl Handle {
 pub struct SlotTag(pub u64);
 
 impl SlotTag {
-    /// Compare against a handle-decoded tag using only the lower 32 bits.
-    /// The Handle ABI (u64 register) carries index(32) + tag(32), so
-    /// only 32 bits of the u64 tag survive the encode/decode round-trip.
+    /// Compare against a handle-decoded tag using the lower 48 bits.
+    /// The Handle ABI (u64 register) carries index(16) + tag(48), so
+    /// 48 bits of the u64 tag survive the encode/decode round-trip.
     pub const fn abi_matches(self, other: SlotTag) -> bool {
-        (self.0 as u32) == (other.0 as u32)
+        (self.0 & 0xFFFF_FFFF_FFFF) == (other.0 & 0xFFFF_FFFF_FFFF)
     }
 }
 
@@ -839,7 +841,7 @@ impl Table {
     }
 
     /// D96: install a transferred capability at the next free slot and
-    /// return the encoded handle (D77: index | slot_tag << 32).
+    /// return the encoded handle (D77: index(16) | slot_tag(48)).
     ///
     /// Preserves the slot's existing slot_tag (set by the last free_slot
     /// that released it) so the returned handle is valid for resolution.
@@ -2433,7 +2435,7 @@ mod tests {
 
     // ── D77: Handle encoding/decoding ────────────────────────────────
 
-    /// D77: encode packs index in low 32, slot_tag in high 32.
+    /// D77: encode packs index in low 16, slot_tag in high 48.
     #[test]
     fn test_d77_handle_encode_packs_correctly() {
         let handle = Handle {
@@ -2442,14 +2444,14 @@ mod tests {
         };
         let encoded = handle.encode();
 
-        assert_eq!(encoded & 0xFFFF_FFFF, 42, "low 32 must be index");
-        assert_eq!(encoded >> 32, 7, "high 32 must be slot_tag");
+        assert_eq!(encoded & 0xFFFF, 42, "low 16 must be index");
+        assert_eq!(encoded >> 16, 7, "high 48 must be slot_tag");
     }
 
-    /// D77: decode extracts index from low 32, slot_tag from high 32.
+    /// D77: decode extracts index from low 16, slot_tag from high 48.
     #[test]
     fn test_d77_handle_decode_extracts_correctly() {
-        let raw: u64 = 42 | (7u64 << 32);
+        let raw: u64 = 42 | (7u64 << 16);
         let handle = Handle::decode(raw);
 
         assert_eq!(handle.index, 42);
@@ -2469,14 +2471,30 @@ mod tests {
         assert_eq!(decoded.slot_tag, original.slot_tag);
     }
 
-    /// D77: decode with maximum values does not overflow.
+    /// D77: decode with maximum ABI values does not overflow.
     #[test]
     fn test_d77_handle_decode_max_values() {
-        let raw: u64 = (u32::MAX as u64) | ((u32::MAX as u64) << 32);
+        let raw: u64 = 0xFFFF | (0xFFFF_FFFF_FFFFu64 << 16);
         let handle = Handle::decode(raw);
 
-        assert_eq!(handle.index, u32::MAX);
-        assert_eq!(handle.slot_tag, SlotTag(u32::MAX as u64));
+        assert_eq!(handle.index, 0xFFFF);
+        assert_eq!(handle.slot_tag, SlotTag(0xFFFF_FFFF_FFFF));
+    }
+
+    /// D77: slot tag ABI carries 48 bits — 2^48 reuses before wrap.
+    #[test]
+    fn test_d77_slot_tag_abi_48bit_coverage() {
+        let tag_large = SlotTag(0xFFFF_FFFF_FFFF);
+        let handle = Handle {
+            index: 0,
+            slot_tag: tag_large,
+        };
+        let decoded = Handle::decode(handle.encode());
+
+        assert_eq!(
+            decoded.slot_tag, tag_large,
+            "full 48-bit tag must survive encode/decode"
+        );
     }
 
     /// D77: decode with zero produces index=0, slot_tag=0.
@@ -2896,8 +2914,8 @@ mod tests {
     fn test_d77_handle_decode_u64_max() {
         let handle = Handle::decode(u64::MAX);
 
-        assert_eq!(handle.index, u32::MAX);
-        assert_eq!(handle.slot_tag, SlotTag(u32::MAX as u64));
+        assert_eq!(handle.index, 0xFFFF);
+        assert_eq!(handle.slot_tag, SlotTag(0xFFFF_FFFF_FFFF));
     }
 
     /// D77: resolve_cap with u64::MAX raw handle on a small table
@@ -2993,12 +3011,12 @@ mod tests {
     #[test]
     fn handle_encode_max_index() {
         let h = Handle {
-            index: u32::MAX,
+            index: MAX_HANDLE_INDEX,
             slot_tag: SlotTag(0),
         };
 
-        assert_eq!(h.encode(), u32::MAX as u64);
-        assert_eq!(Handle::decode(h.encode()).index, u32::MAX);
+        assert_eq!(h.encode(), MAX_HANDLE_INDEX as u64);
+        assert_eq!(Handle::decode(h.encode()).index, MAX_HANDLE_INDEX);
     }
 
     #[test]
@@ -3017,8 +3035,8 @@ mod tests {
     fn handle_decode_arbitrary_u64() {
         let h = Handle::decode(u64::MAX);
 
-        assert_eq!(h.index, u32::MAX);
-        assert_eq!(h.slot_tag, SlotTag(u32::MAX as u64));
+        assert_eq!(h.index, 0xFFFF);
+        assert_eq!(h.slot_tag, SlotTag(0xFFFF_FFFF_FFFF));
     }
 
     // ── Rights ───────────────────────────────────────────────────────

@@ -110,6 +110,9 @@ impl IrqRoutingTable {
             return None;
         }
 
+        #[cfg(any(target_os = "none", test))]
+        crate::frame::arch::speculation::speculation_barrier();
+
         self.routes[index].as_ref()
     }
 
@@ -1561,10 +1564,8 @@ mod tests {
         let fields = Arc::new(Lock::new(LockOrder::Field, Arena::<Space>::new()));
         let observers = Arc::new(Lock::new(LockOrder::Observer, Arena::<Space>::new()));
         let pulsars = Arc::new(Lock::new(LockOrder::Pulsar, Arena::<Space>::new()));
-
         let thread_count = 4;
         let iterations = 100;
-
         let handles: std::vec::Vec<_> = (0..thread_count)
             .map(|_| {
                 let f = Arc::clone(&fields);
@@ -1606,10 +1607,8 @@ mod tests {
         let pulsars = Arc::new(Lock::new(LockOrder::Pulsar, Arena::<Space>::new()));
         let spaces = Arc::new(Lock::new(LockOrder::Space, Arena::<Space>::new()));
         let times = Arc::new(Lock::new(LockOrder::Time, Arena::<Space>::new()));
-
         let thread_count = 4;
         let iterations = 50;
-
         let handles: std::vec::Vec<_> = (0..thread_count)
             .map(|_| {
                 let f = Arc::clone(&fields);
@@ -1649,7 +1648,6 @@ mod tests {
         use std::thread;
 
         let lock = Arc::new(Lock::new(LockOrder::Space, Arena::<Space>::new()));
-
         // Pre-allocate one Space object to use as the shared counter.
         let object_id = {
             let mut guard = lock.acquire();
@@ -1659,10 +1657,8 @@ mod tests {
 
             id
         };
-
         let thread_count = 4u64;
         let iterations = 200u64;
-
         let handles: std::vec::Vec<_> = (0..thread_count)
             .map(|_| {
                 let l = Arc::clone(&lock);
@@ -1707,7 +1703,6 @@ mod tests {
         let arena = Arc::new(Lock::new(LockOrder::Space, Arena::<Space>::new()));
         let thread_count = 4;
         let iterations = 100;
-
         let handles: std::vec::Vec<_> = (0..thread_count)
             .map(|thread_idx: u32| {
                 let a = Arc::clone(&arena);
@@ -1718,7 +1713,6 @@ mod tests {
                         let (id, space) = guard
                             .allocate()
                             .expect("allocate must succeed under contention");
-
                         // Write a thread-unique value.
                         let sentinel = (thread_idx as usize) * 100_000 + i;
 
@@ -1772,7 +1766,6 @@ mod tests {
 
         let arena = Arc::new(Lock::new(LockOrder::Space, Arena::<Space>::new()));
         let object_count = 20;
-
         // Thread 1: allocate objects and record their IDs.
         let arena_writer = Arc::clone(&arena);
         let writer = thread::spawn(move || {
@@ -1783,14 +1776,13 @@ mod tests {
                 let (id, space) = guard.allocate().expect("writer allocate");
 
                 space.va_base = i * 0x1000;
+
                 ids.push(id);
             }
 
             ids
         });
-
         let ids = writer.join().expect("writer thread must not panic");
-
         // Thread 2: read back all objects and verify values.
         let arena_reader = Arc::clone(&arena);
         let reader = thread::spawn(move || {
@@ -1822,10 +1814,8 @@ mod tests {
 
         let fields = Arc::new(Lock::new(LockOrder::Field, Arena::<Space>::new()));
         let observers = Arc::new(Lock::new(LockOrder::Observer, Arena::<Space>::new()));
-
         let thread_count = 4;
         let iterations = 50;
-
         let handles: std::vec::Vec<_> = (0..thread_count)
             .map(|thread_idx: u32| {
                 let f = Arc::clone(&fields);
@@ -1836,7 +1826,6 @@ mod tests {
                         // Acquire in D53 order: Field before Observer.
                         let mut field_guard = f.acquire();
                         let mut observer_guard = o.acquire();
-
                         // Allocate in both arenas.
                         let (fid, fspace) = field_guard
                             .allocate()
@@ -1844,7 +1833,6 @@ mod tests {
                         let (oid, ospace) = observer_guard
                             .allocate()
                             .expect("observer arena allocate under contention");
-
                         let f_sentinel = (thread_idx as usize) * 1_000 + i;
                         let o_sentinel = (thread_idx as usize) * 1_000 + i + 500_000;
 
@@ -1890,7 +1878,6 @@ mod tests {
         let arena = Arc::new(Lock::new(LockOrder::Space, Arena::<Space>::new()));
         let thread_count = 8;
         let iterations = 200;
-
         let handles: std::vec::Vec<_> = (0..thread_count)
             .map(|thread_idx: u32| {
                 let a = Arc::clone(&arena);
@@ -1936,7 +1923,6 @@ mod tests {
         let arena = Arc::new(Lock::new(LockOrder::Space, Arena::<Space>::new()));
         let thread_count: usize = 4;
         let objects_per_thread: usize = 10;
-
         let handles: std::vec::Vec<_> = (0..thread_count)
             .map(|thread_idx| {
                 let a = Arc::clone(&arena);
@@ -1949,6 +1935,7 @@ mod tests {
                         let (id, space) = guard.allocate().expect("accumulation allocate");
 
                         space.va_base = thread_idx * 1000 + i;
+
                         ids.push((id, thread_idx * 1000 + i));
                     }
 
@@ -1956,7 +1943,6 @@ mod tests {
                 })
             })
             .collect();
-
         let mut all_ids = std::vec::Vec::new();
 
         for handle in handles {
@@ -2014,12 +2000,10 @@ mod tests {
         let fields = Arc::new(Lock::new(LockOrder::Field, Arena::<Space>::new()));
         let observers = Arc::new(Lock::new(LockOrder::Observer, Arena::<Space>::new()));
         let pulsars = Arc::new(Lock::new(LockOrder::Pulsar, Arena::<Space>::new()));
-
         let thread_count = 4;
         let iterations = 200;
         let timeout = Duration::from_secs(5);
         let start = Instant::now();
-
         let handles: std::vec::Vec<_> = (0..thread_count)
             .map(|_| {
                 let f = Arc::clone(&fields);
@@ -2106,7 +2090,6 @@ mod tests {
         for _ in 0..IPI_MAILBOX_CAPACITY {
             mbox.push(IpiRequest::WorkSteal);
         }
-
         for _ in 0..IPI_MAILBOX_CAPACITY {
             assert!(mbox.pop().is_some());
         }

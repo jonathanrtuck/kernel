@@ -169,10 +169,12 @@ impl SpaceManager {
     pub fn assign_va(&mut self, size: usize, alignment: usize) -> Result<VaAssignment, AllocError> {
         let page_size = self.root_pool.page_size;
         let effective_alignment = if alignment == 0 { page_size } else { alignment };
+
         debug_assert!(
             effective_alignment.is_power_of_two(),
             "alignment must be a power of two, got {effective_alignment}"
         );
+
         let align_mask = effective_alignment - 1;
         let page_mask = page_size - 1;
         // Round up to page boundary; overflow means the request is impossibly large.
@@ -250,7 +252,6 @@ impl SpaceManager {
     ) -> Result<SpaceCreationResult, AllocError> {
         let page_size = self.root_pool.page_size;
         let page_mask = page_size - 1;
-
         // D60: round up to page boundary.
         let rounded_size = size.checked_add(page_mask).ok_or(AllocError::OutOfMemory)? & !page_mask;
         // A zero-size request rounds to one page (minimum Space size = page_size, D25).
@@ -259,25 +260,23 @@ impl SpaceManager {
         } else {
             rounded_size
         };
-
         let page_count = effective_size / page_size;
         let l3_table_count = self.l3_table_count(page_count);
-
         let content_pa = self.allocate_pages(page_count)?;
-
         let l3_table_pa = match self.allocate_pages(l3_table_count) {
             Ok(pa) => pa,
             Err(e) => {
                 self.return_pages(content_pa, page_count);
+
                 return Err(e);
             }
         };
-
         let va_assignment = match self.assign_va(effective_size, alignment) {
             Ok(va) => va,
             Err(e) => {
                 self.return_pages(content_pa, page_count);
                 self.return_pages(l3_table_pa, l3_table_count);
+
                 return Err(e);
             }
         };
@@ -385,7 +384,6 @@ mod tests {
             0,
             "returned base address must be page-aligned (base={base:#x})"
         );
-
         // The returned address must be non-zero (physical address 0 is
         // never valid memory in this kernel).
         assert_ne!(base, 0, "returned base address must not be zero");
@@ -619,6 +617,7 @@ mod tests {
                 }
                 Err(AllocError::OutOfMemory) => {
                     got_error = true;
+
                     break;
                 }
             }

@@ -7,9 +7,6 @@
 #![no_std]
 #![deny(unsafe_code)]
 
-#[allow(unsafe_code)]
-pub mod frame;
-
 pub mod arena;
 pub mod capability;
 pub mod communication;
@@ -17,6 +14,8 @@ pub mod config;
 pub mod core_manager;
 pub mod fault;
 pub mod field;
+#[allow(unsafe_code)]
+pub mod frame;
 pub mod kernel_state;
 pub mod observer;
 #[cfg(any(target_os = "none", test))]
@@ -485,7 +484,6 @@ mod integration_tests {
             index: slot_index,
             slot_tag: SlotTag(0),
         };
-
         // Verify the original handle resolves.
         let resolved = table
             .resolve(original_handle)

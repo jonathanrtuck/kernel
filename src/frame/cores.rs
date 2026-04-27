@@ -590,6 +590,15 @@ pub fn observer_extract_cap(
     unsafe { (*observer_ptr.as_ptr()).with_cap_table(|table| table.extract_cap(index)) }
 }
 
+/// D51: free a capability slot in an Observer's cap table (send-once
+/// consumption). Delegates to Table::free_slot which bumps the slot tag
+/// (D11 ABA defense) and returns the slot to the freelist.
+#[cfg(any(target_os = "none", test))]
+pub fn observer_free_cap_slot(observer_ptr: NonNull<Observer>, index: u32) {
+    // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy.
+    unsafe { (*observer_ptr.as_ptr()).with_cap_table(|table| table.free_slot(index)) }
+}
+
 /// Install a transferred capability into an Observer's cap table (D96).
 /// Delegates to Table::install_transferred_cap. Returns the encoded handle
 /// or Err(TableFull).
