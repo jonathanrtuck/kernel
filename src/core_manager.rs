@@ -406,6 +406,39 @@ impl<S: Scheduler> CoreState<S> {
 
         // Step 4-5: acquire fields lock, look up the Field, check generation.
         let mut fields_guard = kernel_state.fields.acquire();
+
+        // D67: validate reply field generation for Call before taking &mut target.
+        if matches!(operation, crate::syscall::IpcOperation::Call)
+            && let Some((_, reply_id, stored_gen)) = crate::frame::cores::observer_read_cap_entry(
+                sender_ptr,
+                crate::capability::SLOT_REPLY_FIELD,
+            )
+        {
+            match fields_guard.get(reply_id) {
+                Some(f) if f.generation.load(Ordering::Acquire) != stored_gen => {
+                    drop(fields_guard);
+
+                    crate::frame::cores::write_ipc_error(
+                        sender_ptr,
+                        crate::syscall::SyscallError::StaleCap,
+                    );
+
+                    return DispatchResult::Resume(sender_ptr);
+                }
+                None => {
+                    drop(fields_guard);
+
+                    crate::frame::cores::write_ipc_error(
+                        sender_ptr,
+                        crate::syscall::SyscallError::InvalidCap,
+                    );
+
+                    return DispatchResult::Resume(sender_ptr);
+                }
+                _ => {}
+            }
+        }
+
         let target_field = match fields_guard.get_mut(object_id) {
             Some(f) => f,
             None => {
@@ -6960,6 +6993,93 @@ mod tests {
         assert!(
             !core.scheduler.contains(sender_ptr),
             "D16: Call must always dequeue (block) the sender"
+        );
+    }
+
+    // ── Test 9: Call with stale reply field → StaleCap ─────────────
+
+    /// D67/P4-001: Call validates the reply field's generation before
+    /// transferring it to the receiver. A stale reply cap at
+    /// SLOT_REPLY_FIELD returns StaleCap to the sender without
+    /// delivering any message to the target Field.
+    #[test]
+    fn test_dispatch_ipc_call_stale_reply_field_returns_stale_cap() {
+        let ks = make_kernel_state();
+        let target_field_id = make_field_in_arena(&ks, 8);
+        let reply_field_id = make_field_in_arena(&ks, 8);
+        let (mut sender, entries) = make_sender_with_cap(
+            crate::capability::ObjectType::Field,
+            target_field_id,
+            crate::capability::Rights::SEND,
+            Badge(0x5555),
+            0,
+        );
+        // Install stale reply cap at SLOT_REPLY_FIELD (slot 1).
+        // Live generation is 0; stored_generation is 1 → stale.
+        let reply_entry =
+            crate::frame::capabilities::entry_mut(entries, 16, crate::capability::SLOT_REPLY_FIELD)
+                .unwrap();
+
+        *reply_entry = crate::capability::Entry {
+            object: Some((crate::capability::ObjectType::Field, reply_field_id)),
+            rights: crate::capability::Rights::SEND
+                .union(crate::capability::Rights::DESTROY)
+                .union(crate::capability::Rights::CLONE),
+            badge: Badge(0),
+            slot_tag: crate::capability::SlotTag(0),
+            send_once: false,
+            stored_generation: 1,
+        };
+
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        crate::frame::cores::write_test_ipc_registers_via_observer(
+            sender_ptr,
+            &crate::syscall::IpcRegisters {
+                data: [0x10, 0x20, 0x30, 0x40],
+                label: 0x9999,
+                handle_or_badge: handle,
+                user_cap: u64::MAX,
+                reply_info: 0xBEEF,
+            },
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+
+        core.scheduler.enqueue(sender_ptr);
+
+        let result = core.dispatch_ipc(IpcOperation::Call, &ks);
+
+        match result {
+            DispatchResult::Resume(resumed) => {
+                assert_eq!(resumed, sender_ptr, "StaleCap error must resume sender");
+            }
+            _ => panic!("Stale reply field must return Resume(sender), not block"),
+        }
+
+        let (carry, x0) = crate::frame::cores::read_ipc_carry_and_x0(sender_ptr);
+
+        assert!(carry, "D49: carry must be set on StaleCap error");
+        assert_eq!(
+            x0,
+            crate::syscall::SyscallError::StaleCap as u64,
+            "D67: stale reply field must return StaleCap error"
+        );
+
+        // Target Field must be unmodified — stale reply field prevents message delivery.
+        let fields = ks.fields.acquire();
+        let target = fields.get(target_field_id).unwrap();
+
+        assert_eq!(
+            target.queue_length, 0,
+            "P4-001: stale reply field must prevent message delivery"
         );
     }
 
