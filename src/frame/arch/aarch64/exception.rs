@@ -243,7 +243,9 @@ fn handle_el0_sync<S: crate::time_manager::Scheduler + 'static>(
             } else if imm == 0x44 {
                 verify_ipc_roundtrip::<S>()
             } else if imm == 0x45 {
-                verify_fault_handling()
+                verify_fault_handling::<S>()
+            } else if imm == 0x46 {
+                verify_timer_fire()
             } else {
                 handle_el0_fault::<S>(esr, far)
             }
@@ -453,23 +455,22 @@ fn verify_ipc_roundtrip<S: crate::time_manager::Scheduler + 'static>()
     crate::core_manager::DispatchResult::Resume(observer)
 }
 
-/// Phase 2.3 fault handling verification handler.
+/// Phase 2.3 fault handling verification handler (non-divergent).
 ///
 /// Called when the root Observer signals BRK #0x45 after receiving a
 /// VmFault message on the handler Field. Verifies that the fault message
 /// contains the correct fault type (VM_FAULT label), Space slot index,
-/// byte offset (0), and access type (Read).
+/// byte offset (0), and access type (Read). Advances PC and resumes so
+/// the root can continue to the timer fire scenario.
 #[cfg(target_os = "none")]
-fn verify_fault_handling() -> ! {
+fn verify_fault_handling<S: crate::time_manager::Scheduler + 'static>()
+-> crate::core_manager::DispatchResult {
     use crate::field::LABEL_VM_FAULT;
 
-    let core = crate::core_manager::current_core::<crate::time_manager::round_robin::RoundRobin>();
+    let core = crate::core_manager::current_core::<S>();
     let observer = core.current.expect("must have current observer");
     let regs = crate::frame::cores::read_ipc_registers(observer);
 
-    // Expected: data[0] = space_slot (4 = child's Space cap slot),
-    // data[1] = byte_offset (0), data[2] = access type (0 = Read),
-    // label = LABEL_VM_FAULT.
     let space_slot_ok = regs.data[0] == 4;
     let offset_ok = regs.data[1] == 0;
     let access_ok = regs.data[2] == 0;
@@ -487,9 +488,54 @@ fn verify_fault_handling() -> ! {
             regs.label,
             LABEL_VM_FAULT,
         );
+        crate::println!();
+        crate::println!("TEST FAILED");
+        crate::println!();
+
+        super::psci::system_off()
     }
 
-    if space_slot_ok && offset_ok && access_ok && label_ok {
+    crate::frame::cores::observer_advance_pc(observer);
+
+    crate::core_manager::DispatchResult::Resume(observer)
+}
+
+/// Phase 2.4 timer fire verification handler.
+///
+/// Called when the root Observer signals BRK #0x46 after receiving a
+/// timer_fire message on the timer Field. Verifies that the message
+/// carries the correct label (LABEL_TIMER_FIRE), badge (0xBEEF), and
+/// a non-zero fire time. This is the final test scenario — diverges
+/// via PSCI SYSTEM_OFF.
+#[cfg(target_os = "none")]
+fn verify_timer_fire() -> ! {
+    use crate::field::LABEL_TIMER_FIRE;
+
+    let core = crate::core_manager::current_core::<crate::time_manager::round_robin::RoundRobin>();
+    let observer = core.current.expect("must have current observer");
+    let regs = crate::frame::cores::read_ipc_registers(observer);
+
+    let label_ok = regs.label == LABEL_TIMER_FIRE;
+    let badge_ok = regs.handle_or_badge == 0xBEEF;
+    let fire_time_ok = regs.data[0] > 0;
+
+    if label_ok && badge_ok && fire_time_ok {
+        crate::println!(
+            "scenario: timer fire (label + badge + fire_time={}) — PASS",
+            regs.data[0],
+        );
+    } else {
+        crate::println!("scenario: timer fire — FAIL");
+        crate::println!(
+            "  label:     {:#x} (expected {:#x})",
+            regs.label,
+            LABEL_TIMER_FIRE,
+        );
+        crate::println!("  badge:     {:#x} (expected 0xBEEF)", regs.handle_or_badge);
+        crate::println!("  fire_time: {} (expected > 0)", regs.data[0]);
+    }
+
+    if label_ok && badge_ok && fire_time_ok {
         crate::println!();
         crate::println!("TEST PASSED");
         crate::println!();
@@ -540,6 +586,12 @@ fn irq_handler(_frame: &mut TrapFrame) {
     match intid {
         super::gic::INTID_VTIMER => {
             super::timer::tick();
+            super::gic::end_of_interrupt(intid);
+
+            // Scan Pulsar deadlines when idle. A fired Pulsar may wake a
+            // blocked Observer, requiring a context switch out of the WFI
+            // loop. EOI is already sent — safe to diverge if needed.
+            idle_wakeup_check();
         }
         // BUG: println! here will deadlock if this IRQ preempted a println!
         // on the same core (serial lock is not interrupt-aware). Acceptable
@@ -547,11 +599,48 @@ fn irq_handler(_frame: &mut TrapFrame) {
         // when the serial driver gains interrupt-safe locking.
         _ => {
             crate::println!("IRQ: unhandled INTID {intid}");
+            super::gic::end_of_interrupt(intid);
         }
     }
-
-    super::gic::end_of_interrupt(intid);
 }
+
+/// Scan Pulsar deadlines during idle and wake Observers if needed.
+///
+/// Called from the EL1h timer IRQ handler after `tick()` re-arms the
+/// hardware timer. When the core is idle (`current = None`), this scans
+/// the per-core deadline array for expired Pulsars. If a Pulsar fires
+/// and wakes a blocked Observer, this function diverges — calling
+/// `__restore_observer` to break out of the WFI idle loop and
+/// context-switch to the woken Observer.
+///
+/// When a current Observer exists, the EL0 IRQ path (`handle_el0_irq`)
+/// handles everything — this function returns immediately.
+#[cfg(target_os = "none")]
+fn idle_wakeup_check() {
+    use crate::core_manager::{self, DispatchResult};
+    use crate::time_manager::round_robin::RoundRobin;
+
+    let core = core_manager::current_core_mut::<RoundRobin>();
+
+    if core.current.is_some() {
+        return;
+    }
+
+    let ks = crate::frame::kernel_state();
+    let current_ticks = sysreg::cntvct_el0();
+    let counter_freq = sysreg::cntfrq_el0();
+    let result = core.handle_timer(current_ticks, ks, counter_freq);
+
+    match result {
+        DispatchResult::Resume(_) | DispatchResult::ResumeFastPath(_) => {
+            restore_or_idle(result);
+        }
+        _ => {}
+    }
+}
+
+#[cfg(not(target_os = "none"))]
+fn idle_wakeup_check() {}
 
 // ---------------------------------------------------------------------------
 // Fatal exception — dump state and halt

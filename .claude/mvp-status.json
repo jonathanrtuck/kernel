@@ -115,8 +115,8 @@
     },
     "2.4": {
       "name": "Timer fire",
-      "note": "",
-      "status": "pending"
+      "note": "50ms one-shot Pulsar; idle wakeup check added to EL1h IRQ handler; BRK #0x46 verify",
+      "status": "done"
     },
     "2.5": {
       "name": "Observer destroy + cleanup",

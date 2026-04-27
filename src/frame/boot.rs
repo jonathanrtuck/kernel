@@ -62,16 +62,18 @@ const USER_STACK_TOP: usize = USER_STACK_VA + PAGE_SIZE;
 // ── Fallback test binary (D94, Phase 2) ─────────────────────────
 //
 // Minimal EL0 program used when no DTB module is present.
-// Phase 2.2+2.3: IPC Receive, verify, then fault Receive, verify.
+// Phase 2.2–2.4: IPC Receive, verify; fault Receive, verify; timer Receive, verify.
 //
 // 1. SVC #2 (Receive on IPC Field, handle = slot 4) — blocks until child sends
 // 2. BRK #0x44 — IPC verify (non-divergent, advances PC, resumes)
 // 3. SVC #2 (Receive on handler Field, handle = slot 5) — gets fault message
-// 4. BRK #0x45 — fault verify (divergent, system_off)
+// 4. BRK #0x45 — fault verify (non-divergent, advances PC, resumes)
+// 5. SVC #2 (Receive on timer Field, handle = slot 6) — blocks until Pulsar fires
+// 6. BRK #0x46 — timer verify (divergent, system_off)
 
 #[cfg(target_os = "none")]
 const FALLBACK_BINARY: &[u8] = &{
-    let mut buf = [0u8; 24];
+    let mut buf = [0u8; 36];
 
     // movz x5, #4           → 0xD2800085  (IPC Field Receive cap)
     buf[0] = 0x85;
@@ -103,11 +105,29 @@ const FALLBACK_BINARY: &[u8] = &{
     buf[18] = 0x00;
     buf[19] = 0xD4;
 
-    // brk #0x45             → 0xD42008A0  (fault verify, divergent)
+    // brk #0x45             → 0xD42008A0  (fault verify, non-divergent)
     buf[20] = 0xA0;
     buf[21] = 0x08;
     buf[22] = 0x20;
     buf[23] = 0xD4;
+
+    // movz x5, #6           → 0xD28000C5  (timer Field Receive cap)
+    buf[24] = 0xC5;
+    buf[25] = 0x00;
+    buf[26] = 0x80;
+    buf[27] = 0xD2;
+
+    // svc #2                → 0xD4000041  (Receive)
+    buf[28] = 0x41;
+    buf[29] = 0x00;
+    buf[30] = 0x00;
+    buf[31] = 0xD4;
+
+    // brk #0x46             → 0xD42008C0  (timer verify, divergent)
+    buf[32] = 0xC0;
+    buf[33] = 0x08;
+    buf[34] = 0x20;
+    buf[35] = 0xD4;
 
     buf
 };
@@ -898,6 +918,81 @@ fn setup_child_cap_table(
     Ok(entries)
 }
 
+// ── Pulsar setup (Phase 2.4) ────────────────────────────────────
+
+/// Badge value for the boot-time Pulsar (Phase 2.4).
+///
+/// The timer_fire message carries this badge. The root Observer's
+/// BRK #0x46 verify handler checks it.
+#[cfg(target_os = "none")]
+const TIMER_TEST_BADGE: u64 = 0xBEEF;
+
+/// Duration in nanoseconds for the boot-time Pulsar (Phase 2.4).
+///
+/// 50 ms — long enough for the IPC and fault scenarios to complete first,
+/// short enough that the test finishes quickly. One-shot (period_ns = 0).
+#[cfg(target_os = "none")]
+const TIMER_PULSAR_DURATION_NS: u64 = 50_000_000;
+
+/// Create a Pulsar in the arena for the timer fire test (Phase 2.4).
+///
+/// Arms the Pulsar immediately (D62) with a short one-shot deadline
+/// targeting the given timer Field. Returns the Pulsar ObjectId and
+/// the absolute deadline in counter ticks for installation in the
+/// per-core deadline array.
+#[cfg(target_os = "none")]
+fn create_boot_pulsar(
+    ks: &KernelState,
+    timer_field_id: crate::arena::ObjectId,
+) -> Result<(crate::arena::ObjectId, u64), AllocError> {
+    let counter_freq = crate::frame::arch::cntfrq_el0();
+    let now_ticks = crate::frame::arch::cntvct_el0();
+
+    let mut pulsars = ks.pulsars.acquire();
+    let (pulsar_id, pulsar) = pulsars.allocate()?;
+
+    *pulsar = crate::pulsar::Pulsar::new(
+        timer_field_id,
+        crate::capability::Badge(TIMER_TEST_BADGE),
+        TIMER_PULSAR_DURATION_NS,
+        0,
+        counter_freq,
+        now_ticks,
+    );
+
+    let deadline_ticks = pulsar.next_deadline_ticks;
+
+    Ok((pulsar_id, deadline_ticks))
+}
+
+/// Install a Pulsar deadline entry in the BSP's per-core state (Phase 2.4).
+///
+/// Must be called after `init_bsp_per_core_data`. Writes directly to
+/// `BSP_CORE_STATE` — single-threaded boot context, no lock needed.
+#[cfg(target_os = "none")]
+fn install_deadline_at_boot(
+    pulsar_id: crate::arena::ObjectId,
+    field_id: crate::arena::ObjectId,
+    deadline_ticks: u64,
+) {
+    use crate::core_manager::DeadlineEntry;
+
+    // SAFETY: BSP_CORE_STATE is initialized by init_bsp_per_core_data.
+    // Single-threaded boot context — no concurrent access. Raw pointer
+    // write avoids Edition 2024's prohibition on references to mutable statics.
+    unsafe {
+        let cs = &raw mut BSP_CORE_STATE;
+        let count = (*cs).deadline_count;
+
+        (*cs).deadlines[count] = Some(DeadlineEntry {
+            deadline_ticks,
+            pulsar_id,
+            field_id,
+        });
+        (*cs).deadline_count = count + 1;
+    }
+}
+
 /// Create the root Space in the Space arena representing usable memory.
 ///
 /// The root Space's va_base and size correspond to the remaining usable
@@ -1027,6 +1122,30 @@ pub fn enter_first_observer(ks: &KernelState) -> ! {
         },
     );
 
+    // ── Phase 2.4: timer Field + Pulsar for timer fire test ──────
+    //
+    // Create a one-shot Pulsar that fires after 50 ms, delivering a
+    // timer_fire message to a dedicated timer Field. Root Receives on
+    // this Field after the IPC and fault scenarios complete.
+    let timer_field_id = create_boot_field(ks, 1).expect("create timer field");
+    let (pulsar_id, deadline_ticks) =
+        create_boot_pulsar(ks, timer_field_id).expect("create boot pulsar");
+
+    // Install Receive cap at slot 6 (timer Field).
+    crate::frame::capabilities::write_entry(
+        cap_entries,
+        ROOT_CAP_TABLE_CAPACITY,
+        capability::SLOT_USER_START + 3,
+        capability::Entry {
+            object: Some((capability::ObjectType::Field, timer_field_id)),
+            rights: capability::Rights::RECEIVE,
+            badge: Badge(0),
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        },
+    );
+
     // SAFETY: obs_ptr was just created above and is exclusively ours.
     // Single-threaded BSP boot — no concurrent access. The &mut is
     // safe because no other references to this Observer exist.
@@ -1035,26 +1154,38 @@ pub fn enter_first_observer(ks: &KernelState) -> ! {
 
         obs.cap_table = cap_entries;
         obs.cap_table_capacity = ROOT_CAP_TABLE_CAPACITY;
-        // Freelist starts at slot 6 (slots 3, 4, 5 occupied).
-        obs.cap_table_free_head = Some(capability::SLOT_USER_START + 3);
-        obs.cap_table_count = 4;
+        // Freelist starts at slot 7 (slots 3, 4, 5, 6 occupied).
+        obs.cap_table_free_head = Some(capability::SLOT_USER_START + 4);
+        obs.cap_table_count = 5;
         obs.clock_access = true;
     }
 
     crate::println!(
-        "boot: cap_table capacity={} installed=4 (self + space + ipc + handler)",
+        "boot: cap_table capacity={} installed=5 (self + space + ipc + handler + timer)",
         ROOT_CAP_TABLE_CAPACITY,
     );
 
     init_bsp_per_core_data(mmu::phys_to_virt(rs_pa) as *mut RegisterState);
     set_current_observer(obs_ptr);
 
+    // Phase 2.4: install Pulsar deadline in BSP core state.
+    // Must be after init_bsp_per_core_data (BSP_CORE_STATE initialized).
+    install_deadline_at_boot(pulsar_id, timer_field_id, deadline_ticks);
+
+    crate::println!(
+        "boot: pulsar id={} badge={:#x} deadline={}",
+        pulsar_id.0,
+        TIMER_TEST_BADGE,
+        deadline_ticks,
+    );
+
     // ── Phase 2: child Observer for integration tests ────────────
     //
     // Create a second Observer with its own address space. The child's
     // CHILD_BINARY sends an IPC message then touches an unmapped page
-    // (VmFault). Root's FALLBACK_BINARY does two Receives: first IPC
-    // (BRK #0x44 verify), then fault message (BRK #0x45 verify).
+    // (VmFault). Root's FALLBACK_BINARY does three Receives: IPC
+    // (BRK #0x44 verify), fault message (BRK #0x45 verify), and timer
+    // fire (BRK #0x46 verify).
     //
     // Must be called AFTER init_bsp_per_core_data and set_current_observer
     // so that enqueue_observer operates on the initialized BSP_CORE_STATE.
