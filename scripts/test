@@ -1,0 +1,212 @@
+#!/bin/bash
+# Run all tests: host unit tests, then bare-metal userspace tests.
+#
+# 1. cargo test     — host-side #[cfg(test)] modules (fast, ~1100 tests)
+# 2. cargo build    — bare-metal kernel binary
+# 3. tests/*.S      — assembly EL0 tests via hypervisor
+# 4. tests/src/bin/ — Rust EL0 tests via hypervisor
+#
+# ── Userspace test protocol ───────────────────────────────────────────
+#
+# Entry: binary loaded at USER_CODE_VA (0x4000), SP = 0xC000, EL0t.
+# Pass:  BRK #0x42 → kernel prints "TEST PASSED", exits via PSCI.
+# Fail:  BRK #N (N != 0x42) → "FATAL FAULT". Timeout → exit code 2.
+# Naming: fail_* files are expected to produce FATAL FAULT.
+
+set -eo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+pass() { printf "${GREEN}pass${RESET}  %s\n" "$1"; }
+fail() { printf "${RED}FAIL${RESET}  %s\n" "$1"; }
+info() { printf "${DIM}info${RESET}  %s\n" "$1"; }
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+TEST_DIR="$PROJECT_DIR/tests"
+KERNEL="$PROJECT_DIR/target/aarch64-unknown-none/debug/kernel"
+HYPERVISOR="$HOME/.local/bin/hypervisor"
+CLANG="/usr/bin/clang"
+LLD="$HOME/.cargo/bin/rust-lld"
+LLVM_OBJCOPY="$(find "$(rustc --print sysroot)/lib/rustlib" -name 'llvm-objcopy' 2>/dev/null | head -1)"
+TIMEOUT=5
+
+# ── Preflight checks ────────────────────────────────────────────────
+
+if [ ! -x "$HYPERVISOR" ]; then
+    echo "error: hypervisor not found at $HYPERVISOR" >&2
+    exit 1
+fi
+
+if [ ! -x "$CLANG" ]; then
+    echo "error: clang not found at $CLANG" >&2
+    exit 1
+fi
+
+if [ ! -x "$LLD" ]; then
+    echo "error: rust-lld not found at $LLD" >&2
+    exit 1
+fi
+
+# ── Host tests ───────────────────────────────────────────────────────
+
+info "running host tests"
+
+TEST_OUTPUT=$(cargo test --target aarch64-apple-darwin 2>&1)
+TEST_LINE=$(echo "$TEST_OUTPUT" | grep "^test result:" | head -1)
+
+if echo "$TEST_LINE" | grep -q "0 failed"; then
+    pass "host: $TEST_LINE"
+else
+    fail "host: $TEST_LINE"
+    echo "$TEST_OUTPUT" | grep "^---- " | head -10
+    exit 1
+fi
+
+# ── Build kernel ─────────────────────────────────────────────────────
+
+info "building kernel"
+
+if ! cargo build 2>/dev/null; then
+    echo "error: kernel build failed" >&2
+    exit 1
+fi
+
+# ── Shared test runner ───────────────────────────────────────────────
+
+PASS_COUNT=0
+FAIL_COUNT=0
+TOTAL=0
+TMPDIR=$(mktemp -d)
+
+trap 'rm -rf "$TMPDIR"' EXIT
+
+run_test() {
+    local test_name="$1"
+    local bin="$2"
+    local expect_pass=true
+
+    TOTAL=$((TOTAL + 1))
+
+    case "$test_name" in
+        fail_*|rs:fail_*) expect_pass=false ;;
+    esac
+
+    local hv_exit=0
+    local output
+    output=$("$HYPERVISOR" "$KERNEL" --module "$bin" --no-gpu --timeout "$TIMEOUT" 2>&1) || hv_exit=$?
+
+    local has_test_passed=false
+    local has_fatal_fault=false
+    local has_panic=false
+
+    echo "$output" | grep -q "TEST PASSED" && has_test_passed=true
+    echo "$output" | grep -q "FATAL FAULT" && has_fatal_fault=true
+    echo "$output" | grep -q "^panic:" && has_panic=true
+
+    if $expect_pass; then
+        if $has_test_passed; then
+            pass "$test_name"
+            PASS_COUNT=$((PASS_COUNT + 1))
+        elif $has_fatal_fault; then
+            fail "$test_name (got FATAL FAULT, expected TEST PASSED)"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+        elif $has_panic; then
+            fail "$test_name (kernel panic)"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+        elif [ "$hv_exit" -eq 2 ]; then
+            fail "$test_name (timeout)"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+        else
+            fail "$test_name (no result marker in output)"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+        fi
+    else
+        if $has_fatal_fault; then
+            pass "$test_name (expected failure)"
+            PASS_COUNT=$((PASS_COUNT + 1))
+        elif $has_test_passed; then
+            fail "$test_name (got TEST PASSED, expected FATAL FAULT)"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+        elif $has_panic; then
+            fail "$test_name (kernel panic, expected clean FATAL FAULT)"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+        elif [ "$hv_exit" -eq 2 ]; then
+            fail "$test_name (timeout, expected FATAL FAULT)"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+        else
+            fail "$test_name (no result marker in output)"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+        fi
+    fi
+}
+
+# ── Assembly tests ───────────────────────────────────────────────────
+
+for test_file in "$TEST_DIR"/*.S; do
+    [ -f "$test_file" ] || continue
+
+    test_name="$(basename "$test_file" .S)"
+    obj="$TMPDIR/${test_name}.o"
+    bin="$TMPDIR/${test_name}.bin"
+
+    if ! "$CLANG" --target=aarch64-unknown-none -c "$test_file" -o "$obj" 2>"$TMPDIR/asm_err"; then
+        fail "$test_name (assemble error)"
+        cat "$TMPDIR/asm_err" >&2
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        TOTAL=$((TOTAL + 1))
+        continue
+    fi
+
+    if ! "$LLD" -flavor gnu --oformat binary -Ttext=0 --image-base=0 -o "$bin" "$obj" 2>"$TMPDIR/link_err"; then
+        fail "$test_name (link error)"
+        cat "$TMPDIR/link_err" >&2
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        TOTAL=$((TOTAL + 1))
+        continue
+    fi
+
+    run_test "$test_name" "$bin"
+done
+
+# ── Rust tests ───────────────────────────────────────────────────────
+
+if [ -f "$TEST_DIR/Cargo.toml" ] && [ -n "$LLVM_OBJCOPY" ]; then
+    info "building rust tests"
+    if cargo build --manifest-path "$TEST_DIR/Cargo.toml" 2>/dev/null; then
+        RUST_TARGET="$TEST_DIR/target/aarch64-unknown-none/debug"
+        for elf in "$RUST_TARGET"/*; do
+            [ -f "$elf" ] || continue
+            file "$elf" 2>/dev/null | grep -q "ELF" || continue
+
+            name="$(basename "$elf")"
+            bin="$TMPDIR/rs_${name}.bin"
+
+            if ! "$LLVM_OBJCOPY" -O binary "$elf" "$bin" 2>/dev/null; then
+                fail "rs:$name (objcopy error)"
+                FAIL_COUNT=$((FAIL_COUNT + 1))
+                TOTAL=$((TOTAL + 1))
+                continue
+            fi
+
+            run_test "rs:$name" "$bin"
+        done
+    else
+        fail "rust test build"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        TOTAL=$((TOTAL + 1))
+    fi
+fi
+
+# ── Summary ──────────────────────────────────────────────────────────
+
+echo ""
+if [ "$FAIL_COUNT" -eq 0 ]; then
+    printf "${GREEN}all %d userspace tests passed${RESET}\n" "$TOTAL"
+else
+    printf "${RED}%d of %d userspace tests failed${RESET}\n" "$FAIL_COUNT" "$TOTAL"
+    exit 1
+fi

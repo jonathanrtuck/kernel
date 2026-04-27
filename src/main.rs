@@ -77,11 +77,21 @@ extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
     // ── Phase 3: Root Observer and EL0 entry (D94, D102) ────────────
     //
     // Create the root Observer, initialize per-core data, and context
-    // switch to EL0. Uses the DTB module binary when present, otherwise
-    // falls back to the embedded binary. This function does not return.
+    // switch to EL0. Requires a userspace binary loaded via
+    // `hypervisor --module <binary>`. Without one, the kernel idles.
     let ks = kernel::frame::kernel_state();
 
-    kernel::frame::boot::enter_first_observer(ks);
+    if arch::platform::module_start() != 0 {
+        kernel::frame::boot::enter_first_observer(ks);
+    }
+
+    println!("idle (no userspace binary — use hypervisor --module <binary>)");
+
+    arch::disable_interrupts();
+
+    loop {
+        arch::halt();
+    }
 }
 
 #[panic_handler]

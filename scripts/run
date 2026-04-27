@@ -1,0 +1,68 @@
+#!/bin/bash
+# Run the kernel, optionally with a userspace test binary.
+#
+#   scripts/run                  # boot kernel, no userspace (idle)
+#   scripts/run yield_returns    # run a test by name (.S or .rs)
+#
+# Builds the kernel and (if needed) the test binary, then boots via
+# the hypervisor. Extra arguments after the test name are passed to
+# the hypervisor (e.g. scripts/run yield_returns --timeout 20).
+
+set -eo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+TEST_DIR="$PROJECT_DIR/tests"
+KERNEL="$PROJECT_DIR/target/aarch64-unknown-none/debug/kernel"
+HYPERVISOR="$HOME/.local/bin/hypervisor"
+CLANG="/usr/bin/clang"
+LLD="$HOME/.cargo/bin/rust-lld"
+LLVM_OBJCOPY="$(find "$(rustc --print sysroot)/lib/rustlib" -name 'llvm-objcopy' 2>/dev/null | head -1)"
+
+# ── Build kernel ─────────────────────────────────────────────────
+
+cargo build 2>/dev/null
+
+# ── Resolve test binary ──────────────────────────────────────────
+
+TEST_NAME="$1"
+shift 2>/dev/null || true
+MODULE_ARGS=()
+
+if [ -n "$TEST_NAME" ]; then
+    TMPDIR=$(mktemp -d)
+    trap 'rm -rf "$TMPDIR"' EXIT
+
+    # Try assembly first.
+    if [ -f "$TEST_DIR/${TEST_NAME}.S" ]; then
+        obj="$TMPDIR/${TEST_NAME}.o"
+        bin="$TMPDIR/${TEST_NAME}.bin"
+
+        "$CLANG" --target=aarch64-unknown-none -c "$TEST_DIR/${TEST_NAME}.S" -o "$obj"
+        "$LLD" -flavor gnu --oformat binary -Ttext=0 --image-base=0 -o "$bin" "$obj"
+
+        MODULE_ARGS=(--module "$bin")
+
+    # Try Rust binary.
+    elif [ -f "$TEST_DIR/src/bin/${TEST_NAME}.rs" ]; then
+        cargo build --manifest-path "$TEST_DIR/Cargo.toml" 2>/dev/null
+        elf="$TEST_DIR/target/aarch64-unknown-none/debug/${TEST_NAME}"
+
+        if [ ! -f "$elf" ]; then
+            echo "error: rust binary not found at $elf" >&2
+            exit 1
+        fi
+
+        bin="$TMPDIR/${TEST_NAME}.bin"
+        "$LLVM_OBJCOPY" -O binary "$elf" "$bin"
+
+        MODULE_ARGS=(--module "$bin")
+    else
+        echo "error: no test named '$TEST_NAME' (looked for tests/${TEST_NAME}.S and tests/src/bin/${TEST_NAME}.rs)" >&2
+        exit 1
+    fi
+fi
+
+# ── Boot ─────────────────────────────────────────────────────────
+
+exec "$HYPERVISOR" --no-gpu --cpus 2 --timeout 10 "${MODULE_ARGS[@]}" "$@" "$KERNEL"

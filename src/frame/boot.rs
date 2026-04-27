@@ -61,105 +61,6 @@ const USER_STACK_VA: usize = 2 * PAGE_SIZE;
 #[cfg(target_os = "none")]
 const USER_STACK_TOP: usize = USER_STACK_VA + PAGE_SIZE;
 
-// ── Fallback test binary (D94, Phase 2) ─────────────────────────
-//
-// Minimal EL0 program used when no DTB module is present.
-// Phase 2.2–2.5: IPC, fault, timer, destroy.
-//
-// 1. SVC #2 (Receive on IPC Field, slot 4) — blocks until child sends
-// 2. BRK #0x44 — IPC verify (non-divergent)
-// 3. SVC #2 (Receive on handler Field, slot 5) — gets fault message
-// 4. BRK #0x45 — fault verify (non-divergent)
-// 5. SVC #2 (Receive on timer Field, slot 6) — blocks until Pulsar fires
-// 6. BRK #0x46 — timer verify (non-divergent)
-// 7. SVC #0 (Destroy child Observer, op=7, handle=slot 7)
-// 8. BRK #0x47 — destroy verify (divergent, system_off)
-
-#[cfg(target_os = "none")]
-const FALLBACK_BINARY: &[u8] = &{
-    let mut buf = [0u8; 52];
-
-    // movz x5, #4           → 0xD2800085  (IPC Field Receive cap)
-    buf[0] = 0x85;
-    buf[1] = 0x00;
-    buf[2] = 0x80;
-    buf[3] = 0xD2;
-
-    // svc #2                → 0xD4000041  (Receive)
-    buf[4] = 0x41;
-    buf[5] = 0x00;
-    buf[6] = 0x00;
-    buf[7] = 0xD4;
-
-    // brk #0x44             → 0xD4200880  (IPC verify, non-divergent)
-    buf[8] = 0x80;
-    buf[9] = 0x08;
-    buf[10] = 0x20;
-    buf[11] = 0xD4;
-
-    // movz x5, #5           → 0xD28000A5  (handler Field Receive cap)
-    buf[12] = 0xA5;
-    buf[13] = 0x00;
-    buf[14] = 0x80;
-    buf[15] = 0xD2;
-
-    // svc #2                → 0xD4000041  (Receive)
-    buf[16] = 0x41;
-    buf[17] = 0x00;
-    buf[18] = 0x00;
-    buf[19] = 0xD4;
-
-    // brk #0x45             → 0xD42008A0  (fault verify, non-divergent)
-    buf[20] = 0xA0;
-    buf[21] = 0x08;
-    buf[22] = 0x20;
-    buf[23] = 0xD4;
-
-    // movz x5, #6           → 0xD28000C5  (timer Field Receive cap)
-    buf[24] = 0xC5;
-    buf[25] = 0x00;
-    buf[26] = 0x80;
-    buf[27] = 0xD2;
-
-    // svc #2                → 0xD4000041  (Receive)
-    buf[28] = 0x41;
-    buf[29] = 0x00;
-    buf[30] = 0x00;
-    buf[31] = 0xD4;
-
-    // brk #0x46             → 0xD42008C0  (timer verify, non-divergent)
-    buf[32] = 0xC0;
-    buf[33] = 0x08;
-    buf[34] = 0x20;
-    buf[35] = 0xD4;
-
-    // movz x4, #7           → 0xD28000E4  (Destroy op code)
-    buf[36] = 0xE4;
-    buf[37] = 0x00;
-    buf[38] = 0x80;
-    buf[39] = 0xD2;
-
-    // movz x5, #7           → 0xD28000E5  (child Observer cap, slot 7)
-    buf[40] = 0xE5;
-    buf[41] = 0x00;
-    buf[42] = 0x80;
-    buf[43] = 0xD2;
-
-    // svc #0                → 0xD4000001  (typed operation)
-    buf[44] = 0x01;
-    buf[45] = 0x00;
-    buf[46] = 0x00;
-    buf[47] = 0xD4;
-
-    // brk #0x47             → 0xD42008E0  (destroy verify, divergent)
-    buf[48] = 0xE0;
-    buf[49] = 0x08;
-    buf[50] = 0x20;
-    buf[51] = 0xD4;
-
-    buf
-};
-
 /// Allocate `count` pages from SpaceManager, zeroed. Returns the physical address.
 #[cfg(target_os = "none")]
 pub(super) fn alloc_zeroed_pages(ks: &KernelState, count: usize) -> Result<usize, AllocError> {
@@ -289,21 +190,6 @@ fn install_module_binary(code_pa: usize, module_pa: usize, module_size: usize) {
             mmu::phys_to_virt(module_pa) as *const u8,
             mmu::phys_to_virt(code_pa) as *mut u8,
             module_size,
-        );
-    }
-}
-
-/// Copy the embedded fallback binary to the code page (D94).
-#[cfg(target_os = "none")]
-fn install_fallback_binary(code_pa: usize) {
-    // SAFETY: code_pa points to a zeroed page exclusively owned by us.
-    // FALLBACK_BINARY.len() < PAGE_SIZE. D88: phys_to_virt converts to
-    // TTBR1 VA. FALLBACK_BINARY is in kernel .rodata (identity-mapped).
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            FALLBACK_BINARY.as_ptr(),
-            mmu::phys_to_virt(code_pa) as *mut u8,
-            FALLBACK_BINARY.len(),
         );
     }
 }
@@ -1018,11 +904,11 @@ fn create_root_space(ks: &KernelState) -> Result<crate::arena::ObjectId, AllocEr
 
 // ── Public boot entry point ──────────────────────────────────────
 
-/// Boot the kernel into EL0 with a test Observer (D94, D102).
+/// Boot the kernel into EL0 with the DTB module binary (D94, D102).
 ///
-/// When a DTB `/chosen` module node is present (loaded by the hypervisor
-/// via `--module`), uses that binary; otherwise falls back to the embedded
-/// `FALLBACK_BINARY`.
+/// The caller must verify a module is present before calling this.
+/// The hypervisor loads a flat binary via `--module`; the kernel discovers
+/// it through the DTB `/chosen` node (module-start, module-end).
 ///
 /// Allocates physical pages, builds user mappings, creates the root
 /// Observer, initializes per-core data, and context switches to EL0.
@@ -1037,20 +923,18 @@ pub fn enter_first_observer(ks: &KernelState) -> ! {
     let module_start = platform::module_start();
     let module_size = platform::module_size();
 
-    if module_start != 0 && module_size != 0 {
-        assert!(
-            module_size <= PAGE_SIZE,
-            "boot: module too large ({module_size} > {PAGE_SIZE})"
-        );
+    assert!(
+        module_start != 0 && module_size != 0,
+        "boot: no module binary (use hypervisor --module <binary>)"
+    );
+    assert!(
+        module_size <= PAGE_SIZE,
+        "boot: module too large ({module_size} > {PAGE_SIZE})"
+    );
 
-        install_module_binary(code_pa, module_start, module_size);
+    install_module_binary(code_pa, module_start, module_size);
 
-        crate::println!("boot: loaded DTB module ({} bytes)", module_size);
-    } else {
-        install_fallback_binary(code_pa);
-
-        crate::println!("boot: using embedded fallback binary");
-    }
+    crate::println!("boot: loaded DTB module ({} bytes)", module_size);
 
     let stack_pa = alloc_zeroed_pages(ks, 1).expect("allocate stack page");
 

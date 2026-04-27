@@ -3,8 +3,7 @@
 #
 # Checks:
 #   cargo clippy  -- warnings as errors (correctness, idiomatic Rust, clarity)
-#   cargo build   -- bare-metal build succeeds
-#   cargo test    -- all host tests pass
+#   scripts/test  -- host tests + bare-metal userspace tests
 #   unsafe count  -- inventory, split by frame/ boundary
 #   framekernel   -- no unsafe outside frame/ (belt-and-suspenders with lint)
 #
@@ -25,20 +24,17 @@ pass() { printf "${GREEN}pass${RESET}  %s\n" "$1"; }
 fail() { printf "${RED}FAIL${RESET}  %s\n" "$1"; exit 1; }
 info() { printf "${DIM}info${RESET}  %s\n" "$1"; }
 
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || readlink "$0" 2>/dev/null || echo "$0")")" && pwd)"
+
 # b, c, g: Clippy with warnings-as-errors.
 # -A dead_code: spec-placeholder structs (observer.rs, time.rs) have fields
 # that aren't used in code yet. Tracked, not a real issue.
 cargo clippy -- -D warnings -A dead_code 2>&1 | tail -1
 pass "clippy clean"
 
-# b: Bare-metal build must succeed.
-cargo build 2>/dev/null
-pass "bare-metal build"
-
-# e: All host tests must pass.
-TEST_OUTPUT=$(cargo test --target aarch64-apple-darwin 2>&1)
-TEST_LINE=$(echo "$TEST_OUTPUT" | grep "^test result:" | head -1)
-pass "tests: $TEST_LINE"
+# e: All tests — host unit tests + bare-metal userspace tests.
+"$SCRIPT_DIR/test"
+pass "all tests"
 
 # f: Framekernel discipline — all unsafe confined to frame/.
 # The crate-level #![deny(unsafe_code)] with #[allow(unsafe_code)] on mod frame
@@ -66,19 +62,3 @@ for f in $SPEC_FILES; do
 done
 pass "speculation barriers present"
 
-# h: Bare-metal integration — boot the kernel and check test scenarios.
-if command -v hypervisor >/dev/null 2>&1; then
-    BM_OUTPUT=$(hypervisor --no-gpu --timeout 10 --cpus 2 target/aarch64-unknown-none/debug/kernel 2>&1)
-
-    if echo "$BM_OUTPUT" | grep -q "TEST PASSED"; then
-        pass "bare-metal integration (hypervisor)"
-    elif echo "$BM_OUTPUT" | grep -qE "FAIL|FATAL FAULT"; then
-        echo "$BM_OUTPUT" | grep -E "scenario:|FAIL|FATAL" | head -5
-        fail "bare-metal integration (hypervisor)"
-    else
-        echo "$BM_OUTPUT" | tail -5
-        fail "bare-metal integration: no TEST PASSED/FAILED (timeout or crash)"
-    fi
-else
-    info "bare-metal integration skipped (hypervisor not found)"
-fi

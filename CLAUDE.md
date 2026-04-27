@@ -86,10 +86,11 @@ finishing a change to catch issues early:
 scripts/verify
 ```
 
-This gates on: clippy clean, bare-metal build, all tests pass, framekernel
-boundary (no unsafe outside `frame/`), and reports the unsafe block count. Not
-automated: performance (no benchmarks yet), FP style, and Verus readiness —
-these are design judgment enforced by the guidelines above, not scripts.
+This gates on: clippy clean, all tests pass (host unit tests + bare-metal
+userspace tests via `scripts/test`), framekernel boundary (no unsafe outside
+`frame/`), and reports the unsafe block count. Not automated: performance (no
+benchmarks yet), FP style, and Verus readiness — these are design judgment
+enforced by the guidelines above, not scripts.
 
 ### 6. Update reference docs at milestone boundaries
 
@@ -108,6 +109,11 @@ src/
     firmware/   — firmware interfaces (DTB, future ACPI/UEFI)
   config.rs     — kernel configuration constants
   print.rs      — println! macro
+tests/
+  *.S           — bare-metal userspace tests (AArch64 assembly)
+  src/lib.rs    — Rust syscall wrappers for userspace tests
+  src/bin/*.rs  — bare-metal userspace tests (Rust)
+  Cargo.toml    — standalone crate (aarch64-unknown-none target)
 design/
   philosophy.md — thinking framework (read first)
   spec.md       — settled decisions and rationale (design SSOT)
@@ -116,14 +122,17 @@ design/
   research/     — prior art studies (descriptive, reusable): smp, syscall-landscape
   landscape.md  — survey of 18+ real kernel designs by decision point
 scripts/
-  verify        — pre-commit gate (clippy + build + test + framekernel boundary)
+  test          — run all tests (host + bare-metal)
+  run           — boot kernel, optionally with a named userspace test
+  verify        — pre-commit gate (clippy + test + framekernel boundary)
 .claude/
   working-with-claude.md           — meta-process synthesis for Claude collaboration on this project
   hooks/, commands/, settings.json — Claude Code integration
 ```
 
 The root Cargo.toml has both a `[lib]` and a `[[bin]]` target pointing into
-`src/`. Tests live as `#[cfg(test)]` modules inside source files.
+`src/`. Host tests live as `#[cfg(test)]` modules inside source files.
+Bare-metal userspace tests live in `tests/` as assembly (`.S`) or Rust binaries.
 Bare-metal-only code is gated with `#[cfg(target_os = "none")]`.
 
 ## Build Commands
@@ -132,11 +141,20 @@ Bare-metal-only code is gated with `#[cfg(target_os = "none")]`.
 # Build the kernel
 cargo build
 
-# Run the kernel (native Apple Hypervisor.framework — preferred)
-hypervisor target/aarch64-unknown-none/debug/kernel --no-gpu --timeout 5
+# Boot the kernel (no userspace — idles after init)
+cargo run
 
-# Run tests on the host
+# Boot with a specific userspace test
+scripts/run yield_returns
+
+# Run all tests (host unit tests + bare-metal userspace tests)
+scripts/test
+
+# Run host unit tests only
 cargo test --target aarch64-apple-darwin
+
+# Pre-commit gate (clippy + all tests + framekernel boundary)
+scripts/verify
 ```
 
 Use `hypervisor` (installed at `~/.local/bin/hypervisor`,
@@ -145,6 +163,8 @@ QEMU is a fallback only. Key flags:
 
 - `--no-gpu` — serial-only mode (no Metal window)
 - `--timeout SECS` — exit after N seconds (for automated runs)
+- `--module PATH` — load a flat binary as the userspace program
+- `--cpus N` — number of vCPUs (default: 4)
 - `--capture N PATH` — capture frame N as PNG, then exit
 - `--events FILE` — run scripted input + captures
 

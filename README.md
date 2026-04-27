@@ -26,11 +26,17 @@ A [Rust](<https://en.wikipedia.org/wiki/Rust_(programming_language)>)
 # build
 cargo build
 
-# run
+# boot (no userspace — idles after init)
 cargo run
 
-# test (runs on host)
-cargo test --target aarch64-apple-darwin
+# boot with a userspace test
+scripts/run yield_returns
+
+# run all tests (host + bare-metal)
+scripts/test
+
+# pre-commit gate (clippy + tests + framekernel boundary)
+scripts/verify
 ```
 
 **Requires:**
