@@ -307,12 +307,29 @@ pub fn typed_syscall(op_code: u16, target: u64, args: [u64; 4]) -> TypedResult {
 
 // ── Typed operation helpers ─────────────────────────────────────
 
-pub const OP_SPACE_SPLIT: u16 = 11;
-pub const OP_CREATE_FIELD: u16 = 13;
-pub const OP_CLOSE: u16 = 9;
-pub const OP_CLOCK_READ: u16 = 17;
+pub const OP_OBSERVER_RESUME: u16 = 0;
+pub const OP_OBSERVER_INSTALL_CAP: u16 = 1;
+pub const OP_OBSERVER_WRITE_REGISTERS: u16 = 2;
+pub const OP_OBSERVER_READ_REGISTERS: u16 = 3;
+pub const OP_OBSERVER_SUSPEND: u16 = 4;
+pub const OP_OBSERVER_CHANGE_HANDLER: u16 = 5;
+pub const OP_OBSERVER_SET_SCHEDULING: u16 = 6;
 pub const OP_DESTROY: u16 = 7;
+pub const OP_CLONE: u16 = 8;
+pub const OP_CLOSE: u16 = 9;
+pub const OP_MINT: u16 = 10;
+pub const OP_SPACE_SPLIT: u16 = 11;
+pub const OP_SPACE_MERGE: u16 = 12;
+pub const OP_CREATE_FIELD: u16 = 13;
+pub const OP_FIELD_SPLIT: u16 = 14;
+pub const OP_TIME_SPLIT: u16 = 15;
+pub const OP_CREATE_PULSAR: u16 = 16;
+pub const OP_CLOCK_READ: u16 = 17;
+pub const OP_CREATE_OBSERVER: u16 = 18;
 pub const OP_RESOURCE_REQUEST: u16 = 19;
+
+/// NZCV condition flags mask (bits 31:28 of PSTATE).
+pub const NZCV_MASK: u64 = 0xF000_0000;
 
 /// Root Space cap lives at slot 3 after boot.
 pub const ROOT_SPACE_HANDLE: u64 = 3;
@@ -337,4 +354,164 @@ pub fn close(handle: u64) -> TypedResult {
 /// Read the system clock (requires clock_access = true).
 pub fn clock_read(self_handle: u64) -> TypedResult {
     typed_syscall(OP_CLOCK_READ, self_handle, [0, 0, 0, 0])
+}
+
+/// Destroy the kernel object behind `handle`.
+pub fn destroy(handle: u64) -> TypedResult {
+    typed_syscall(OP_DESTROY, handle, [0, 0, 0, 0])
+}
+
+/// Request resources from the kernel (privileged).
+/// `resource_type`: 0 = Space, 1 = Time. `quantity`: amount requested.
+pub fn resource_request(handle: u64, resource_type: u64, quantity: u64) -> TypedResult {
+    typed_syscall(OP_RESOURCE_REQUEST, handle, [resource_type, quantity, 0, 0])
+}
+
+// ── Observer operations ───────────────────────────────────────
+
+/// Resume a suspended Observer.
+pub fn observer_resume(observer: u64) -> TypedResult {
+    typed_syscall(OP_OBSERVER_RESUME, observer, [0, 0, 0, 0])
+}
+
+/// Install a capability from the caller's table into the target Observer.
+pub fn observer_install_cap(observer: u64, source_cap: u64) -> TypedResult {
+    typed_syscall(OP_OBSERVER_INSTALL_CAP, observer, [source_cap, 0, 0, 0])
+}
+
+/// Write registers (PC, SP, x0, PSTATE) to a suspended Observer.
+/// PSTATE is masked to NZCV bits only (bits 31:28) as defense-in-depth.
+pub fn observer_write_registers(
+    observer: u64,
+    pc: u64,
+    sp: u64,
+    x0: u64,
+    pstate: u64,
+) -> TypedResult {
+    typed_syscall(
+        OP_OBSERVER_WRITE_REGISTERS,
+        observer,
+        [pc, sp, x0, pstate & NZCV_MASK],
+    )
+}
+
+/// Result of reading an Observer's registers.
+pub struct RegistersResult {
+    pub ok: bool,
+    pub pc: u64,
+    pub sp: u64,
+    pub x0: u64,
+    pub pstate: u64,
+}
+
+/// Read registers (PC, SP, x0, PSTATE) from a suspended Observer.
+/// Uses a custom asm block because the result spans x0-x3.
+pub fn observer_read_registers(observer: u64) -> RegistersResult {
+    let r0: u64;
+    let r1: u64;
+    let r2: u64;
+    let r3: u64;
+    // SAFETY: SVC #0 with op_code=3 (ObserverReadRegisters). On success:
+    // x0=PC, x1=SP, x2=target's x0, x3=PSTATE. On error: x0 is negative.
+    unsafe {
+        asm!(
+            "svc #0",
+            in("x0") 0u64,
+            in("x1") 0u64,
+            in("x2") 0u64,
+            in("x3") 0u64,
+            in("x4") OP_OBSERVER_READ_REGISTERS as u64,
+            in("x5") observer,
+            lateout("x0") r0,
+            lateout("x1") r1,
+            lateout("x2") r2,
+            lateout("x3") r3,
+            lateout("x6") _,
+            lateout("x7") _,
+        );
+    }
+    if (r0 as i64) < 0 {
+        RegistersResult { ok: false, pc: 0, sp: 0, x0: 0, pstate: 0 }
+    } else {
+        RegistersResult { ok: true, pc: r0, sp: r1, x0: r2, pstate: r3 }
+    }
+}
+
+/// Suspend a running Observer.
+pub fn observer_suspend(observer: u64) -> TypedResult {
+    typed_syscall(OP_OBSERVER_SUSPEND, observer, [0, 0, 0, 0])
+}
+
+/// Change the fault handler Field and badge for an Observer.
+pub fn observer_change_handler(
+    observer: u64,
+    handler_field: u64,
+    badge: u64,
+) -> TypedResult {
+    typed_syscall(OP_OBSERVER_CHANGE_HANDLER, observer, [handler_field, badge, 0, 0])
+}
+
+/// Set scheduling parameters (responsiveness, throughput) for an Observer.
+pub fn observer_set_scheduling(observer: u64, responsiveness: u64, throughput: u64) -> TypedResult {
+    typed_syscall(OP_OBSERVER_SET_SCHEDULING, observer, [responsiveness, throughput, 0, 0])
+}
+
+// ── Capability operations ─────────────────────────────────────
+
+/// Clone a capability, creating a duplicate in the caller's table.
+pub fn clone_cap(handle: u64) -> TypedResult {
+    typed_syscall(OP_CLONE, handle, [0, 0, 0, 0])
+}
+
+/// Mint an attenuated capability with restricted rights and optional badge.
+/// Pass `CAP_ABSENT` as `badge` to keep the source badge.
+pub fn mint(handle: u64, rights_mask: u64, badge: u64) -> TypedResult {
+    typed_syscall(OP_MINT, handle, [rights_mask, badge, 0, 0])
+}
+
+// ── Space operations ──────────────────────────────────────────
+
+/// Merge an adjacent Space into the target Space.
+pub fn space_merge(handle: u64, adjacent: u64) -> TypedResult {
+    typed_syscall(OP_SPACE_MERGE, handle, [adjacent, 0, 0, 0])
+}
+
+// ── Field operations ──────────────────────────────────────────
+
+/// Split a Field into a sub-Field covering badge range [badge_low, badge_high].
+/// Consumes a Space cap for the new Field's backing memory.
+pub fn field_split(field: u64, space: u64, badge_low: u64, badge_high: u64) -> TypedResult {
+    typed_syscall(OP_FIELD_SPLIT, field, [space, badge_low, badge_high, 0])
+}
+
+// ── Time operations ───────────────────────────────────────────
+
+/// Split `units` of time from the Time capability at `handle`.
+pub fn time_split(handle: u64, units: u64) -> TypedResult {
+    typed_syscall(OP_TIME_SPLIT, handle, [units, 0, 0, 0])
+}
+
+/// Create a Pulsar (periodic timer) from a Space.
+/// `field`: delivery Field handle, `badge`: message badge,
+/// `duration_ns`: first fire delay, `period_ns`: repeat interval.
+pub fn create_pulsar(
+    space: u64,
+    field: u64,
+    badge: u64,
+    duration_ns: u64,
+    period_ns: u64,
+) -> TypedResult {
+    typed_syscall(OP_CREATE_PULSAR, space, [field, badge, duration_ns, period_ns])
+}
+
+// ── Observer creation ─────────────────────────────────────────
+
+/// Create a new Observer from a Space.
+/// `handler_field`: fault handler Field handle, `handler_badge`: badge for fault messages.
+pub fn create_observer(
+    space: u64,
+    handler_field: u64,
+    handler_badge: u64,
+) -> TypedResult {
+    typed_syscall(OP_CREATE_OBSERVER, space, [handler_field, handler_badge, 0, 0])
 }
