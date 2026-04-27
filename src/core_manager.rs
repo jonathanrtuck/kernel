@@ -2359,7 +2359,14 @@ impl<S: Scheduler> CoreState<S> {
 
                                 id
                             }
-                            Err(_) => return typed_error(SyscallError::InsufficientResource),
+                            Err(_) => {
+                                // D104 rollback: restore source Space size.
+                                if let Some(s) = spaces.get_mut(object_id) {
+                                    s.size += rounded_size;
+                                }
+
+                                return typed_error(SyscallError::InsufficientResource);
+                            }
                         }
                     };
                     let transferred = capability::TransferredCap {
@@ -2377,9 +2384,14 @@ impl<S: Scheduler> CoreState<S> {
                     ) {
                         Ok(encoded_handle) => typed_ok(encoded_handle),
                         Err(_) => {
+                            // D104 rollback: free new Space and restore source.
                             let mut spaces = kernel_state.spaces.acquire();
 
                             spaces.free(new_space_id);
+
+                            if let Some(s) = spaces.get_mut(object_id) {
+                                s.size += rounded_size;
+                            }
 
                             typed_error(SyscallError::TableFull)
                         }
