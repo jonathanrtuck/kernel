@@ -240,6 +240,8 @@ fn handle_el0_sync<S: crate::time_manager::Scheduler + 'static>(
                 test_passed()
             } else if imm == 0x43 {
                 child_scenario_passed::<S>()
+            } else if imm == 0x44 {
+                verify_ipc_roundtrip::<S>()
             } else {
                 handle_el0_fault::<S>(esr, far)
             }
@@ -391,7 +393,7 @@ fn child_scenario_passed<S: crate::time_manager::Scheduler + 'static>()
     use crate::core_manager;
     use crate::time_manager::Scheduler;
 
-    crate::println!("scenario: child observer ran in own address space — PASS");
+    crate::println!("scenario: child IPC send + own address space — PASS");
 
     let core = core_manager::current_core_mut::<S>();
 
@@ -400,6 +402,52 @@ fn child_scenario_passed<S: crate::time_manager::Scheduler + 'static>()
     }
 
     core.schedule_next()
+}
+
+/// Phase 2.2 IPC roundtrip verification handler.
+///
+/// Called when the root Observer signals BRK #0x44 after completing an
+/// IPC Receive. Reads the Observer's register state and verifies that
+/// the received message matches the expected values:
+/// - x0–x3: data words (0xAA, 0xBB, 0xCC, 0xDD)
+/// - x4: label (0x42)
+/// - x5: badge (0x99, injected by kernel from Send cap)
+#[cfg(target_os = "none")]
+fn verify_ipc_roundtrip<S: crate::time_manager::Scheduler + 'static>() -> ! {
+    let core = crate::core_manager::current_core::<S>();
+    let observer = core.current.expect("must have current observer");
+    let regs = crate::frame::cores::read_ipc_registers(observer);
+
+    let expected_data: [u64; 4] = [0xAA, 0xBB, 0xCC, 0xDD];
+    let expected_label: u64 = 0x42;
+    let expected_badge: u64 = 0x99;
+
+    let data_ok = regs.data == expected_data;
+    let label_ok = regs.label == expected_label;
+    let badge_ok = regs.handle_or_badge == expected_badge;
+
+    if data_ok && label_ok && badge_ok {
+        crate::println!("scenario: IPC roundtrip (4 data + label + badge) — PASS");
+        crate::println!();
+        crate::println!("TEST PASSED");
+        crate::println!();
+    } else {
+        crate::println!("scenario: IPC roundtrip — FAIL");
+        crate::println!(
+            "  data:  [{:#x}, {:#x}, {:#x}, {:#x}] (expected [0xAA, 0xBB, 0xCC, 0xDD])",
+            regs.data[0],
+            regs.data[1],
+            regs.data[2],
+            regs.data[3],
+        );
+        crate::println!("  label: {:#x} (expected 0x42)", regs.label,);
+        crate::println!("  badge: {:#x} (expected 0x99)", regs.handle_or_badge,);
+        crate::println!();
+        crate::println!("TEST FAILED");
+        crate::println!();
+    }
+
+    super::psci::system_off()
 }
 
 /// Fatal EL0 exception — dump state and halt.

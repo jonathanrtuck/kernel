@@ -59,46 +59,37 @@ const USER_STACK_VA: usize = 2 * PAGE_SIZE;
 #[cfg(target_os = "none")]
 const USER_STACK_TOP: usize = USER_STACK_VA + PAGE_SIZE;
 
-// ── Fallback test binary (D94) ──────────────────────────────────
+// ── Fallback test binary (D94, Phase 2) ─────────────────────────
 //
 // Minimal EL0 program used when no DTB module is present.
-// D102 settles: test binaries are flat binaries loaded by the hypervisor
-// (--module flag). This embedded fallback preserves backward compatibility
-// for runs without --module.
+// Phase 2.2: IPC Receive on a Field, then verify via BRK #0x44.
 //
-// 1. Loads a marker into x0 (proves register state is live)
-// 2. Executes SVC #5 (Yield — proves syscall round-trip)
-// 3. After return from Yield, executes BRK #0x42
-//    (debug exception → fault handler → kernel prints pass → exit)
+// 1. Loads handle = 4 into x5 (Receive cap at slot 4)
+// 2. Executes SVC #2 (Receive — blocks until child sends)
+// 3. After return from Receive, executes BRK #0x44
+//    (IPC verify handler checks x0–x5 match expected data)
 
 #[cfg(target_os = "none")]
 const FALLBACK_BINARY: &[u8] = &{
-    // ARM64 instructions are 4 bytes, little-endian.
-    let mut buf = [0u8; 16];
+    let mut buf = [0u8; 12];
 
-    // mov x0, #0x42         → 0xD2800840
-    buf[0] = 0x40;
-    buf[1] = 0x08;
+    // movz x5, #4           → 0xD2800085
+    buf[0] = 0x85;
+    buf[1] = 0x00;
     buf[2] = 0x80;
     buf[3] = 0xD2;
 
-    // svc #5                → 0xD40000A1
-    buf[4] = 0xA1;
+    // svc #2                → 0xD4000041
+    buf[4] = 0x41;
     buf[5] = 0x00;
     buf[6] = 0x00;
     buf[7] = 0xD4;
 
-    // mov x0, #0            → 0xD2800000 (clear x0 — proves yield returned)
-    buf[8] = 0x00;
-    buf[9] = 0x00;
-    buf[10] = 0x80;
-    buf[11] = 0xD2;
-
-    // brk #0x42             → 0xD4200840
-    buf[12] = 0x40;
-    buf[13] = 0x08;
-    buf[14] = 0x20;
-    buf[15] = 0xD4;
+    // brk #0x44             → 0xD4200880
+    buf[8] = 0x80;
+    buf[9] = 0x08;
+    buf[10] = 0x20;
+    buf[11] = 0xD4;
 
     buf
 };
@@ -419,27 +410,82 @@ fn enqueue_observer(observer_ptr: NonNull<Observer>) {
     }
 }
 
-// ── Child Observer binary (Phase 2) ─────────────────────────────
+// ── Child Observer binary (Phase 2.2) ───────────────────────────
 //
-// Minimal EL0 program for the child Observer in integration tests.
-// 1. Loads 0xC1 into x0 (marker: "child ran")
-// 2. Executes BRK #0x43 (signals child completed)
+// Minimal EL0 program: IPC Send to a Field, then signal done.
+// 1. Loads test data into x0–x3 (4 data words)
+// 2. Loads label 0x42 into x4
+// 3. Loads Send cap handle (slot 3) into x5
+// 4. Sets x6 = u64::MAX (no user cap), x7 = 0 (no reply info)
+// 5. Executes SVC #1 (Send)
+// 6. Executes BRK #0x43 (signals child completed)
+//
+// Expected IPC data words: 0xAA, 0xBB, 0xCC, 0xDD.
+// Badge 0x99 is injected by the kernel from the cap entry.
 
 #[cfg(target_os = "none")]
 const CHILD_BINARY: &[u8] = &{
-    let mut buf = [0u8; 8];
+    let mut buf = [0u8; 40];
 
-    // mov x0, #0xC1         → 0xD2801820
-    buf[0] = 0x20;
-    buf[1] = 0x18;
+    // movz x0, #0xAA        → 0xD2801540
+    buf[0] = 0x40;
+    buf[1] = 0x15;
     buf[2] = 0x80;
     buf[3] = 0xD2;
 
+    // movz x1, #0xBB        → 0xD2801761
+    buf[4] = 0x61;
+    buf[5] = 0x17;
+    buf[6] = 0x80;
+    buf[7] = 0xD2;
+
+    // movz x2, #0xCC        → 0xD2801982
+    buf[8] = 0x82;
+    buf[9] = 0x19;
+    buf[10] = 0x80;
+    buf[11] = 0xD2;
+
+    // movz x3, #0xDD        → 0xD2801BA3
+    buf[12] = 0xA3;
+    buf[13] = 0x1B;
+    buf[14] = 0x80;
+    buf[15] = 0xD2;
+
+    // movz x4, #0x42        → 0xD2800844
+    buf[16] = 0x44;
+    buf[17] = 0x08;
+    buf[18] = 0x80;
+    buf[19] = 0xD2;
+
+    // movz x5, #3           → 0xD2800065
+    buf[20] = 0x65;
+    buf[21] = 0x00;
+    buf[22] = 0x80;
+    buf[23] = 0xD2;
+
+    // movn x6, #0           → 0x92800006  (x6 = ~0 = u64::MAX = CAP_ABSENT)
+    buf[24] = 0x06;
+    buf[25] = 0x00;
+    buf[26] = 0x80;
+    buf[27] = 0x92;
+
+    // movz x7, #0           → 0xD2800007
+    buf[28] = 0x07;
+    buf[29] = 0x00;
+    buf[30] = 0x80;
+    buf[31] = 0xD2;
+
+    // svc #1                → 0xD4000021
+    buf[32] = 0x21;
+    buf[33] = 0x00;
+    buf[34] = 0x00;
+    buf[35] = 0xD4;
+
     // brk #0x43             → 0xD4200860
-    buf[4] = 0x60;
-    buf[5] = 0x08;
-    buf[6] = 0x20;
-    buf[7] = 0xD4;
+    buf[36] = 0x60;
+    buf[37] = 0x08;
+    buf[38] = 0x20;
+    buf[39] = 0xD4;
 
     buf
 };
@@ -447,12 +493,13 @@ const CHILD_BINARY: &[u8] = &{
 /// Create and enqueue a child Observer for Phase 2 integration tests.
 ///
 /// Allocates a code page (with CHILD_BINARY), stack page, L1 table,
-/// RegisterState, and cap table. Maps user pages via install_user_l3.
-/// The child Observer starts in Runnable state in the scheduler queue.
+/// RegisterState, and cap table with a Send cap to the IPC Field.
+/// Maps user pages via install_user_l3. The child Observer starts in
+/// Runnable state in the scheduler queue.
 #[cfg(target_os = "none")]
 fn create_child_observer(
     ks: &KernelState,
-    _handler_field_id: crate::arena::ObjectId,
+    ipc_field_id: crate::arena::ObjectId,
 ) -> Result<NonNull<Observer>, AllocError> {
     let child_code_pa = alloc_zeroed_pages(ks, 1)?;
 
@@ -557,6 +604,20 @@ fn create_child_observer(
 
     drop(observers);
 
+    // Phase 2.2: set up child's cap table with Send cap to IPC Field.
+    let child_cap_entries = setup_child_cap_table(ks, child_id, ipc_field_id)?;
+
+    // SAFETY: child_ptr was just created above and is exclusively ours.
+    // Single-threaded boot context. No concurrent access.
+    unsafe {
+        let child = &mut *child_ptr.as_ptr();
+
+        child.cap_table = child_cap_entries;
+        child.cap_table_capacity = CHILD_CAP_TABLE_CAPACITY;
+        child.cap_table_free_head = Some(capability::SLOT_USER_START + 1);
+        child.cap_table_count = 2;
+    }
+
     enqueue_observer(child_ptr);
 
     crate::println!(
@@ -641,6 +702,110 @@ fn setup_root_cap_table(
             object: Some((ObjectType::Space, root_space_id)),
             rights: Rights::SPACE_ALL,
             badge: Badge(0),
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        },
+    );
+
+    Ok(entries)
+}
+
+// ── IPC Field setup (Phase 2.2) ─────────────────────────────────
+
+/// IPC test badge value. The child's Send cap carries this badge;
+/// the kernel injects it into the message on Send. The root's IPC
+/// verify handler checks it after Receive.
+#[cfg(target_os = "none")]
+const IPC_TEST_BADGE: u64 = 0x99;
+
+/// Queue capacity for the boot IPC Field.
+#[cfg(target_os = "none")]
+const IPC_FIELD_QUEUE_CAPACITY: u32 = 4;
+
+/// Cap table capacity for the child Observer.
+#[cfg(target_os = "none")]
+const CHILD_CAP_TABLE_CAPACITY: u32 = 8;
+
+/// Create a Field in the arena for Phase 2.2 IPC testing.
+///
+/// Allocates queue backing and returns the Field's ObjectId.
+#[cfg(target_os = "none")]
+fn create_ipc_field(ks: &KernelState) -> Result<crate::arena::ObjectId, AllocError> {
+    let queue = crate::frame::fields::allocate_field_queue(IPC_FIELD_QUEUE_CAPACITY)
+        .ok_or(AllocError::OutOfMemory)?;
+    let mut fields = ks.fields.acquire();
+    let (field_id, field) = fields.allocate()?;
+
+    field.queue = queue;
+    field.queue_capacity = IPC_FIELD_QUEUE_CAPACITY;
+    field.queue_length = 0;
+    field.queue_head = 0;
+    field.waiters_head = None;
+    field.waiters_tail = None;
+    field.routing_table = None;
+    field.pending_head = None;
+    field.pending_kernel_message = None;
+    field.badge_tracking = false;
+    field.back_pointer_head = None;
+    field.backing_va_base = 0;
+    field.backing_size = 0;
+    field.refcount = 2;
+    field.generation = AtomicU64::new(0);
+
+    Ok(field_id)
+}
+
+/// Set up the child Observer's cap table with a Send cap to the IPC Field.
+///
+/// Slot 0 (fault handler): empty. Slot 1 (reply field): empty.
+/// Slot 2 (self): child self-cap. Slot 3 (user start): Send cap to Field
+/// with badge IPC_TEST_BADGE.
+#[cfg(target_os = "none")]
+fn setup_child_cap_table(
+    ks: &KernelState,
+    child_id: crate::arena::ObjectId,
+    field_id: crate::arena::ObjectId,
+) -> Result<NonNull<capability::Entry>, AllocError> {
+    let cap_page_pa = alloc_zeroed_pages(ks, 1)?;
+    let entries = NonNull::new(mmu::phys_to_virt(cap_page_pa) as *mut capability::Entry)
+        .expect("cap_page_pa must be non-null");
+    let first_free = capability::SLOT_USER_START + 1;
+
+    crate::frame::capabilities::init_freelist(entries, CHILD_CAP_TABLE_CAPACITY, first_free);
+    crate::frame::capabilities::write_entry(
+        entries,
+        CHILD_CAP_TABLE_CAPACITY,
+        capability::SLOT_FAULT_HANDLER,
+        capability::Entry::empty(SlotTag(0)),
+    );
+    crate::frame::capabilities::write_entry(
+        entries,
+        CHILD_CAP_TABLE_CAPACITY,
+        capability::SLOT_REPLY_FIELD,
+        capability::Entry::empty(SlotTag(0)),
+    );
+    crate::frame::capabilities::write_entry(
+        entries,
+        CHILD_CAP_TABLE_CAPACITY,
+        capability::SLOT_SELF,
+        capability::Entry {
+            object: Some((capability::ObjectType::Observer, child_id)),
+            rights: capability::Rights::OBSERVER_ALL,
+            badge: Badge(0),
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        },
+    );
+    crate::frame::capabilities::write_entry(
+        entries,
+        CHILD_CAP_TABLE_CAPACITY,
+        capability::SLOT_USER_START,
+        capability::Entry {
+            object: Some((capability::ObjectType::Field, field_id)),
+            rights: capability::Rights::SEND,
+            badge: Badge(IPC_TEST_BADGE),
             slot_tag: SlotTag(0),
             send_once: false,
             stored_generation: 0,
@@ -740,6 +905,29 @@ pub fn enter_first_observer(ks: &KernelState) -> ! {
     let cap_entries =
         setup_root_cap_table(ks, obs_id, root_space_id).expect("setup root cap table");
 
+    // ── Phase 2.2: IPC Field for integration tests ────────────────
+    //
+    // Create a Field for IPC testing. Install a Receive cap in root's
+    // table (slot 4) and a Send cap in child's table (slot 3).
+    let ipc_field_id = create_ipc_field(ks).expect("create IPC field");
+
+    // Install Receive cap at slot 4 (first free slot after root Space at slot 3).
+    let ipc_receive_slot = capability::SLOT_USER_START + 1;
+
+    crate::frame::capabilities::write_entry(
+        cap_entries,
+        ROOT_CAP_TABLE_CAPACITY,
+        ipc_receive_slot,
+        capability::Entry {
+            object: Some((capability::ObjectType::Field, ipc_field_id)),
+            rights: capability::Rights::RECEIVE,
+            badge: Badge(0),
+            slot_tag: SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        },
+    );
+
     // SAFETY: obs_ptr was just created above and is exclusively ours.
     // Single-threaded BSP boot — no concurrent access. The &mut is
     // safe because no other references to this Observer exist.
@@ -748,13 +936,14 @@ pub fn enter_first_observer(ks: &KernelState) -> ! {
 
         obs.cap_table = cap_entries;
         obs.cap_table_capacity = ROOT_CAP_TABLE_CAPACITY;
-        obs.cap_table_free_head = Some(capability::SLOT_USER_START + 1);
-        obs.cap_table_count = 2;
+        // Freelist starts at slot 5 (slots 3 and 4 are occupied).
+        obs.cap_table_free_head = Some(capability::SLOT_USER_START + 2);
+        obs.cap_table_count = 3;
         obs.clock_access = true;
     }
 
     crate::println!(
-        "boot: cap_table capacity={} installed=2 (self + root space)",
+        "boot: cap_table capacity={} installed=3 (self + root space + ipc field)",
         ROOT_CAP_TABLE_CAPACITY,
     );
 
@@ -764,14 +953,13 @@ pub fn enter_first_observer(ks: &KernelState) -> ! {
     // ── Phase 2: child Observer for integration tests ────────────
     //
     // Create a second Observer with its own address space, code, and
-    // stack. The child's CHILD_BINARY yields and signals BRK #0x43.
-    // The scheduler context-switches between root and child, proving
-    // the TTBR0 swap, register save/restore, and ASID tagging work.
+    // stack. The child's CHILD_BINARY sends an IPC message then BRK
+    // #0x43. Root's FALLBACK_BINARY does Receive then BRK #0x44
+    // (IPC verify). Proves IPC roundtrip with full message fidelity.
     //
     // Must be called AFTER init_bsp_per_core_data and set_current_observer
     // so that enqueue_observer operates on the initialized BSP_CORE_STATE.
-    let _child_ptr =
-        create_child_observer(ks, crate::arena::ObjectId(0)).expect("create child observer");
+    let _child_ptr = create_child_observer(ks, ipc_field_id).expect("create child observer");
 
     crate::println!("boot: entering EL0 at {:#x}", USER_CODE_VA);
 

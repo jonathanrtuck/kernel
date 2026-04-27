@@ -1,6 +1,6 @@
 {
   "blockers": [],
-  "completed_items": 19,
+  "completed_items": 20,
   "current_phase": 2,
   "items": {
     "0.1": {
@@ -100,13 +100,13 @@
     },
     "2.1": {
       "name": "Two-Observer boot",
-      "note": "",
-      "status": "in_progress"
+      "note": "CHILD_BINARY at VA 0x200_4000; schedule_next now tracks current",
+      "status": "done"
     },
     "2.2": {
       "name": "IPC roundtrip",
-      "note": "",
-      "status": "pending"
+      "note": "Field created at boot; child Send cap (badge 0x99) + root Receive cap; BRK #0x44 verifies x0-x5",
+      "status": "done"
     },
     "2.3": {
       "name": "Fault handling",
