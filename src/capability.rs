@@ -188,18 +188,18 @@ impl Handle {
     /// x5 for typed ops). Index in low bits for cheap extraction: a
     /// single AND masks the low 32.
     pub const fn encode(self) -> u64 {
-        (self.index as u64) | ((self.slot_tag.0 as u64) << 32)
+        (self.index as u64) | ((self.slot_tag.0 & 0xFFFF_FFFF) << 32)
     }
 
     /// Decode a u64 ABI value into a Handle (D77).
     ///
-    /// Lower 32 bits = index, upper 32 bits = slot_tag.
-    /// Infallible — any u64 produces a valid Handle. Invalid handles
-    /// are caught during resolution (bounds check, tag check).
+    /// Lower 32 bits = index, upper 32 bits = slot_tag (lower 32 of u64).
+    /// The handle carries a truncated tag; resolution compares against the
+    /// entry's full u64 tag using only the lower 32 bits.
     pub const fn decode(raw: u64) -> Handle {
         Handle {
             index: raw as u32,
-            slot_tag: SlotTag((raw >> 32) as u32),
+            slot_tag: SlotTag((raw >> 32) & 0xFFFF_FFFF),
         }
     }
 }
@@ -212,7 +212,16 @@ impl Handle {
 /// table slots. ABA defense, not revocation (D67 generation is
 /// revocation).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SlotTag(pub u32);
+pub struct SlotTag(pub u64);
+
+impl SlotTag {
+    /// Compare against a handle-decoded tag using only the lower 32 bits.
+    /// The Handle ABI (u64 register) carries index(32) + tag(32), so
+    /// only 32 bits of the u64 tag survive the encode/decode round-trip.
+    pub const fn abi_matches(self, other: SlotTag) -> bool {
+        (self.0 as u32) == (other.0 as u32)
+    }
+}
 
 // ── Entry (D8, D11, D17, D51, D67) ─────────────────────────────────
 
@@ -651,7 +660,7 @@ pub fn resolve_cap_entry(
     if !entry.is_occupied() {
         return Err(CapError::InvalidHandle);
     }
-    if entry.slot_tag != handle.slot_tag {
+    if !entry.slot_tag.abi_matches(handle.slot_tag) {
         return Err(CapError::SlotTagMismatch);
     }
 
@@ -669,7 +678,7 @@ impl Table {
         if !entry.is_occupied() {
             return Err(CapError::InvalidHandle);
         }
-        if entry.slot_tag != handle.slot_tag {
+        if !entry.slot_tag.abi_matches(handle.slot_tag) {
             return Err(CapError::SlotTagMismatch);
         }
 
@@ -1125,7 +1134,7 @@ mod tests {
     }
 
     /// Build an occupied Entry for a Field with the given badge.
-    fn field_entry(badge_value: u64, slot_tag: u32) -> Entry {
+    fn field_entry(badge_value: u64, slot_tag: u64) -> Entry {
         Entry {
             object: Some((ObjectType::Field, ObjectId(0))),
             rights: Rights::FIELD_ALL,
@@ -1137,7 +1146,7 @@ mod tests {
     }
 
     /// Build an occupied Entry for an Observer.
-    fn observer_entry(object_id: u32, slot_tag: u32) -> Entry {
+    fn observer_entry(object_id: u32, slot_tag: u64) -> Entry {
         Entry {
             object: Some((ObjectType::Observer, ObjectId(object_id))),
             rights: Rights::OBSERVER_ALL,
@@ -2179,7 +2188,7 @@ mod tests {
         let table = test_table(16);
         let handle = Handle {
             index: 0,
-            slot_tag: SlotTag(u32::MAX),
+            slot_tag: SlotTag(u32::MAX as u64),
         };
         let result = table.resolve(handle);
 
@@ -2199,7 +2208,7 @@ mod tests {
         let table = test_table(16);
         let handle = Handle {
             index: u32::MAX,
-            slot_tag: SlotTag(u32::MAX),
+            slot_tag: SlotTag(u32::MAX as u64),
         };
         let result = table.resolve(handle);
 
@@ -2329,12 +2338,12 @@ mod tests {
         assert_eq!(entry.stored_generation, 0);
     }
 
-    /// Entry::empty with SlotTag(u32::MAX).
+    /// Entry::empty with SlotTag(u32::MAX as u64).
     #[test]
     fn test_adversarial_cap_empty_entry_max_tag() {
-        let entry = Entry::empty(SlotTag(u32::MAX));
+        let entry = Entry::empty(SlotTag(u32::MAX as u64));
 
-        assert_eq!(entry.slot_tag.0, u32::MAX);
+        assert_eq!(entry.slot_tag.0, u32::MAX as u64);
         assert!(!entry.is_occupied());
     }
 
@@ -2441,7 +2450,7 @@ mod tests {
         let handle = Handle::decode(raw);
 
         assert_eq!(handle.index, u32::MAX);
-        assert_eq!(handle.slot_tag, SlotTag(u32::MAX));
+        assert_eq!(handle.slot_tag, SlotTag(u32::MAX as u64));
     }
 
     /// D77: decode with zero produces index=0, slot_tag=0.
@@ -2862,7 +2871,7 @@ mod tests {
         let handle = Handle::decode(u64::MAX);
 
         assert_eq!(handle.index, u32::MAX);
-        assert_eq!(handle.slot_tag, SlotTag(u32::MAX));
+        assert_eq!(handle.slot_tag, SlotTag(u32::MAX as u64));
     }
 
     /// D77: resolve_cap with u64::MAX raw handle on a small table
@@ -2970,12 +2979,12 @@ mod tests {
     fn handle_encode_max_tag() {
         let h = Handle {
             index: 0,
-            slot_tag: SlotTag(u32::MAX),
+            slot_tag: SlotTag(u32::MAX as u64),
         };
         let decoded = Handle::decode(h.encode());
 
         assert_eq!(decoded.index, 0);
-        assert_eq!(decoded.slot_tag, SlotTag(u32::MAX));
+        assert_eq!(decoded.slot_tag, SlotTag(u32::MAX as u64));
     }
 
     #[test]
@@ -2983,7 +2992,7 @@ mod tests {
         let h = Handle::decode(u64::MAX);
 
         assert_eq!(h.index, u32::MAX);
-        assert_eq!(h.slot_tag, SlotTag(u32::MAX));
+        assert_eq!(h.slot_tag, SlotTag(u32::MAX as u64));
     }
 
     // ── Rights ───────────────────────────────────────────────────────
