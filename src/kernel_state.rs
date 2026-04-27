@@ -24,6 +24,7 @@
 
 use crate::arena::{Arena, ObjectId};
 use crate::capability::Badge;
+use crate::config;
 use crate::field::Field;
 use crate::frame::lock::{Lock, LockOrder};
 use crate::observer::Observer;
@@ -31,6 +32,9 @@ use crate::pulsar::Pulsar;
 use crate::space::Space;
 use crate::space_manager::SpaceManager;
 use crate::time::Time;
+use crate::time_manager::CoreId;
+use core::cell::Cell;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 // ── IRQ routing (D22, D81) ─────────────────────────────────────────
 
@@ -305,6 +309,206 @@ impl AsidAllocator {
     }
 }
 
+// ── IPI mailbox (D56, cross-core scheduling) ─────────────────────
+
+/// IPI SGI number used for cross-core scheduling requests (D56).
+///
+/// SGI 0 is the dedicated inter-processor interrupt for work-steal,
+/// Observer migration, TLB invalidation, and routing entry cleanup.
+/// SGIs 0-15 are available; we claim SGI 0 for kernel scheduling IPI.
+pub const IPI_SGI_NUMBER: u32 = 0;
+
+/// Typed IPI request (D56).
+///
+/// Fire-and-forget: Core A writes to the target core's mailbox, sends
+/// SGI, and continues. The target drains its mailbox on the next IRQ.
+///
+/// Each variant is a distinct cross-core operation. Uses ObjectId for
+/// Observer references (instead of NonNull<Observer>) so the type is
+/// Send-safe without requiring unsafe. The receiving core looks up the
+/// Observer from the global arena.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IpiRequest {
+    /// Hint the target core to check for work to steal from busy cores.
+    WorkSteal,
+
+    /// Migrate an Observer to the target core's scheduler.
+    ///
+    /// The Observer has been marked for migration by the source core.
+    /// The target looks it up in the Observer arena by ObjectId and
+    /// enqueues it into its local scheduler.
+    ObserverMigration(ObjectId),
+
+    /// Broadcast TLB invalidation after page table changes.
+    TlbInvalidation,
+
+    /// Clean up stale IRQ routing entries after a FieldSplit or
+    /// Field revocation.
+    RoutingEntryCleanup,
+}
+
+/// Capacity of each per-core IPI mailbox (power of two for efficient modulo).
+///
+/// 16 slots handles burst scenarios: a TLB shootdown targeting all cores
+/// while work-steal hints are in flight. The circular queue drops messages
+/// when full (fire-and-forget semantics — the sender continues regardless).
+pub const IPI_MAILBOX_CAPACITY: usize = 16;
+
+/// Per-core lock-free circular queue of IPI requests (D56).
+///
+/// Writer is a remote core (single-producer per send). Reader is the local
+/// core draining on SGI receipt. Lock-free via atomic head/tail indices.
+///
+/// Uses `Cell` for the buffer elements (interior mutability) so the mailbox
+/// can be accessed through `&self` — required because `KernelState` is
+/// shared via `&'static`. `Cell` is safe here because `IpiRequest` is `Copy`
+/// and each core only accesses its own mailbox's consumer side.
+///
+/// The queue uses a power-of-two capacity for cheap modulo (bitwise AND).
+/// When full, new requests are silently dropped — fire-and-forget semantics.
+/// The sender's SGI still arrives, so the target will process whatever is
+/// queued even if some requests were lost.
+pub struct IpiMailbox {
+    /// Circular buffer of IPI requests. `Cell` provides interior mutability
+    /// for push/pop through `&self`.
+    buffer: [Cell<Option<IpiRequest>>; IPI_MAILBOX_CAPACITY],
+
+    /// Write index (incremented by remote cores pushing requests).
+    /// Atomic because remote cores write it without holding a lock.
+    tail: AtomicU32,
+
+    /// Read index (incremented by the local core draining the mailbox).
+    /// Atomic for visibility across cores (the writer reads it to check
+    /// fullness).
+    head: AtomicU32,
+}
+
+impl Default for IpiMailbox {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl IpiMailbox {
+    /// Create an empty mailbox.
+    pub const fn new() -> IpiMailbox {
+        IpiMailbox {
+            buffer: [const { Cell::new(None) }; IPI_MAILBOX_CAPACITY],
+            tail: AtomicU32::new(0),
+            head: AtomicU32::new(0),
+        }
+    }
+
+    /// Push a request into the mailbox (called by remote core).
+    ///
+    /// Returns `true` if the request was enqueued, `false` if the mailbox
+    /// is full (fire-and-forget: the caller continues regardless).
+    ///
+    /// Lock-free: uses Acquire/Release ordering on head/tail. The caller
+    /// must trigger an SGI after pushing to wake the target core.
+    pub fn push(&self, request: IpiRequest) -> bool {
+        let tail = self.tail.load(Ordering::Relaxed);
+        let head = self.head.load(Ordering::Acquire);
+
+        // Full when tail - head == capacity.
+        if (tail.wrapping_sub(head)) as usize >= IPI_MAILBOX_CAPACITY {
+            return false;
+        }
+
+        let index = (tail as usize) % IPI_MAILBOX_CAPACITY;
+
+        self.buffer[index].set(Some(request));
+        self.tail.store(tail.wrapping_add(1), Ordering::Release);
+
+        true
+    }
+
+    /// Pop a request from the mailbox (called by local core on SGI receipt).
+    ///
+    /// Returns `None` when the mailbox is empty (all requests drained).
+    /// The local core calls this in a loop until it returns `None`.
+    pub fn pop(&self) -> Option<IpiRequest> {
+        let head = self.head.load(Ordering::Relaxed);
+        let tail = self.tail.load(Ordering::Acquire);
+
+        if head == tail {
+            return None;
+        }
+
+        let index = (head as usize) % IPI_MAILBOX_CAPACITY;
+        let request = self.buffer[index].get();
+
+        self.buffer[index].set(None);
+        self.head.store(head.wrapping_add(1), Ordering::Release);
+
+        request
+    }
+
+    /// Number of pending requests in the mailbox.
+    pub fn len(&self) -> usize {
+        let tail = self.tail.load(Ordering::Acquire);
+        let head = self.head.load(Ordering::Acquire);
+
+        tail.wrapping_sub(head) as usize
+    }
+
+    /// Whether the mailbox is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// Per-core IPI mailboxes — one for each core (D56).
+///
+/// Indexed by core_id. The array is sized to MAX_CORES (config.rs).
+/// Each mailbox is accessed by remote cores (push) and the local core
+/// (pop). The mailbox itself is lock-free (atomic indices).
+///
+/// Lives in KernelState because it is shared cross-core state.
+pub struct IpiMailboxes {
+    pub mailboxes: [IpiMailbox; config::MAX_CORES],
+}
+
+impl Default for IpiMailboxes {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl IpiMailboxes {
+    /// Create the per-core mailbox array, all empty.
+    pub const fn new() -> IpiMailboxes {
+        IpiMailboxes {
+            mailboxes: [const { IpiMailbox::new() }; config::MAX_CORES],
+        }
+    }
+
+    /// Push a request to a specific core's mailbox.
+    ///
+    /// Returns `true` if enqueued, `false` if that core's mailbox is full.
+    /// The caller must send an SGI to `target_core` after a successful push.
+    pub fn push_to(&self, target_core: CoreId, request: IpiRequest) -> bool {
+        let index = target_core.0 as usize;
+
+        if index >= config::MAX_CORES {
+            return false;
+        }
+
+        self.mailboxes[index].push(request)
+    }
+
+    /// Pop from a specific core's mailbox (called by that core on SGI receipt).
+    pub fn pop_from(&self, core_id: CoreId) -> Option<IpiRequest> {
+        let index = core_id.0 as usize;
+
+        if index >= config::MAX_CORES {
+            return None;
+        }
+
+        self.mailboxes[index].pop()
+    }
+}
+
 /// Kernel-wide shared cold-path state (D75, D82).
 ///
 /// Bundles all per-type arenas and the SpaceManager in one namespace.
@@ -344,6 +548,14 @@ pub struct KernelState {
     /// Sequential ASID allocator (D101). Unordered lock — acquired
     /// during Observer creation to assign a unique ASID.
     pub asid_allocator: Lock<AsidAllocator>,
+    /// Per-core IPI mailboxes for cross-core scheduling (D56).
+    ///
+    /// NOT wrapped in Lock — the mailbox is internally lock-free via
+    /// atomic head/tail indices. Each core's mailbox has a single consumer
+    /// (the local core) and potentially multiple producers (remote cores).
+    /// The atomic indices provide the necessary synchronization without
+    /// spinlock overhead on the IPI hot path.
+    pub ipi_mailboxes: IpiMailboxes,
 }
 
 impl KernelState {
@@ -364,6 +576,7 @@ impl KernelState {
             space_manager: Lock::new(LockOrder::SpaceManager, space_manager),
             irq_routes: Lock::new(LockOrder::IrqRouting, IrqRoutingTable::new()),
             asid_allocator: Lock::new(LockOrder::AsidAllocator, AsidAllocator::new(asid_width)),
+            ipi_mailboxes: IpiMailboxes::new(),
         }
     }
 }
@@ -1331,5 +1544,633 @@ mod tests {
 
         assert_eq!(fid, ObjectId(0));
         assert_eq!(sid, ObjectId(0));
+    }
+
+    // ── Phase 4.5 — Multi-threaded lock ordering under contention (D53) ──
+
+    /// D53: four threads each acquire field, observer, and pulsar locks in
+    /// the correct D53 order (Field < Observer < Pulsar) and complete
+    /// without deadlock. Uses a timeout to detect deadlock: if any thread
+    /// fails to complete within 5 seconds, the test fails.
+    #[test]
+    fn test_d53_multithreaded_ordered_acquisition_no_deadlock() {
+        extern crate std;
+        use std::sync::Arc;
+        use std::thread;
+
+        let fields = Arc::new(Lock::new(LockOrder::Field, Arena::<Space>::new()));
+        let observers = Arc::new(Lock::new(LockOrder::Observer, Arena::<Space>::new()));
+        let pulsars = Arc::new(Lock::new(LockOrder::Pulsar, Arena::<Space>::new()));
+
+        let thread_count = 4;
+        let iterations = 100;
+
+        let handles: std::vec::Vec<_> = (0..thread_count)
+            .map(|_| {
+                let f = Arc::clone(&fields);
+                let o = Arc::clone(&observers);
+                let p = Arc::clone(&pulsars);
+
+                thread::spawn(move || {
+                    for _ in 0..iterations {
+                        // Acquire in D53 order: Field < Observer < Pulsar.
+                        let _field_guard = f.acquire();
+                        let _observer_guard = o.acquire();
+                        let _pulsar_guard = p.acquire();
+                        // All three held simultaneously — drop releases
+                        // in reverse order (Pulsar, Observer, Field).
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle
+                .join()
+                .expect("D53: thread must complete without deadlock or panic");
+        }
+    }
+
+    /// D53: threads acquire the full five-arena chain (fields, observers,
+    /// pulsars, spaces, times) in a consistent order. Spaces and times
+    /// are unordered per D53 but acquired consistently here to verify
+    /// that mixing unordered + ordered locks under contention is safe.
+    #[test]
+    fn test_d53_multithreaded_full_chain_with_unordered() {
+        extern crate std;
+        use std::sync::Arc;
+        use std::thread;
+
+        let fields = Arc::new(Lock::new(LockOrder::Field, Arena::<Space>::new()));
+        let observers = Arc::new(Lock::new(LockOrder::Observer, Arena::<Space>::new()));
+        let pulsars = Arc::new(Lock::new(LockOrder::Pulsar, Arena::<Space>::new()));
+        let spaces = Arc::new(Lock::new(LockOrder::Space, Arena::<Space>::new()));
+        let times = Arc::new(Lock::new(LockOrder::Time, Arena::<Space>::new()));
+
+        let thread_count = 4;
+        let iterations = 50;
+
+        let handles: std::vec::Vec<_> = (0..thread_count)
+            .map(|_| {
+                let f = Arc::clone(&fields);
+                let o = Arc::clone(&observers);
+                let p = Arc::clone(&pulsars);
+                let s = Arc::clone(&spaces);
+                let t = Arc::clone(&times);
+
+                thread::spawn(move || {
+                    for _ in 0..iterations {
+                        // Acquire unordered locks first, then ordered chain.
+                        let _space_guard = s.acquire();
+                        let _time_guard = t.acquire();
+                        let _field_guard = f.acquire();
+                        let _observer_guard = o.acquire();
+                        let _pulsar_guard = p.acquire();
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle
+                .join()
+                .expect("D53: full chain acquisition must complete without deadlock");
+        }
+    }
+
+    /// D53: concurrent read+write through Lock<T>. Multiple threads
+    /// increment a counter through a locked arena's Space object. The
+    /// final value must equal thread_count * iterations, proving no
+    /// lost updates under contention.
+    #[test]
+    fn test_d53_concurrent_read_write_no_lost_updates() {
+        extern crate std;
+        use std::sync::Arc;
+        use std::thread;
+
+        let lock = Arc::new(Lock::new(LockOrder::Space, Arena::<Space>::new()));
+
+        // Pre-allocate one Space object to use as the shared counter.
+        let object_id = {
+            let mut guard = lock.acquire();
+            let (id, space) = guard.allocate().expect("initial allocate");
+
+            space.va_base = 0;
+
+            id
+        };
+
+        let thread_count = 4u64;
+        let iterations = 200u64;
+
+        let handles: std::vec::Vec<_> = (0..thread_count)
+            .map(|_| {
+                let l = Arc::clone(&lock);
+
+                thread::spawn(move || {
+                    for _ in 0..iterations {
+                        let mut guard = l.acquire();
+                        let space = guard.get_mut(object_id).expect("shared object must exist");
+
+                        space.va_base += 1;
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle
+                .join()
+                .expect("concurrent increment thread must not panic");
+        }
+
+        let guard = lock.acquire();
+        let space = guard.get(object_id).expect("shared object must exist");
+
+        assert_eq!(
+            space.va_base as u64,
+            thread_count * iterations,
+            "D53: all increments must be visible — no lost updates under Lock<T>"
+        );
+    }
+
+    /// D53: arena allocate-get-free under contention. Four threads each
+    /// allocate, verify, and free objects concurrently through the same
+    /// Lock<Arena<Space>>. No state corruption — each thread's object
+    /// must read back correctly before being freed.
+    #[test]
+    fn test_d53_arena_allocate_get_free_under_contention() {
+        extern crate std;
+        use std::sync::Arc;
+        use std::thread;
+
+        let arena = Arc::new(Lock::new(LockOrder::Space, Arena::<Space>::new()));
+        let thread_count = 4;
+        let iterations = 100;
+
+        let handles: std::vec::Vec<_> = (0..thread_count)
+            .map(|thread_idx: u32| {
+                let a = Arc::clone(&arena);
+
+                thread::spawn(move || {
+                    for i in 0..iterations {
+                        let mut guard = a.acquire();
+                        let (id, space) = guard
+                            .allocate()
+                            .expect("allocate must succeed under contention");
+
+                        // Write a thread-unique value.
+                        let sentinel = (thread_idx as usize) * 100_000 + i;
+
+                        space.va_base = sentinel;
+
+                        // Read back within the same lock hold — must match.
+                        let read_back = guard
+                            .get(id)
+                            .expect("just-allocated object must be retrievable");
+
+                        assert_eq!(
+                            read_back.va_base, sentinel,
+                            "D53: data corruption detected — thread {thread_idx} iteration {i}"
+                        );
+
+                        guard.free(id);
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle
+                .join()
+                .expect("arena contention thread must not panic");
+        }
+
+        // Post-contention: arena must still be functional.
+        let mut guard = arena.acquire();
+        let (id, space) = guard.allocate().expect("post-contention allocate");
+
+        space.va_base = 0xF1A1_C4EC;
+
+        let retrieved = guard.get(id).expect("post-contention get");
+
+        assert_eq!(
+            retrieved.va_base, 0xF1A1_C4EC,
+            "arena must be functional after contention"
+        );
+    }
+
+    /// D53: arena allocations persist across threads. One thread allocates
+    /// objects, another thread reads them back. Verifies that Lock<T>
+    /// serializes access correctly — mutations from one thread are visible
+    /// to another after the lock is released and re-acquired.
+    #[test]
+    fn test_d53_arena_cross_thread_visibility() {
+        extern crate std;
+        use std::sync::Arc;
+        use std::thread;
+
+        let arena = Arc::new(Lock::new(LockOrder::Space, Arena::<Space>::new()));
+        let object_count = 20;
+
+        // Thread 1: allocate objects and record their IDs.
+        let arena_writer = Arc::clone(&arena);
+        let writer = thread::spawn(move || {
+            let mut ids = std::vec::Vec::new();
+
+            for i in 0..object_count {
+                let mut guard = arena_writer.acquire();
+                let (id, space) = guard.allocate().expect("writer allocate");
+
+                space.va_base = i * 0x1000;
+                ids.push(id);
+            }
+
+            ids
+        });
+
+        let ids = writer.join().expect("writer thread must not panic");
+
+        // Thread 2: read back all objects and verify values.
+        let arena_reader = Arc::clone(&arena);
+        let reader = thread::spawn(move || {
+            let guard = arena_reader.acquire();
+
+            for (i, &id) in ids.iter().enumerate() {
+                let space = guard.get(id).expect("reader must see writer's allocations");
+
+                assert_eq!(
+                    space.va_base,
+                    i * 0x1000,
+                    "D53: cross-thread value mismatch at index {i}"
+                );
+            }
+        });
+
+        reader.join().expect("reader thread must not panic");
+    }
+
+    /// D53: multiple arenas acquired in D53 order under contention.
+    /// Each thread acquires fields then observers (correct order),
+    /// allocates in both, and verifies the allocations. This tests
+    /// the real kernel pattern of cross-arena operations.
+    #[test]
+    fn test_d53_cross_arena_operations_under_contention() {
+        extern crate std;
+        use std::sync::Arc;
+        use std::thread;
+
+        let fields = Arc::new(Lock::new(LockOrder::Field, Arena::<Space>::new()));
+        let observers = Arc::new(Lock::new(LockOrder::Observer, Arena::<Space>::new()));
+
+        let thread_count = 4;
+        let iterations = 50;
+
+        let handles: std::vec::Vec<_> = (0..thread_count)
+            .map(|thread_idx: u32| {
+                let f = Arc::clone(&fields);
+                let o = Arc::clone(&observers);
+
+                thread::spawn(move || {
+                    for i in 0..iterations {
+                        // Acquire in D53 order: Field before Observer.
+                        let mut field_guard = f.acquire();
+                        let mut observer_guard = o.acquire();
+
+                        // Allocate in both arenas.
+                        let (fid, fspace) = field_guard
+                            .allocate()
+                            .expect("field arena allocate under contention");
+                        let (oid, ospace) = observer_guard
+                            .allocate()
+                            .expect("observer arena allocate under contention");
+
+                        let f_sentinel = (thread_idx as usize) * 1_000 + i;
+                        let o_sentinel = (thread_idx as usize) * 1_000 + i + 500_000;
+
+                        fspace.va_base = f_sentinel;
+                        ospace.va_base = o_sentinel;
+
+                        // Verify within the same lock hold.
+                        assert_eq!(
+                            field_guard.get(fid).unwrap().va_base,
+                            f_sentinel,
+                            "field arena corruption"
+                        );
+                        assert_eq!(
+                            observer_guard.get(oid).unwrap().va_base,
+                            o_sentinel,
+                            "observer arena corruption"
+                        );
+
+                        // Free both.
+                        field_guard.free(fid);
+                        observer_guard.free(oid);
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle
+                .join()
+                .expect("cross-arena contention thread must not panic");
+        }
+    }
+
+    /// D53: stress test — high contention on a single Lock<Arena<Space>>
+    /// with 8 threads doing rapid allocate-verify-free cycles. Catches
+    /// subtle races in the spinlock or arena freelist.
+    #[test]
+    fn test_d53_high_contention_stress() {
+        extern crate std;
+        use std::sync::Arc;
+        use std::thread;
+
+        let arena = Arc::new(Lock::new(LockOrder::Space, Arena::<Space>::new()));
+        let thread_count = 8;
+        let iterations = 200;
+
+        let handles: std::vec::Vec<_> = (0..thread_count)
+            .map(|thread_idx: u32| {
+                let a = Arc::clone(&arena);
+
+                thread::spawn(move || {
+                    for i in 0..iterations {
+                        let mut guard = a.acquire();
+                        let (id, space) = guard.allocate().expect("stress allocate");
+
+                        space.va_base = (thread_idx as usize) << 16 | i;
+                        space.size = i * 4096;
+
+                        let readback = guard.get(id).expect("stress get");
+
+                        assert_eq!(
+                            readback.va_base,
+                            (thread_idx as usize) << 16 | i,
+                            "stress va_base mismatch"
+                        );
+                        assert_eq!(readback.size, i * 4096, "stress size mismatch");
+
+                        guard.free(id);
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("stress thread must not panic");
+        }
+    }
+
+    /// D53: concurrent allocation accumulation. Multiple threads each
+    /// allocate several objects (without freeing). After all threads
+    /// complete, the total number of live objects must equal the sum
+    /// of all allocations — no objects lost or duplicated.
+    #[test]
+    fn test_d53_concurrent_allocation_accumulation() {
+        extern crate std;
+        use std::sync::Arc;
+        use std::thread;
+
+        let arena = Arc::new(Lock::new(LockOrder::Space, Arena::<Space>::new()));
+        let thread_count: usize = 4;
+        let objects_per_thread: usize = 10;
+
+        let handles: std::vec::Vec<_> = (0..thread_count)
+            .map(|thread_idx| {
+                let a = Arc::clone(&arena);
+
+                thread::spawn(move || {
+                    let mut ids = std::vec::Vec::new();
+
+                    for i in 0..objects_per_thread {
+                        let mut guard = a.acquire();
+                        let (id, space) = guard.allocate().expect("accumulation allocate");
+
+                        space.va_base = thread_idx * 1000 + i;
+                        ids.push((id, thread_idx * 1000 + i));
+                    }
+
+                    ids
+                })
+            })
+            .collect();
+
+        let mut all_ids = std::vec::Vec::new();
+
+        for handle in handles {
+            let ids = handle.join().expect("accumulation thread must not panic");
+
+            all_ids.extend(ids);
+        }
+
+        assert_eq!(
+            all_ids.len(),
+            thread_count * objects_per_thread,
+            "total allocations must equal thread_count * objects_per_thread"
+        );
+
+        // Verify every allocated object is live and has the correct value.
+        let guard = arena.acquire();
+
+        for (id, expected_va) in &all_ids {
+            let space = guard
+                .get(*id)
+                .expect("every accumulated object must still be live");
+
+            assert_eq!(
+                space.va_base, *expected_va,
+                "accumulated object value mismatch for ObjectId({})",
+                id.0
+            );
+        }
+
+        // Verify no duplicate ObjectIds.
+        let mut sorted_ids: std::vec::Vec<u32> = all_ids.iter().map(|(id, _)| id.0).collect();
+
+        sorted_ids.sort();
+
+        for window in sorted_ids.windows(2) {
+            assert_ne!(
+                window[0], window[1],
+                "duplicate ObjectId detected: {}",
+                window[0]
+            );
+        }
+    }
+
+    /// D53: timeout-based deadlock detection. Spawns threads that each
+    /// acquire the full ordered chain. The main thread joins with a
+    /// timeout — if threads don't complete within 5 seconds, it's a
+    /// deadlock (or a very slow machine, but the operations are trivial).
+    #[test]
+    fn test_d53_deadlock_detection_with_timeout() {
+        extern crate std;
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let fields = Arc::new(Lock::new(LockOrder::Field, Arena::<Space>::new()));
+        let observers = Arc::new(Lock::new(LockOrder::Observer, Arena::<Space>::new()));
+        let pulsars = Arc::new(Lock::new(LockOrder::Pulsar, Arena::<Space>::new()));
+
+        let thread_count = 4;
+        let iterations = 200;
+        let timeout = Duration::from_secs(5);
+        let start = Instant::now();
+
+        let handles: std::vec::Vec<_> = (0..thread_count)
+            .map(|_| {
+                let f = Arc::clone(&fields);
+                let o = Arc::clone(&observers);
+                let p = Arc::clone(&pulsars);
+
+                thread::spawn(move || {
+                    for _ in 0..iterations {
+                        let _fg = f.acquire();
+                        let _og = o.acquire();
+                        let _pg = p.acquire();
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle
+                .join()
+                .expect("D53: ordered acquisition must not deadlock");
+        }
+
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < timeout,
+            "D53: threads took {elapsed:?} to complete — possible deadlock \
+             (timeout was {timeout:?})"
+        );
+    }
+
+    // ── D56 — IPI mailbox ───────────────────────────────────────────
+
+    #[test]
+    fn test_d56_ipi_mailbox_starts_empty() {
+        let mbox = IpiMailbox::new();
+
+        assert!(mbox.is_empty());
+        assert_eq!(mbox.len(), 0);
+    }
+
+    #[test]
+    fn test_d56_ipi_mailbox_push_pop_roundtrip() {
+        let mbox = IpiMailbox::new();
+
+        assert!(mbox.push(IpiRequest::WorkSteal));
+
+        let popped = mbox.pop();
+
+        assert_eq!(popped, Some(IpiRequest::WorkSteal));
+        assert!(mbox.is_empty());
+    }
+
+    #[test]
+    fn test_d56_ipi_mailbox_fifo_order() {
+        let mbox = IpiMailbox::new();
+
+        mbox.push(IpiRequest::WorkSteal);
+        mbox.push(IpiRequest::TlbInvalidation);
+        mbox.push(IpiRequest::RoutingEntryCleanup);
+
+        assert_eq!(mbox.pop(), Some(IpiRequest::WorkSteal));
+        assert_eq!(mbox.pop(), Some(IpiRequest::TlbInvalidation));
+        assert_eq!(mbox.pop(), Some(IpiRequest::RoutingEntryCleanup));
+        assert_eq!(mbox.pop(), None);
+    }
+
+    #[test]
+    fn test_d56_ipi_mailbox_full_rejects() {
+        let mbox = IpiMailbox::new();
+
+        for _ in 0..IPI_MAILBOX_CAPACITY {
+            assert!(mbox.push(IpiRequest::WorkSteal));
+        }
+
+        assert_eq!(mbox.len(), IPI_MAILBOX_CAPACITY);
+        assert!(!mbox.push(IpiRequest::TlbInvalidation));
+    }
+
+    #[test]
+    fn test_d56_ipi_mailbox_fill_drain_refill() {
+        let mbox = IpiMailbox::new();
+
+        for _ in 0..IPI_MAILBOX_CAPACITY {
+            mbox.push(IpiRequest::WorkSteal);
+        }
+
+        for _ in 0..IPI_MAILBOX_CAPACITY {
+            assert!(mbox.pop().is_some());
+        }
+
+        assert!(mbox.is_empty());
+
+        for _ in 0..IPI_MAILBOX_CAPACITY {
+            assert!(mbox.push(IpiRequest::TlbInvalidation));
+        }
+
+        assert_eq!(mbox.len(), IPI_MAILBOX_CAPACITY);
+    }
+
+    #[test]
+    fn test_d56_ipi_mailbox_observer_migration() {
+        let mbox = IpiMailbox::new();
+        let observer_id = ObjectId(42);
+
+        mbox.push(IpiRequest::ObserverMigration(observer_id));
+
+        match mbox.pop() {
+            Some(IpiRequest::ObserverMigration(popped_id)) => {
+                assert_eq!(popped_id, observer_id);
+            }
+            other => panic!("expected ObserverMigration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_d56_ipi_mailboxes_targets_correct_core() {
+        let mailboxes = IpiMailboxes::new();
+
+        mailboxes.push_to(CoreId(1), IpiRequest::WorkSteal);
+
+        assert!(mailboxes.mailboxes[0].is_empty());
+        assert_eq!(mailboxes.pop_from(CoreId(1)), Some(IpiRequest::WorkSteal),);
+    }
+
+    #[test]
+    fn test_d56_ipi_mailbox_wrap_around() {
+        let mbox = IpiMailbox::new();
+
+        for i in 0..100u32 {
+            assert!(mbox.push(IpiRequest::WorkSteal));
+
+            let popped = mbox.pop();
+
+            assert_eq!(
+                popped,
+                Some(IpiRequest::WorkSteal),
+                "cycle {i}: must preserve request through wrap-around"
+            );
+        }
+
+        assert!(mbox.is_empty());
+    }
+
+    #[test]
+    fn test_d56_ipi_sgi_number_in_range() {
+        assert!(IPI_SGI_NUMBER < 16);
+    }
+
+    #[test]
+    fn test_d56_ipi_mailbox_capacity_is_power_of_two() {
+        assert!(IPI_MAILBOX_CAPACITY.is_power_of_two());
     }
 }

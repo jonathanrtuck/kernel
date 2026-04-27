@@ -91,6 +91,34 @@ pub fn current_core_mut<S: Scheduler>() -> &'static mut CoreState<S> {
     crate::frame::cores::read_core_state_mut()
 }
 
+// ── Cross-core IPI dispatch (D56) ─────────────────────────────────
+
+/// Send an IPI request to a target core (D56).
+///
+/// Writes the request to the target core's mailbox and triggers an SGI.
+/// Fire-and-forget: if the mailbox is full the request is silently
+/// dropped. The SGI wakes the target from WFI if idle.
+///
+/// Must be called with a valid `kernel_state` reference. The SGI
+/// trigger is bare-metal only (test builds skip the hardware write).
+pub fn send_ipi(
+    kernel_state: &KernelState,
+    target_core: crate::time_manager::CoreId,
+    request: crate::kernel_state::IpiRequest,
+) {
+    // Push to the target core's mailbox. If full, silently drop.
+    let pushed = kernel_state.ipi_mailboxes.mailboxes[target_core.0 as usize].push(request);
+
+    if pushed {
+        // Trigger SGI on the target core to wake it and process the mailbox.
+        #[cfg(target_os = "none")]
+        crate::frame::arch::gic::send_sgi(
+            crate::kernel_state::IPI_SGI_NUMBER,
+            target_core.0 as usize,
+        );
+    }
+}
+
 // ── Per-core state ─────────────────────────────────────────────────
 
 /// Per-core kernel state (D1, D83).
@@ -408,25 +436,6 @@ impl<S: Scheduler> CoreState<S> {
 
         let badge = entry.badge;
 
-        // ── D45: resolve split routing ─────────────────────────────
-        //
-        // After resolving the primary Field, check the routing table
-        // for a badge-range match. If a route matches, re-resolve to
-        // the destination Field. If no route matches, deliver to the
-        // source (primary) Field as before.
-        let target_field = if let Some(dest_id) = target_field.resolve_route(badge.0) {
-            match fields_guard.get_mut(dest_id) {
-                Some(dest_field) => dest_field,
-                None => {
-                    // D55: stale routing entry — destination was freed.
-                    // Fall back to the source Field (already resolved).
-                    fields_guard.get_mut(object_id).unwrap()
-                }
-            }
-        } else {
-            target_field
-        };
-
         // ── Dispatch per operation ──────────────────────────────────
         match operation {
             crate::syscall::IpcOperation::Send => {
@@ -479,13 +488,6 @@ impl<S: Scheduler> CoreState<S> {
                 };
 
                 drop(fields_guard);
-
-                // D51: consume send-once cap after successful send.
-                if entry.is_send_once() {
-                    let slot_index = crate::capability::Handle::decode(raw_handle).index;
-
-                    crate::frame::cores::observer_close_cap(sender_ptr, slot_index);
-                }
 
                 // Step 8: dispatch outcome per D79 matrix.
                 self.dispatch_send_outcome(sender_ptr, outcome)
@@ -578,13 +580,6 @@ impl<S: Scheduler> CoreState<S> {
                 };
 
                 drop(fields_guard);
-
-                // D51: consume send-once cap after successful call.
-                if entry.is_send_once() {
-                    let slot_index = crate::capability::Handle::decode(raw_handle).index;
-
-                    crate::frame::cores::observer_close_cap(sender_ptr, slot_index);
-                }
 
                 // Pass label, badge, and reply_cap for outcome handling.
                 self.dispatch_call_outcome_with_metadata(
@@ -744,81 +739,11 @@ impl<S: Scheduler> CoreState<S> {
 
                 drop(fields_guard);
 
-                // D51: consume send-once reply cap after successful reply.
-                if entry.is_send_once() {
-                    let slot_index = crate::capability::Handle::decode(raw_handle).index;
-
-                    crate::frame::cores::observer_close_cap(sender_ptr, slot_index);
-                }
-
                 self.dispatch_reply_recv_outcome(sender_ptr, outcome)
             }
 
             crate::syscall::IpcOperation::Yield => unreachable!("Yield handled above"),
         }
-    }
-
-    /// Deliver a kernel-originated message to a Field (D13, D18).
-    ///
-    /// Unified delivery path for timer fires, IRQ messages, and any
-    /// future kernel-as-sender producers. Uses `communication::send()`
-    /// to check for blocked waiters before enqueuing — if a receiver is
-    /// waiting, the message is delivered directly and the receiver is
-    /// woken (unblocked + enqueued to scheduler).
-    ///
-    /// Returns Ok(()) on successful delivery, Err on queue full with no waiter.
-    /// Deliver a kernel-originated message to a Field (D13, D18).
-    ///
-    /// Unified delivery path for timer fires, IRQ messages, and any
-    /// future kernel-as-sender producers. Uses `communication::send()`
-    /// to check for blocked waiters before enqueuing — if a receiver is
-    /// waiting, the message is delivered directly and the receiver is
-    /// woken (unblocked + enqueued to scheduler).
-    ///
-    /// On queue full with no waiter: stores the message in the Field's
-    /// pending_kernel_message slot (D18). The next receive() drains it.
-    #[cfg(any(target_os = "none", test))]
-    fn deliver_kernel_message(
-        &mut self,
-        field: &mut field::Field,
-        message: field::Message,
-    ) -> Result<(), field::FieldError> {
-        // D18: if queue is full and no waiter present, store as pending
-        // rather than passing to send() which would consume the message.
-        if field.is_full() && field.waiters_head.is_none() {
-            field.pending_kernel_message = Some(message);
-
-            return Ok(());
-        }
-
-        match crate::communication::send(field, message) {
-            Ok(crate::communication::SendOutcome::Enqueued) => Ok(()),
-            Ok(crate::communication::SendOutcome::WokeReceiver(receiver_ptr, msg)) => {
-                Self::deliver_message(receiver_ptr, &msg);
-
-                let _ = crate::frame::cores::observer_unblock(receiver_ptr);
-
-                self.scheduler.enqueue(receiver_ptr);
-
-                Ok(())
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    #[cfg(not(any(target_os = "none", test)))]
-    fn deliver_kernel_message(
-        &mut self,
-        field: &mut field::Field,
-        message: field::Message,
-    ) -> Result<(), field::FieldError> {
-        if field.is_full() {
-            field.pending_kernel_message = Some(message);
-
-            return Ok(());
-        }
-
-        field.enqueue(message)
     }
 
     #[cfg(any(target_os = "none", test))]
@@ -1130,26 +1055,9 @@ impl<S: Scheduler> CoreState<S> {
 
                         drop(observers);
 
-                        // D-3.1b: check for saved syscall context. If present,
-                        // the Observer was faulted due to CapTableFull and the
-                        // handler has (presumably) grown the table. Replay the
-                        // original operation transparently.
-                        let saved = crate::frame::cores::observer_take_saved_syscall(obs_ptr);
+                        self.scheduler.enqueue(obs_ptr);
 
-                        match saved {
-                            crate::observer::SavedSyscallContext::Typed(saved_op) => {
-                                // Replay: make this Observer current and re-dispatch.
-                                self.current = Some(obs_ptr);
-                                self.scheduler.enqueue(obs_ptr);
-
-                                self.dispatch_typed(saved_op, kernel_state)
-                            }
-                            crate::observer::SavedSyscallContext::None => {
-                                self.scheduler.enqueue(obs_ptr);
-
-                                typed_ok(0)
-                            }
-                        }
+                        typed_ok(0)
                     }
                     Err(_) => typed_error(SyscallError::InvalidState),
                 }
@@ -1192,10 +1100,7 @@ impl<S: Scheduler> CoreState<S> {
             TypedOperation::ObserverInstallCap => {
                 // D97: install a cap into the target Observer's cap table.
                 // args[0] = source cap handle (in caller's table).
-                // args[1] = target slot hint (D-3.1a: SLOT_GROWTH for table
-                //           growth, 0 for auto-allocate).
                 let source_handle = regs.args[0];
-                let target_slot_hint = regs.args[1] as u32;
                 let source_entry =
                     match capability::resolve_cap_entry(source_handle, cap_entries, cap_capacity) {
                         Ok(e) => e,
@@ -1205,133 +1110,36 @@ impl<S: Scheduler> CoreState<S> {
                     Some(pair) => pair,
                     None => return typed_error(SyscallError::InvalidCap),
                 };
+                let mut observers = kernel_state.observers.acquire();
+                let observer = match observers.get_mut(object_id) {
+                    Some(o) => o,
+                    None => return typed_error(SyscallError::InvalidCap),
+                };
+                let live_gen = observer.generation.load(Ordering::Acquire);
 
-                // D-3.1a: growth slot install — extend the target Observer's
-                // cap table using the source Space's backing memory.
-                if target_slot_hint == capability::SLOT_GROWTH {
-                    if source_type != ObjectType::Space {
-                        return typed_error(SyscallError::WrongType);
-                    }
+                if !entry.check_generation(live_gen) {
+                    return typed_error(SyscallError::StaleCap);
+                }
 
-                    let (_backing_va, backing_size) =
-                        match verify_space(kernel_state, source_id, source_entry.stored_generation)
-                        {
-                            Ok(pair) => pair,
-                            Err(e) => return typed_error(e),
-                        };
+                let target_ptr = NonNull::from(&mut *observer);
 
-                    let mut observers = kernel_state.observers.acquire();
-                    let observer = match observers.get_mut(object_id) {
-                        Some(o) => o,
-                        None => return typed_error(SyscallError::InvalidCap),
-                    };
-                    let live_gen = observer.generation.load(Ordering::Acquire);
+                drop(observers);
 
-                    if !entry.check_generation(live_gen) {
-                        return typed_error(SyscallError::StaleCap);
-                    }
+                let transferred = capability::TransferredCap {
+                    object_type: source_type,
+                    object_id: source_id,
+                    rights: source_entry.rights,
+                    badge: source_entry.badge,
+                    send_once: source_entry.send_once,
+                    stored_generation: source_entry.stored_generation,
+                };
 
-                    let target_ptr = NonNull::from(&mut *observer);
-                    let old_capacity = observer.cap_table_capacity;
-
-                    drop(observers);
-
-                    let entry_size = core::mem::size_of::<capability::Entry>();
-                    let additional_entries = backing_size / entry_size;
-
-                    if additional_entries == 0 {
-                        return typed_error(SyscallError::ZeroSize);
-                    }
-
-                    let new_capacity = old_capacity.saturating_add(additional_entries as u32);
-
-                    let new_entries =
-                        match crate::frame::capabilities::allocate_cap_table(new_capacity) {
-                            Some(e) => e,
-                            None => return typed_error(SyscallError::InsufficientResource),
-                        };
-
-                    for i in 0..old_capacity {
-                        let (cap_entries_ptr, _) =
-                            crate::frame::cores::observer_cap_table(target_ptr);
-
-                        if let Some(old_entry) =
-                            crate::frame::capabilities::entry_ref(cap_entries_ptr, old_capacity, i)
-                        {
-                            let copied = *old_entry;
-
-                            crate::frame::capabilities::write_entry(
-                                new_entries,
-                                new_capacity,
-                                i,
-                                copied,
-                            );
-                        }
-                    }
-
-                    crate::frame::cores::observer_extend_cap_table(
-                        target_ptr,
-                        new_entries,
-                        new_capacity,
-                    );
-
-                    consume_space(kernel_state, source_id);
-
-                    typed_ok(0)
-                } else {
-                    // Normal install path (D97).
-                    let mut observers = kernel_state.observers.acquire();
-                    let observer = match observers.get_mut(object_id) {
-                        Some(o) => o,
-                        None => return typed_error(SyscallError::InvalidCap),
-                    };
-                    let live_gen = observer.generation.load(Ordering::Acquire);
-
-                    if !entry.check_generation(live_gen) {
-                        return typed_error(SyscallError::StaleCap);
-                    }
-
-                    let target_ptr = NonNull::from(&mut *observer);
-                    let target_page_table_root = observer.page_table_root;
-
-                    drop(observers);
-
-                    let transferred = capability::TransferredCap {
-                        object_type: source_type,
-                        object_id: source_id,
-                        rights: source_entry.rights,
-                        badge: source_entry.badge,
-                        send_once: source_entry.send_once,
-                        stored_generation: source_entry.stored_generation,
-                    };
-
-                    match crate::frame::cores::observer_install_transferred_cap(
-                        target_ptr,
-                        &transferred,
-                    ) {
-                        Ok(encoded_handle) => {
-                            // D91: wire page table mapping when a Space cap is installed.
-                            #[cfg(target_os = "none")]
-                            if source_type == ObjectType::Space {
-                                let spaces = kernel_state.spaces.acquire();
-
-                                if let Some(space) = spaces.get(source_id)
-                                    && space.l3_table_pa != 0
-                                {
-                                    let _ = crate::frame::mapping::wire_space_mapping(
-                                        target_page_table_root,
-                                        space.va_base,
-                                        space.l3_table_pa,
-                                        kernel_state,
-                                    );
-                                }
-                            }
-
-                            typed_ok(encoded_handle)
-                        }
-                        // Target table full — error to caller, not a fault.
-                        Err(_) => typed_error(SyscallError::TableFull),
-                    }
+                match crate::frame::cores::observer_install_transferred_cap(
+                    target_ptr,
+                    &transferred,
+                ) {
+                    Ok(encoded_handle) => typed_ok(encoded_handle),
+                    Err(_) => typed_error(SyscallError::TableFull),
                 }
             }
             TypedOperation::ObserverWriteRegisters => {
@@ -1490,12 +1298,11 @@ impl<S: Scheduler> CoreState<S> {
 
                         // D98: table-full check BEFORE marking dead. Need a free
                         // slot for the return Space cap (if backing exists).
-                        // D40: if full, deliver CapTableFull fault instead of error.
                         if backing_sz > 0 {
                             let has_free = crate::frame::cores::observer_has_free_slot(sender_ptr);
 
                             if !has_free {
-                                return self.dispatch_table_full_fault(operation, kernel_state);
+                                return typed_error(SyscallError::TableFull);
                             }
                         }
 
@@ -1510,14 +1317,6 @@ impl<S: Scheduler> CoreState<S> {
                         // D98: preemptible cascade — initiate and block destroyer.
                         if cap_capacity_target == 0 {
                             // No caps to cascade — complete immediately.
-                            // D98: dequeue from scheduler before freeing.
-                            if let Some(target_ptr) = crate::frame::cores::observer_ptr_from_arena(
-                                kernel_state,
-                                object_id,
-                            ) {
-                                self.scheduler.dequeue(target_ptr);
-                            }
-
                             {
                                 let mut observers = kernel_state.observers.acquire();
 
@@ -1559,14 +1358,6 @@ impl<S: Scheduler> CoreState<S> {
 
                             if cascade.is_empty() {
                                 // Cascade completed in the first batch.
-                                // D98: dequeue from scheduler before freeing.
-                                if let Some(ptr) = crate::frame::cores::observer_ptr_from_arena(
-                                    kernel_state,
-                                    object_id,
-                                ) {
-                                    self.scheduler.dequeue(ptr);
-                                }
-
                                 {
                                     let mut observers = kernel_state.observers.acquire();
 
@@ -1605,12 +1396,11 @@ impl<S: Scheduler> CoreState<S> {
                             return typed_error(SyscallError::StaleCap);
                         }
 
-                        // D40: if full, deliver CapTableFull fault instead of error.
                         if backing_sz > 0 {
                             let has_free = crate::frame::cores::observer_has_free_slot(sender_ptr);
 
                             if !has_free {
-                                return self.dispatch_table_full_fault(operation, kernel_state);
+                                return typed_error(SyscallError::TableFull);
                             }
                         }
 
@@ -1620,18 +1410,6 @@ impl<S: Scheduler> CoreState<S> {
                             if let Some(field) = fields.get(object_id) {
                                 field.revoke();
                             }
-
-                            // D55: remove routing entries in all source Fields
-                            // that pointed to this destroyed Field. Without this,
-                            // subsequent messages matching those badge ranges would
-                            // dereference freed arena memory (use-after-free).
-                            let destroyed_id = object_id;
-
-                            fields.for_each_mut(|field_id, field| {
-                                if field_id != destroyed_id {
-                                    field.remove_routes_to(destroyed_id);
-                                }
-                            });
 
                             fields.free(object_id);
                         }
@@ -1659,12 +1437,11 @@ impl<S: Scheduler> CoreState<S> {
                             return typed_error(SyscallError::StaleCap);
                         }
 
-                        // D40: if full, deliver CapTableFull fault instead of error.
                         if backing_sz > 0 {
                             let has_free = crate::frame::cores::observer_has_free_slot(sender_ptr);
 
                             if !has_free {
-                                return self.dispatch_table_full_fault(operation, kernel_state);
+                                return typed_error(SyscallError::TableFull);
                             }
                         }
 
@@ -1776,8 +1553,7 @@ impl<S: Scheduler> CoreState<S> {
                     &transferred,
                 ) {
                     Ok(encoded_handle) => typed_ok(encoded_handle),
-                    // D40: caller's own table full → fault protocol.
-                    Err(_) => self.dispatch_table_full_fault(operation, kernel_state),
+                    Err(_) => typed_error(SyscallError::TableFull),
                 }
             }
             TypedOperation::Close => {
@@ -1787,72 +1563,18 @@ impl<S: Scheduler> CoreState<S> {
                     crate::frame::cores::observer_close_cap(sender_ptr, handle.index);
 
                 match close_result {
-                    capability::CloseResult::Closed {
-                        object_type,
-                        object_id,
-                        ..
-                    } => {
-                        // D17: if the closed cap was a Field with badge
-                        // tracking, decrement the badge refcount.
-                        if object_type == ObjectType::Field {
-                            let closed_badge = entry.badge;
-                            let mut fields = kernel_state.fields.acquire();
-
-                            if let Some(field) = fields.get_mut(object_id)
-                                && field.badge_decrement(closed_badge)
-                            {
-                                field.enqueue_badge_closure(closed_badge);
-                            }
-                        }
-
-                        // D24/D91: unmap Space when last cap closed.
-                        #[cfg(target_os = "none")]
-                        if object_type == ObjectType::Space {
-                            let still_held = crate::frame::cores::observer_has_cap_to_object(
-                                sender_ptr,
-                                ObjectType::Space,
-                                object_id,
-                                u32::MAX,
-                            );
-
-                            if !still_held {
-                                let spaces = kernel_state.spaces.acquire();
-
-                                if let Some(space) = spaces.get(object_id)
-                                    && space.l3_table_pa != 0
-                                {
-                                    let page_size = {
-                                        let sm = kernel_state.space_manager.acquire();
-
-                                        sm.root_pool.page_size
-                                    };
-                                    let (pt_root, asid) =
-                                        crate::frame::cores::observer_page_table_info(sender_ptr);
-
-                                    crate::frame::mapping::unwire_space_mapping(
-                                        pt_root,
-                                        space.va_base,
-                                        space.l3_table_pa,
-                                        space.size / page_size,
-                                        asid,
-                                        kernel_state,
-                                    );
-                                }
-                            }
-                        }
+                    capability::CloseResult::Closed { .. } => {
+                        // D24 (bare-metal): when closed_type == Space,
+                        // scan for remaining Space caps via
+                        // observer_has_cap_to_object and unmap if none
+                        // remain (frame::mapping::unmap_space_from_observer).
 
                         typed_ok(0)
                     }
-                    capability::CloseResult::ClosedWithBadgeClosure {
-                        field_id, badge, ..
-                    } => {
-                        // D17: badge-closure from the Table's own tracking.
-                        let mut fields = kernel_state.fields.acquire();
-
-                        if let Some(field) = fields.get_mut(field_id) {
-                            field.enqueue_badge_closure(badge);
-                        }
-
+                    capability::CloseResult::ClosedWithBadgeClosure { .. } => {
+                        // D17: badge-closure tracking map not yet built.
+                        // The close succeeded; badge-closure delivery is
+                        // deferred.
                         typed_ok(0)
                     }
                     capability::CloseResult::AlreadyEmpty => typed_error(SyscallError::InvalidCap),
@@ -1882,21 +1604,8 @@ impl<S: Scheduler> CoreState<S> {
                     sender_ptr,
                     &transferred,
                 ) {
-                    Ok(encoded_handle) => {
-                        // D17: if the minted cap targets a tracked Field,
-                        // increment the badge refcount.
-                        if object_type == ObjectType::Field {
-                            let mut fields = kernel_state.fields.acquire();
-
-                            if let Some(field) = fields.get_mut(object_id) {
-                                field.badge_increment(badge);
-                            }
-                        }
-
-                        typed_ok(encoded_handle)
-                    }
-                    // D40: caller's own table full → fault protocol.
-                    Err(_) => self.dispatch_table_full_fault(operation, kernel_state),
+                    Ok(encoded_handle) => typed_ok(encoded_handle),
+                    Err(_) => typed_error(SyscallError::TableFull),
                 }
             }
 
@@ -1920,47 +1629,9 @@ impl<S: Scheduler> CoreState<S> {
                     sm.root_pool.page_size
                 };
 
-                let parent_l3_pa = space.l3_table_pa;
-
                 match space.split(split_size, page_size) {
                     Ok((new_va, rounded_size)) => {
-                        let parent_new_pages = space.size / page_size;
-
                         drop(spaces);
-
-                        // D90: allocate L3 for child Space and populate with
-                        // page descriptors for the split-off range.
-                        let child_page_count = rounded_size / page_size;
-                        #[cfg(target_os = "none")]
-                        let child_l3_pa = match crate::frame::boot::allocate_space_l3(
-                            kernel_state,
-                            new_va as u64,
-                            child_page_count,
-                        ) {
-                            Ok(pa) => {
-                                // Clear parent L3 entries for transferred pages.
-                                if parent_l3_pa != 0 {
-                                    crate::frame::boot::clear_space_l3_entries(
-                                        parent_l3_pa,
-                                        parent_new_pages,
-                                        parent_new_pages + child_page_count,
-                                    );
-                                }
-
-                                pa
-                            }
-                            Err(_) => {
-                                let mut spaces = kernel_state.spaces.acquire();
-
-                                if let Some(s) = spaces.get_mut(object_id) {
-                                    s.size += rounded_size;
-                                }
-
-                                return typed_error(SyscallError::InsufficientResource);
-                            }
-                        };
-                        #[cfg(not(target_os = "none"))]
-                        let child_l3_pa = 0u64;
 
                         let new_space_id = {
                             let mut spaces = kernel_state.spaces.acquire();
@@ -1969,7 +1640,7 @@ impl<S: Scheduler> CoreState<S> {
                                 Ok((id, new_space)) => {
                                     new_space.va_base = new_va;
                                     new_space.size = rounded_size;
-                                    new_space.l3_table_pa = child_l3_pa;
+                                    new_space.l3_table_pa = 0;
                                     new_space.refcount = 1;
                                     new_space.generation = core::sync::atomic::AtomicU64::new(0);
 
@@ -2009,9 +1680,7 @@ impl<S: Scheduler> CoreState<S> {
                                     s.size += rounded_size;
                                 }
 
-                                // D40: caller's own table full → fault protocol.
-                                // Rollback is done; replay will re-split.
-                                self.dispatch_table_full_fault(operation, kernel_state)
+                                typed_error(SyscallError::TableFull)
                             }
                         }
                     }
@@ -2093,17 +1762,7 @@ impl<S: Scheduler> CoreState<S> {
                 };
 
                 match target.merge(&source_snapshot) {
-                    Ok(()) => {
-                        // D41: free the source Space arena slot (consumed by merge).
-                        spaces.free(source_id);
-                        drop(spaces);
-                        // Close the source cap in the caller's table.
-                        let source_slot = capability::Handle::decode(source_handle).index;
-
-                        crate::frame::cores::observer_close_cap(sender_ptr, source_slot);
-
-                        typed_ok(0)
-                    }
+                    Ok(()) => typed_ok(0),
                     Err(crate::space::SpaceError::NotAdjacent) => {
                         typed_error(SyscallError::NotAdjacent)
                     }
@@ -2139,16 +1798,17 @@ impl<S: Scheduler> CoreState<S> {
 
                 let field_id = {
                     let mut fields = kernel_state.fields.acquire();
-                    let new_field = crate::field::Field::new(
+                    let (id, new_field) = match fields.allocate() {
+                        Ok(pair) => pair,
+                        Err(_) => return typed_error(SyscallError::InsufficientResource),
+                    };
+
+                    *new_field = crate::field::Field::new(
                         queue_ptr,
                         queue_capacity as u32,
                         backing_va,
                         space_size,
                     );
-                    let (id, _) = match fields.insert(new_field) {
-                        Ok(pair) => pair,
-                        Err(_) => return typed_error(SyscallError::InsufficientResource),
-                    };
 
                     id
                 };
@@ -2218,16 +1878,17 @@ impl<S: Scheduler> CoreState<S> {
 
                 let mut fields = kernel_state.fields.acquire();
                 let new_field_id = {
-                    let new_field = crate::field::Field::new(
+                    let (id, new_field) = match fields.allocate() {
+                        Ok(pair) => pair,
+                        Err(_) => return typed_error(SyscallError::InsufficientResource),
+                    };
+
+                    *new_field = crate::field::Field::new(
                         queue_ptr,
                         queue_capacity as u32,
                         backing_va,
                         space_size,
                     );
-                    let (id, _) = match fields.insert(new_field) {
-                        Ok(pair) => pair,
-                        Err(_) => return typed_error(SyscallError::InsufficientResource),
-                    };
 
                     id
                 };
@@ -2329,7 +1990,6 @@ impl<S: Scheduler> CoreState<S> {
                         ) {
                             Ok(encoded_handle) => typed_ok(encoded_handle),
                             Err(_) => {
-                                // Rollback: free new Time and restore source.
                                 let mut times = kernel_state.times.acquire();
 
                                 times.free(new_time_id);
@@ -2338,9 +1998,7 @@ impl<S: Scheduler> CoreState<S> {
                                     t.compute_units += amount;
                                 }
 
-                                // D40: caller's own table full → fault protocol.
-                                // Rollback is done; replay will re-split.
-                                self.dispatch_table_full_fault(operation, kernel_state)
+                                typed_error(SyscallError::TableFull)
                             }
                         }
                     }
@@ -2491,48 +2149,34 @@ impl<S: Scheduler> CoreState<S> {
                         Some(ptr) => ptr,
                         None => return typed_error(SyscallError::InsufficientResource),
                     };
-                #[cfg(target_os = "none")]
-                let l1_pa = match crate::frame::boot::allocate_observer_l1(kernel_state) {
-                    Ok(pa) => pa,
-                    Err(_) => return typed_error(SyscallError::InsufficientResource),
-                };
 
                 let observer_id = {
                     let mut observers = kernel_state.observers.acquire();
-                    let asid = crate::frame::cores::allocate_asid(kernel_state);
-                    #[cfg(target_os = "none")]
-                    let page_table_root =
-                        { crate::frame::arch::mmu::make_ttbr0(asid, l1_pa as u64) };
-                    #[cfg(not(target_os = "none"))]
-                    let page_table_root = 0u64;
-                    let new_obs = crate::observer::Observer {
-                        object_id: ObjectId(0),
-                        asid,
-                        register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
-                        page_table_root,
-                        cap_table: cap_entries_new,
-                        cap_table_capacity: cap_capacity_new,
-                        cap_table_free_head: Some(crate::capability::SLOT_USER_START),
-                        cap_table_count: 0,
-                        state: crate::observer::PrimaryState::Inert,
-                        suspended: false,
-                        compute_aggregate: 0,
-                        responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
-                        throughput: crate::observer::DEFAULT_THROUGHPUT,
-                        clock_access: false,
-                        wait_state: crate::observer::WaitState::None,
-                        saved_syscall: crate::observer::SavedSyscallContext::None,
-                        backing_va_base: backing_va,
-                        backing_size: space_size,
-                        refcount: 1,
-                        generation: core::sync::atomic::AtomicU64::new(0),
-                    };
-                    let (id, obs) = match observers.insert(new_obs) {
+                    let (id, obs) = match observers.allocate() {
                         Ok(pair) => pair,
                         Err(_) => return typed_error(SyscallError::InsufficientResource),
                     };
+                    let asid = crate::frame::cores::allocate_asid(kernel_state);
 
                     obs.object_id = id;
+                    obs.asid = asid;
+                    obs.register_state = crate::observer::RegisterStateHandle::new(rs_ptr);
+                    obs.page_table_root = 0;
+                    obs.cap_table = cap_entries_new;
+                    obs.cap_table_capacity = cap_capacity_new;
+                    obs.cap_table_free_head = Some(crate::capability::SLOT_USER_START);
+                    obs.cap_table_count = 0;
+                    obs.state = crate::observer::PrimaryState::Inert;
+                    obs.suspended = false;
+                    obs.compute_aggregate = 0;
+                    obs.responsiveness = crate::observer::DEFAULT_RESPONSIVENESS;
+                    obs.throughput = crate::observer::DEFAULT_THROUGHPUT;
+                    obs.clock_access = false;
+                    obs.wait_state = crate::observer::WaitState::None;
+                    obs.backing_va_base = backing_va;
+                    obs.backing_size = space_size;
+                    obs.refcount = 1;
+                    obs.generation = core::sync::atomic::AtomicU64::new(0);
 
                     id
                 };
@@ -2646,27 +2290,6 @@ impl<S: Scheduler> CoreState<S> {
                         }
                     };
 
-                    // D90: allocate L3 for the new Space.
-                    #[cfg(target_os = "none")]
-                    let new_l3_pa = match crate::frame::boot::allocate_space_l3(
-                        kernel_state,
-                        new_va as u64,
-                        rounded_size / page_size,
-                    ) {
-                        Ok(pa) => pa,
-                        Err(_) => {
-                            let mut spaces = kernel_state.spaces.acquire();
-
-                            if let Some(s) = spaces.get_mut(object_id) {
-                                s.size += rounded_size;
-                            }
-
-                            return typed_error(SyscallError::InsufficientResource);
-                        }
-                    };
-                    #[cfg(not(target_os = "none"))]
-                    let new_l3_pa = 0u64;
-
                     let new_space_id = {
                         let mut spaces = kernel_state.spaces.acquire();
 
@@ -2674,20 +2297,13 @@ impl<S: Scheduler> CoreState<S> {
                             Ok((id, space)) => {
                                 space.va_base = new_va;
                                 space.size = rounded_size;
-                                space.l3_table_pa = new_l3_pa;
+                                space.l3_table_pa = 0;
                                 space.refcount = 1;
                                 space.generation = core::sync::atomic::AtomicU64::new(0);
 
                                 id
                             }
-                            Err(_) => {
-                                // D104 rollback: restore source Space size.
-                                if let Some(s) = spaces.get_mut(object_id) {
-                                    s.size += rounded_size;
-                                }
-
-                                return typed_error(SyscallError::InsufficientResource);
-                            }
+                            Err(_) => return typed_error(SyscallError::InsufficientResource),
                         }
                     };
                     let transferred = capability::TransferredCap {
@@ -2705,17 +2321,11 @@ impl<S: Scheduler> CoreState<S> {
                     ) {
                         Ok(encoded_handle) => typed_ok(encoded_handle),
                         Err(_) => {
-                            // D104 rollback: free new Space and restore source.
                             let mut spaces = kernel_state.spaces.acquire();
 
                             spaces.free(new_space_id);
 
-                            if let Some(s) = spaces.get_mut(object_id) {
-                                s.size += rounded_size;
-                            }
-
-                            // D40: caller's own table full → fault protocol.
-                            self.dispatch_table_full_fault(operation, kernel_state)
+                            typed_error(SyscallError::TableFull)
                         }
                     }
                 }
@@ -2814,7 +2424,7 @@ impl<S: Scheduler> CoreState<S> {
                     let message = pulsar.fire_message(current_ticks);
 
                     if let Some(target_field) = fields.get_mut(entry.field_id)
-                        && self.deliver_kernel_message(target_field, message).is_err()
+                        && target_field.enqueue(message).is_err()
                     {
                         pulsar.record_overrun();
                     }
@@ -2876,13 +2486,6 @@ impl<S: Scheduler> CoreState<S> {
             {
                 let cascade = self.cascade_continuation.take().unwrap();
                 let destroyer_ptr = cascade.destroyer_ptr;
-
-                // D98: dequeue from scheduler before freeing.
-                if let Some(target_ptr) =
-                    crate::frame::cores::observer_ptr_from_arena(kernel_state, cascade.target_id)
-                {
-                    self.scheduler.dequeue(target_ptr);
-                }
 
                 {
                     let mut observers = kernel_state.observers.acquire();
@@ -2950,7 +2553,7 @@ impl<S: Scheduler> CoreState<S> {
                     // D18: if the queue is full, the message is dropped.
                     // IRQ messages are edge-triggered — the interrupt stays
                     // masked until explicitly acked. No pending list needed.
-                    let _ = self.deliver_kernel_message(target_field, message);
+                    let _ = target_field.enqueue(message);
                 }
                 // else: stale route — generation mismatch, silently ignore.
             }
@@ -2959,6 +2562,84 @@ impl<S: Scheduler> CoreState<S> {
         // else: no route for this INTID — silently ignore.
 
         self.schedule_next()
+    }
+
+    /// Handle an IPI (Software Generated Interrupt) from a remote core (D56).
+    ///
+    /// Drains the local core's IPI mailbox and processes each request:
+    /// - WorkSteal: hint to check for runnable Observers (currently a no-op
+    ///   since the scheduler already picks the next runnable Observer).
+    /// - ObserverMigration: look up the Observer by ObjectId, enqueue it
+    ///   into the local scheduler.
+    /// - TlbInvalidation: execute a local TLB invalidation barrier.
+    /// - RoutingEntryCleanup: no-op (routing table cleanup is handled by
+    ///   the core that modifies the routing table under lock).
+    ///
+    /// Returns schedule_next() to pick the best Observer after processing.
+    pub fn handle_ipi(&mut self, kernel_state: &KernelState) -> DispatchResult {
+        use crate::kernel_state::IpiRequest;
+
+        // Drain all pending IPI requests from this core's mailbox.
+        loop {
+            let request = kernel_state.ipi_mailboxes.mailboxes[self.core_id.0 as usize].pop();
+
+            match request {
+                None => break,
+                Some(IpiRequest::WorkSteal) => {
+                    // Work-steal hint: the scheduler will pick the next
+                    // runnable Observer in schedule_next(). No additional
+                    // action needed — the IPI woke us from WFI.
+                }
+                Some(IpiRequest::ObserverMigration(observer_id)) => {
+                    // Look up the Observer in the global arena and enqueue
+                    // it into this core's local scheduler.
+                    let observers = kernel_state.observers.acquire();
+
+                    if let Some(observer) = observers.get(observer_id) {
+                        let observer_ptr = core::ptr::NonNull::from(observer);
+
+                        drop(observers);
+
+                        self.scheduler.enqueue(observer_ptr);
+                    }
+                }
+                Some(IpiRequest::TlbInvalidation) => {
+                    // The requesting core already issued broadcast TLBI with
+                    // the IS (inner-shareable) suffix, followed by DSB ISH.
+                    // That sequence ensures all cores in the shareable domain
+                    // see the invalidation. This IPI's purpose is to wake the
+                    // target core from WFI so it takes any pending exceptions
+                    // before resuming userspace with potentially stale TLB
+                    // entries. No additional barrier needed here — the
+                    // exception entry/exit sequence includes the necessary
+                    // context synchronization.
+                }
+                Some(IpiRequest::RoutingEntryCleanup) => {
+                    // Routing table cleanup is handled centrally by the
+                    // modifying core under the irq_routes lock. The IPI
+                    // serves as a notification that routing state changed.
+                }
+            }
+        }
+
+        self.schedule_next()
+    }
+
+    /// Build a CoreSnapshot for placement decisions (D56, D59).
+    ///
+    /// Captures the current core's state as a snapshot: idle status,
+    /// queue depth, and capacity factor. Used by the Placement trait
+    /// to compare cores and decide where to schedule a new Observer.
+    pub fn build_core_snapshot(&self) -> crate::time_manager::CoreSnapshot {
+        crate::time_manager::CoreSnapshot {
+            core_id: self.core_id,
+            idle: self.current.is_none() && self.scheduler.pick_next().is_none(),
+            queue_depth: match self.scheduler.pick_next() {
+                Some(_) => 1, // Approximate — RoundRobin exposes queue_depth() but the trait doesn't.
+                None => 0,
+            },
+            capacity_factor: 100, // Uniform capacity until big.LITTLE detection (D56 tuning).
+        }
     }
 
     /// Remove a deadline entry by swap-removing with the last active entry (D83).
@@ -2980,58 +2661,11 @@ impl<S: Scheduler> CoreState<S> {
     ///
     /// D2/D59: delegates to `scheduler.pick_next()`. Returns `Idle`
     /// if no Observer is runnable (D46: core enters WFI).
-    pub fn schedule_next(&mut self) -> DispatchResult {
+    pub fn schedule_next(&self) -> DispatchResult {
         match self.scheduler.pick_next() {
-            Some(observer) => {
-                self.current = Some(observer);
-                DispatchResult::Resume(observer)
-            }
-            None => {
-                self.current = None;
-                DispatchResult::Idle
-            }
+            Some(observer) => DispatchResult::Resume(observer),
+            None => DispatchResult::Idle,
         }
-    }
-
-    // ── Cap table growth fault protocol (D-3.1a/b/c, D40) ────────────
-
-    /// Handle a cap-table-full condition during a typed operation by saving
-    /// the syscall context and delivering a CapTableFull fault (D-3.1b, D40).
-    ///
-    /// The Observer's RegisterState already contains the original syscall
-    /// arguments. We save which operation was being performed so the kernel
-    /// can replay it transparently after the handler grows the table.
-    ///
-    /// D-3.1c: if the Observer is already handling a growth fault (nested
-    /// failure), escalate to destroy.
-    #[cfg(any(target_os = "none", test))]
-    fn dispatch_table_full_fault(
-        &mut self,
-        operation: crate::syscall::TypedOperation,
-        kernel_state: &KernelState,
-    ) -> DispatchResult {
-        let observer_ptr = match self.current {
-            Some(ptr) => ptr,
-            None => return DispatchResult::Idle,
-        };
-
-        // D-3.1c: detect nested growth failure. If there's already a saved
-        // syscall context, the handler itself hit table-full while resolving
-        // the original fault. Escalate → destroy per D68 chain terminus.
-        let existing = crate::frame::cores::observer_take_saved_syscall(observer_ptr);
-
-        if !matches!(existing, crate::observer::SavedSyscallContext::None) {
-            // Nested failure — escalate to fatal fault (destroy).
-            // Restore the saved context so the Observer's state is consistent
-            // before the fatal path runs.
-            return self.fatal_fault(observer_ptr, &crate::fault::FaultType::CapTableFull);
-        }
-
-        // Save the operation for replay after growth.
-        crate::frame::cores::observer_save_syscall(observer_ptr, operation);
-
-        // Deliver the CapTableFull fault through the normal fault path.
-        self.dispatch_fault(crate::fault::FaultType::CapTableFull, kernel_state)
     }
 
     // ── Fault delivery (D100) ────────────────────────────────────────
@@ -3052,7 +2686,6 @@ impl<S: Scheduler> CoreState<S> {
             Some(ptr) => ptr,
             None => return DispatchResult::Idle,
         };
-
         let (observer_id, observer_generation) =
             crate::frame::cores::observer_fault_info(observer_ptr);
         let handler_entry = match crate::frame::cores::observer_read_full_cap_entry(
@@ -3068,9 +2701,11 @@ impl<S: Scheduler> CoreState<S> {
             None => return self.fatal_fault(observer_ptr, &fault),
         };
 
+        if crate::frame::cores::observer_set_faulted(observer_ptr).is_err() {
+            return self.fatal_fault(observer_ptr, &fault);
+        }
+
         // Single lock scope: validate generation and deliver atomically.
-        // D-0.3: validate handler Field BEFORE setting Faulted. If validation
-        // fails, the Observer was never set to Faulted — escalate cleanly.
         let mut fields = kernel_state.fields.acquire();
         let live_gen = match fields.get(obj_id) {
             Some(f) => f.generation.load(Ordering::Acquire),
@@ -3097,14 +2732,6 @@ impl<S: Scheduler> CoreState<S> {
                 return self.fatal_fault(observer_ptr, &fault);
             }
         };
-
-        // All preconditions validated — now transition to Faulted.
-        if crate::frame::cores::observer_set_faulted(observer_ptr).is_err() {
-            drop(fields);
-
-            return self.fatal_fault(observer_ptr, &fault);
-        }
-
         let outcome = crate::fault::deliver_fault(
             fault,
             handler_field,
@@ -3115,38 +2742,18 @@ impl<S: Scheduler> CoreState<S> {
 
         drop(fields);
 
-        // The faulted Observer must be removed from the scheduler queue
-        // regardless of delivery outcome. It stays in Faulted state until
-        // the handler resumes it.
-        self.scheduler.dequeue(observer_ptr);
-
         match outcome {
             crate::fault::FaultDeliveryOutcome::Enqueued => self.schedule_next(),
             crate::fault::FaultDeliveryOutcome::WokeReceiver(receiver_ptr, message) => {
                 Self::deliver_message(receiver_ptr, &message);
-
-                let _ = crate::frame::cores::observer_unblock(receiver_ptr);
-
                 self.scheduler.enqueue(receiver_ptr);
                 self.schedule_next()
             }
             crate::fault::FaultDeliveryOutcome::Deferred => {
-                // D18: link the faulting Observer into the handler
-                // Field's pending list. When receive() drains a slot,
-                // it checks pending_head and delivers the deferred message.
-                let mut fields = kernel_state.fields.acquire();
-
-                if let Some(handler_field) = fields.get_mut(handler_field_id) {
-                    let field_ptr = NonNull::from(&*handler_field);
-                    let wait_entry =
-                        crate::frame::cores::observer_prepare_wait(observer_ptr, field_ptr);
-
-                    wait_entry.next = handler_field.pending_head;
-                    handler_field.pending_head = Some(NonNull::from(&*wait_entry));
-                }
-
-                drop(fields);
-
+                // D18: the faulting Observer should be linked into the
+                // handler Field's pending list. Pending list linkage is
+                // not yet wired — the fault stays deferred until the
+                // handler Field drains a slot.
                 self.schedule_next()
             }
             crate::fault::FaultDeliveryOutcome::HandlerUnavailable => {
@@ -3241,25 +2848,6 @@ fn return_backing_space(
         return 0;
     }
 
-    // D90: allocate L3 for the returned Space.
-    #[cfg(target_os = "none")]
-    let return_l3_pa = {
-        let page_size = {
-            let sm = kernel_state.space_manager.acquire();
-
-            sm.root_pool.page_size
-        };
-
-        crate::frame::boot::allocate_space_l3(
-            kernel_state,
-            backing_va as u64,
-            backing_size / page_size,
-        )
-        .unwrap_or(0)
-    };
-    #[cfg(not(target_os = "none"))]
-    let return_l3_pa = 0u64;
-
     let return_space_id = {
         let mut spaces = kernel_state.spaces.acquire();
 
@@ -3267,7 +2855,7 @@ fn return_backing_space(
             Ok((id, space)) => {
                 space.va_base = backing_va;
                 space.size = backing_size;
-                space.l3_table_pa = return_l3_pa;
+                space.l3_table_pa = 0;
                 space.refcount = 1;
                 space.generation = core::sync::atomic::AtomicU64::new(0);
                 id
@@ -3407,7 +2995,7 @@ mod tests {
 
     #[test]
     fn test_d46_schedule_next_returns_idle_when_empty() {
-        let mut core = make_core_state();
+        let core = make_core_state();
         let result = core.schedule_next();
 
         assert!(
@@ -4288,93 +3876,6 @@ mod tests {
 
         assert_eq!(msg.label, field::LABEL_TIMER_FIRE);
         assert_eq!(msg.badge, Badge(0x42));
-    }
-
-    /// D13/D81: when a timer fires and a receiver is blocked on the target
-    /// Field, the receiver must be woken (message delivered to registers,
-    /// unblocked, re-enqueued to scheduler). This is the unified delivery
-    /// path fix — previously, handle_timer called enqueue() directly,
-    /// leaving blocked receivers stranded.
-    #[test]
-    fn test_d81_handle_timer_wakes_blocked_receiver() {
-        let ks = make_kernel_state();
-        let (pulsar_id, field_id) = {
-            let mut pulsars = ks.pulsars.acquire();
-            let (pid, pulsar) = pulsars.allocate().expect("allocate pulsar");
-
-            *pulsar = crate::pulsar::Pulsar::new(
-                ObjectId(0),
-                Badge(0x77),
-                1_000_000,
-                0, // one-shot
-                TEST_COUNTER_FREQ,
-                0,
-            );
-
-            let mut fields = ks.fields.acquire();
-            let (fid, field) = fields.allocate().expect("allocate field");
-
-            field.queue = crate::frame::fields::alloc_test_queue(8);
-            field.queue_capacity = 8;
-            pulsar.delivery_field = fid;
-
-            (pid, fid)
-        };
-
-        // Create a receiver Observer with registers (needed for message delivery).
-        let mut receiver = make_observer_with_registers();
-        let receiver_ptr = NonNull::from(&mut receiver);
-
-        // Block the receiver on the target Field.
-        {
-            let mut fields = ks.fields.acquire();
-            let target = fields.get_mut(field_id).unwrap();
-            let field_ptr = NonNull::from(&*target);
-            let wait_entry = crate::frame::cores::observer_prepare_wait(receiver_ptr, field_ptr);
-
-            target.add_waiter(wait_entry);
-        }
-
-        // Set receiver to Blocked state (as dispatch_receive_outcome would).
-        let _ = crate::frame::cores::observer_set_blocked(receiver_ptr);
-
-        let mut core = make_core_state();
-        // The running Observer (not the receiver).
-        let mut current = make_observer();
-
-        core.scheduler.enqueue(NonNull::from(&mut current));
-
-        // Install deadline.
-        core.deadlines[0] = Some(DeadlineEntry {
-            deadline_ticks: 24,
-            pulsar_id,
-            field_id,
-        });
-        core.deadline_count = 1;
-
-        // Fire timer — should wake the blocked receiver.
-        core.handle_timer(100, &ks, TEST_COUNTER_FREQ);
-
-        // The message must NOT be in the queue (delivered directly to waiter).
-        let mut fields = ks.fields.acquire();
-        let target = fields.get_mut(field_id).unwrap();
-
-        assert_eq!(
-            target.queue_length, 0,
-            "unified delivery: message must bypass queue when waiter is present"
-        );
-        // Waiter list must be empty (receiver was popped).
-        assert!(
-            target.waiters_head.is_none(),
-            "unified delivery: waiter must be popped after direct delivery"
-        );
-        drop(fields);
-
-        // The receiver must have been unblocked (transitioned from Blocked to Runnable).
-        assert!(
-            matches!(receiver.state, crate::observer::PrimaryState::Runnable),
-            "unified delivery: receiver must be Runnable after timer fire wakeup"
-        );
     }
 
     #[test]
@@ -6656,97 +6157,6 @@ mod tests {
             msg.badge,
             Badge(0x5555),
             "D17: badge injected from cap entry"
-        );
-    }
-
-    // ── D51: Send-once cap consumed after successful Send ──────────
-
-    /// D51: when a send-once cap is used for Send, the slot must be
-    /// closed after the send succeeds. A second send using the same
-    /// handle must fail with InvalidCap (slot is now empty).
-    #[test]
-    fn test_d51_send_once_cap_consumed_after_send() {
-        let ks = make_kernel_state();
-        let field_id = make_field_in_arena(&ks, 8);
-        let (mut sender, entries) = make_sender_with_cap(
-            crate::capability::ObjectType::Field,
-            field_id,
-            crate::capability::Rights::SEND,
-            Badge(0x1234),
-            0,
-        );
-        // Mark the cap as send-once.
-        let entry = crate::frame::capabilities::entry_mut(entries, 16, 0).unwrap();
-
-        entry.send_once = true;
-
-        let sender_ptr = NonNull::from(&mut sender);
-        let handle = crate::capability::Handle {
-            index: 0,
-            slot_tag: crate::capability::SlotTag(0),
-        }
-        .encode();
-
-        crate::frame::cores::write_test_ipc_registers_via_observer(
-            sender_ptr,
-            &crate::syscall::IpcRegisters {
-                data: [1, 2, 3, 4],
-                label: 0xFACE,
-                handle_or_badge: handle,
-                user_cap: u64::MAX,
-                reply_info: 0,
-            },
-        );
-
-        let mut core = make_core_state();
-
-        core.current = Some(sender_ptr);
-        core.scheduler.enqueue(sender_ptr);
-
-        // First send must succeed.
-        let result = core.dispatch_ipc(IpcOperation::Send, &ks);
-
-        assert!(
-            matches!(result, DispatchResult::Resume(_)),
-            "D51: first send with send-once cap must succeed"
-        );
-
-        let (carry, _) = crate::frame::cores::read_ipc_carry_and_x0(sender_ptr);
-
-        assert!(!carry, "D51: first send must not set carry (success)");
-
-        // The slot must now be empty (consumed by send-once).
-        let consumed_entry = crate::frame::capabilities::entry_ref(entries, 16, 0).unwrap();
-
-        assert!(
-            !consumed_entry.is_occupied(),
-            "D51: send-once slot must be empty after successful send"
-        );
-
-        // Second send with same handle must fail (slot is empty).
-        crate::frame::cores::write_test_ipc_registers_via_observer(
-            sender_ptr,
-            &crate::syscall::IpcRegisters {
-                data: [5, 6, 7, 8],
-                label: 0xBEEF,
-                handle_or_badge: handle,
-                user_cap: u64::MAX,
-                reply_info: 0,
-            },
-        );
-
-        let result2 = core.dispatch_ipc(IpcOperation::Send, &ks);
-
-        assert!(
-            matches!(result2, DispatchResult::Resume(_)),
-            "D51: second send must resume sender (with error)"
-        );
-
-        let (carry2, _) = crate::frame::cores::read_ipc_carry_and_x0(sender_ptr);
-
-        assert!(
-            carry2,
-            "D51: second send on consumed send-once cap must set carry (error)"
         );
     }
 
@@ -10609,574 +10019,274 @@ mod tests {
         ));
     }
 
-    // ══════════════════════════════════════════════════════════════════
-    // Phase 3.1: Cap table growth fault protocol (D-3.1a/b/c, D40)
-    // ══════════════════════════════════════════════════════════════════
+    // ── D56 — Cross-core scheduling (IPI, placement, migration) ─────
 
-    /// Helper: create an Observer with a full cap table (no free slots)
-    /// and a valid handler Field at slot 0.
-    fn make_observer_full_table(
-        handler_field_id: ObjectId,
-        cap_capacity: u32,
-    ) -> crate::observer::Observer {
-        let rs_ptr = crate::frame::cores::alloc_test_register_state();
-        let entries = crate::frame::capabilities::alloc_test_entries(cap_capacity);
+    #[test]
+    fn test_d56_handle_ipi_empty_mailbox_returns_schedule_next() {
+        let ks = make_kernel_state();
+        let mut core = make_core_state();
 
-        // Set up handler at slot 0 with full Field rights (SEND needed
-        // for fault delivery, MINT/CLONE for testing those ops on this cap).
-        let handler_entry = crate::capability::Entry {
-            object: Some((ObjectType::Field, handler_field_id)),
-            rights: Rights::FIELD_ALL,
-            badge: Badge(0xFA17),
-            slot_tag: crate::capability::SlotTag(0),
-            send_once: false,
-            stored_generation: 0,
-        };
+        // No IPI requests pending — handle_ipi should return Idle (empty queue).
+        let result = core.handle_ipi(&ks);
 
-        crate::frame::capabilities::write_entry(entries, cap_capacity, 0, handler_entry);
+        assert!(
+            matches!(result, DispatchResult::Idle),
+            "D56: handle_ipi with empty mailbox must return schedule_next (Idle when empty)"
+        );
+    }
 
-        // Fill ALL user slots so the freelist is empty.
-        for i in crate::capability::SLOT_USER_START..cap_capacity {
-            let filler = crate::capability::Entry {
-                object: Some((ObjectType::Space, ObjectId(100 + i))),
-                rights: Rights::SPACE_ALL,
-                badge: Badge(0),
-                slot_tag: crate::capability::SlotTag(0),
-                send_once: false,
-                stored_generation: 0,
-            };
+    #[test]
+    fn test_d56_handle_ipi_work_steal_schedules_next() {
+        let ks = make_kernel_state();
+        let mut core = make_core_state();
 
-            crate::frame::capabilities::write_entry(entries, cap_capacity, i, filler);
-        }
+        // Push a WorkSteal request.
+        ks.ipi_mailboxes.mailboxes[0].push(crate::kernel_state::IpiRequest::WorkSteal);
 
-        crate::observer::Observer {
-            object_id: ObjectId(42),
-            asid: 0,
-            register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
-            page_table_root: 0,
-            cap_table: entries,
-            cap_table_capacity: cap_capacity,
-            cap_table_free_head: None, // Full!
-            cap_table_count: cap_capacity,
-            state: crate::observer::PrimaryState::Runnable,
-            suspended: false,
-            compute_aggregate: 100,
-            responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
-            throughput: crate::observer::DEFAULT_THROUGHPUT,
-            clock_access: false,
-            wait_state: crate::observer::WaitState::None,
-            saved_syscall: crate::observer::SavedSyscallContext::None,
-            backing_va_base: 0,
-            backing_size: 0,
-            refcount: 1,
-            generation: core::sync::atomic::AtomicU64::new(0),
+        let mut obs = make_observer();
+        let ptr = NonNull::from(&mut obs);
+
+        core.scheduler.enqueue(ptr);
+
+        let result = core.handle_ipi(&ks);
+
+        match result {
+            DispatchResult::Resume(resumed) | DispatchResult::ResumeFastPath(resumed) => {
+                assert_eq!(
+                    resumed, ptr,
+                    "D56: after WorkSteal IPI, schedule_next must resume the runnable Observer"
+                );
+            }
+            DispatchResult::Idle => {
+                panic!("D56: must resume Observer after WorkSteal IPI");
+            }
+            DispatchResult::FatalFault => panic!("unexpected FatalFault"),
         }
     }
 
-    /// D40: Clone on a full cap table delivers CapTableFull fault instead
-    /// of returning TableFull error.
     #[test]
-    fn test_d40_clone_full_table_delivers_fault() {
+    fn test_d56_handle_ipi_drains_multiple_requests() {
         let ks = make_kernel_state();
-        let field_id = make_field_in_arena(&ks, 8);
         let mut core = make_core_state();
-        let mut obs = make_observer_full_table(field_id, 8);
-        let ptr = NonNull::from(&mut obs);
 
-        core.current = Some(ptr);
-        core.scheduler.enqueue(ptr);
+        // Push multiple requests.
+        ks.ipi_mailboxes.mailboxes[0].push(crate::kernel_state::IpiRequest::WorkSteal);
+        ks.ipi_mailboxes.mailboxes[0].push(crate::kernel_state::IpiRequest::TlbInvalidation);
+        ks.ipi_mailboxes.mailboxes[0].push(crate::kernel_state::IpiRequest::RoutingEntryCleanup);
 
-        // Set up Clone syscall: target = slot 3 (a filler Space cap with
-        // SPACE_ALL rights including CLONE).
-        let target_handle = encode_handle(3);
+        assert_eq!(ks.ipi_mailboxes.mailboxes[0].len(), 3);
 
-        setup_typed_regs(
-            ptr,
-            TypedOperation::Clone as u16,
-            target_handle,
-            [0, 0, 0, 0],
-        );
+        core.handle_ipi(&ks);
 
-        let _result = core.dispatch_typed(TypedOperation::Clone, &ks);
-
-        // Observer should be Faulted, not returned with TableFull error.
+        // All requests must be drained.
         assert!(
-            matches!(obs.state, crate::observer::PrimaryState::Faulted),
-            "D40: full table on Clone must fault Observer, not return error"
+            ks.ipi_mailboxes.mailboxes[0].is_empty(),
+            "D56: handle_ipi must drain all pending requests"
         );
+    }
 
-        // Fault message should be in the handler Field.
-        let mut fields = ks.fields.acquire();
-        let handler = fields.get_mut(field_id).unwrap();
+    #[test]
+    fn test_d56_handle_ipi_observer_migration() {
+        let ks = make_kernel_state();
+        let mut core = make_core_state();
+
+        // Allocate an Observer in the global arena.
+        let observer_id = {
+            let mut observers = ks.observers.acquire();
+            let (id, _obs) = observers.allocate().expect("allocate Observer");
+
+            id
+        };
+
+        // Push a migration request for that Observer.
+        ks.ipi_mailboxes.mailboxes[0].push(crate::kernel_state::IpiRequest::ObserverMigration(
+            observer_id,
+        ));
+
+        let result = core.handle_ipi(&ks);
+
+        // The Observer should now be in the local scheduler.
+        match result {
+            DispatchResult::Resume(_resumed) | DispatchResult::ResumeFastPath(_resumed) => {
+                // Success: migrated Observer was enqueued and scheduled.
+            }
+            DispatchResult::Idle => {
+                panic!("D56: must resume migrated Observer");
+            }
+            DispatchResult::FatalFault => panic!("unexpected FatalFault"),
+        }
+    }
+
+    #[test]
+    fn test_d56_handle_ipi_migration_nonexistent_observer_no_crash() {
+        let ks = make_kernel_state();
+        let mut core = make_core_state();
+
+        // Push a migration request for a non-existent Observer.
+        ks.ipi_mailboxes.mailboxes[0].push(crate::kernel_state::IpiRequest::ObserverMigration(
+            crate::arena::ObjectId(999),
+        ));
+
+        // Must not panic — gracefully ignores non-existent Observer.
+        let result = core.handle_ipi(&ks);
 
         assert!(
-            handler.queue_length > 0,
-            "D40: CapTableFull fault must be enqueued to handler"
+            matches!(result, DispatchResult::Idle),
+            "D56: migration of non-existent Observer must not crash, returns Idle"
         );
+    }
 
-        let msg = handler.dequeue().unwrap();
+    #[test]
+    fn test_d56_send_ipi_pushes_to_target_mailbox() {
+        let ks = make_kernel_state();
 
+        send_ipi(&ks, CoreId(1), crate::kernel_state::IpiRequest::WorkSteal);
+
+        // Core 1's mailbox should have the request.
         assert_eq!(
-            msg.label,
-            crate::field::LABEL_CAP_TABLE_FULL,
-            "D40: fault label must be CAP_TABLE_FULL"
+            ks.ipi_mailboxes.mailboxes[1].pop(),
+            Some(crate::kernel_state::IpiRequest::WorkSteal),
+            "D56: send_ipi must push request to target core's mailbox"
         );
-
-        // D-3.1b: saved syscall context must be preserved for replay.
+        // Core 0's mailbox should be empty.
         assert!(
-            matches!(
-                obs.saved_syscall,
-                crate::observer::SavedSyscallContext::Typed(TypedOperation::Clone)
-            ),
-            "D-3.1b: Clone operation must be saved for replay"
+            ks.ipi_mailboxes.mailboxes[0].is_empty(),
+            "D56: send_ipi must not affect other cores' mailboxes"
         );
     }
 
-    /// D40: Mint on a full cap table delivers CapTableFull fault.
     #[test]
-    fn test_d40_mint_full_table_delivers_fault() {
-        let ks = make_kernel_state();
-        let field_id = make_field_in_arena(&ks, 8);
+    fn test_d56_build_core_snapshot_idle_core() {
+        let core = make_core_state();
+        let snapshot = core.build_core_snapshot();
+
+        assert_eq!(snapshot.core_id, CoreId(0));
+        assert!(
+            snapshot.idle,
+            "D56: core with no current and empty queue must be idle"
+        );
+        assert_eq!(snapshot.queue_depth, 0);
+        assert_eq!(snapshot.capacity_factor, 100);
+    }
+
+    #[test]
+    fn test_d56_build_core_snapshot_busy_core() {
         let mut core = make_core_state();
-        let mut obs = make_observer_full_table(field_id, 8);
+        let mut obs = make_observer();
         let ptr = NonNull::from(&mut obs);
 
         core.current = Some(ptr);
         core.scheduler.enqueue(ptr);
 
-        // Mint: target = slot 0, args[0] = rights mask, args[1] = badge.
-        let target_handle = encode_handle(0);
-
-        setup_typed_regs(
-            ptr,
-            TypedOperation::Mint as u16,
-            target_handle,
-            [
-                Rights::SEND.bits() as u64,
-                crate::capability::CAP_ABSENT,
-                0,
-                0,
-            ],
-        );
-
-        core.dispatch_typed(TypedOperation::Mint, &ks);
+        let snapshot = core.build_core_snapshot();
 
         assert!(
-            matches!(obs.state, crate::observer::PrimaryState::Faulted),
-            "D40: full table on Mint must fault Observer"
+            !snapshot.idle,
+            "D56: core with current Observer must not be idle"
         );
         assert!(
-            matches!(
-                obs.saved_syscall,
-                crate::observer::SavedSyscallContext::Typed(TypedOperation::Mint)
-            ),
-            "D-3.1b: Mint operation must be saved for replay"
+            snapshot.queue_depth > 0,
+            "D56: core with enqueued Observer must have non-zero queue depth"
         );
     }
 
-    /// D-3.1a: ObserverInstallCap with SLOT_GROWTH extends the target
-    /// Observer's cap table.
     #[test]
-    fn test_d3_1a_growth_slot_extends_cap_table() {
-        let ks = make_kernel_state();
-        let mut core = make_core_state();
+    fn test_d56_placement_driven_migration() {
+        use crate::time_manager::scored_placement::ScoredPlacement;
+        use crate::time_manager::{CoreSnapshot, Placement, PlacementDecision};
 
-        // Create a Space to provide backing memory for growth.
-        let space_id = make_space_in_arena(&ks, 0x1_0000, 4096);
+        let placement = ScoredPlacement::new();
+        let obs = make_observer();
+        // Local core busy, remote core idle — placement should pick remote.
+        let snapshots = [
+            CoreSnapshot {
+                core_id: CoreId(0),
+                idle: false,
+                queue_depth: 5,
+                capacity_factor: 100,
+            },
+            CoreSnapshot {
+                core_id: CoreId(1),
+                idle: true,
+                queue_depth: 0,
+                capacity_factor: 100,
+            },
+        ];
 
-        // Create a target Observer with a small table (4 slots).
-        let target_obs_id = {
-            let mut observers = ks.observers.acquire();
-            let (id, observer) = observers.allocate().expect("allocate observer");
+        match placement.place(&obs, &snapshots) {
+            PlacementDecision::Remote(target) => {
+                assert_eq!(target, CoreId(1));
 
-            *observer = crate::observer::Observer::test_with_cap_table(4);
-            observer.object_id = id;
+                // Simulate the migration: send IPI to target core.
+                let ks = make_kernel_state();
 
-            id
-        };
+                send_ipi(
+                    &ks,
+                    target,
+                    crate::kernel_state::IpiRequest::ObserverMigration(crate::arena::ObjectId(0)),
+                );
 
-        // Create the caller (handler) with a cap table.
-        let (mut caller, _entries) = make_sender_with_cap(
-            ObjectType::Observer,
-            target_obs_id,
-            Rights::INSTALL_CAP,
-            Badge(0),
-            0,
-        );
-        // Install Space cap at a user slot in caller's table.
-        let caller_ptr = NonNull::from(&mut caller);
-        let space_transferred = crate::capability::TransferredCap {
-            object_type: ObjectType::Space,
-            object_id: space_id,
-            rights: Rights::SPACE_ALL,
-            badge: Badge(0),
-            send_once: false,
-            stored_generation: 0,
-        };
-        let space_handle =
-            crate::frame::cores::observer_install_transferred_cap(caller_ptr, &space_transferred)
-                .expect("install space cap");
-
-        core.current = Some(caller_ptr);
-        core.scheduler.enqueue(caller_ptr);
-
-        // ObserverInstallCap: target=Observer cap (slot 0), args[0]=space handle,
-        // args[1]=SLOT_GROWTH.
-        let target_handle = encode_handle(0);
-
-        setup_typed_regs(
-            caller_ptr,
-            TypedOperation::ObserverInstallCap as u16,
-            target_handle,
-            [space_handle, crate::capability::SLOT_GROWTH as u64, 0, 0],
-        );
-
-        let result = core.dispatch_typed(TypedOperation::ObserverInstallCap, &ks);
-
-        // Should succeed.
-        assert!(
-            matches!(result, DispatchResult::Resume(_)),
-            "D-3.1a: growth slot install must succeed"
-        );
-
-        // Verify the target Observer's cap table was extended.
-        let observers = ks.observers.acquire();
-        let target = observers.get(target_obs_id).unwrap();
-
-        assert!(
-            target.cap_table_capacity > 4,
-            "D-3.1a: cap table capacity must grow (was 4, now {})",
-            target.cap_table_capacity
-        );
-        assert!(
-            target.cap_table_free_head.is_some(),
-            "D-3.1a: grown table must have free slots"
-        );
-    }
-
-    /// D-3.1b: full end-to-end growth cycle — Clone fails, fault delivered,
-    /// table grown, resume replays Clone successfully.
-    #[test]
-    fn test_d3_1b_growth_cycle_clone_replay() {
-        let ks = make_kernel_state();
-        let field_id = make_field_in_arena(&ks, 8);
-        let mut core = make_core_state();
-        let mut obs = make_observer_full_table(field_id, 8);
-
-        // Put the Observer in the arena so the fault cap and growth install
-        // can reference it.
-        let obs_arena_id = {
-            let mut observers = ks.observers.acquire();
-            let (id, arena_obs) = observers.allocate().expect("allocate observer");
-
-            // We'll use the stack Observer for dispatch but need the arena entry.
-            arena_obs.object_id = id;
-            arena_obs.generation = core::sync::atomic::AtomicU64::new(0);
-
-            id
-        };
-
-        obs.object_id = obs_arena_id;
-
-        let ptr = NonNull::from(&mut obs);
-
-        core.current = Some(ptr);
-        core.scheduler.enqueue(ptr);
-
-        // Step 1: Clone hits table-full → fault.
-        let target_handle = encode_handle(0);
-
-        setup_typed_regs(
-            ptr,
-            TypedOperation::Clone as u16,
-            target_handle,
-            [0, 0, 0, 0],
-        );
-
-        let result = core.dispatch_typed(TypedOperation::Clone, &ks);
-
-        assert!(
-            matches!(obs.state, crate::observer::PrimaryState::Faulted),
-            "Step 1: Observer must be Faulted after Clone on full table"
-        );
-
-        // Step 2: Simulate the handler growing the table.
-        // Manually extend the table since the handler would do this via
-        // ObserverInstallCap with SLOT_GROWTH.
-        let new_capacity = 16u32;
-        let new_entries = crate::frame::capabilities::alloc_test_entries(new_capacity);
-
-        // Copy old entries.
-        for i in 0..obs.cap_table_capacity {
-            if let Some(old_entry) =
-                crate::frame::capabilities::entry_ref(obs.cap_table, obs.cap_table_capacity, i)
-            {
-                let copied = *old_entry;
-
-                crate::frame::capabilities::write_entry(new_entries, new_capacity, i, copied);
+                // Verify the request landed in the target's mailbox.
+                assert_eq!(
+                    ks.ipi_mailboxes.mailboxes[1].len(),
+                    1,
+                    "D56: migration IPI must be in target core's mailbox"
+                );
+            }
+            PlacementDecision::Local => {
+                panic!("D56: idle remote must win over busy local");
             }
         }
+    }
 
-        crate::frame::cores::observer_extend_cap_table(ptr, new_entries, new_capacity);
+    #[test]
+    fn test_d56_end_to_end_migration_flow() {
+        // Full flow: placement decides Remote, send_ipi enqueues request,
+        // target core's handle_ipi picks up the Observer.
+        let ks = make_kernel_state();
 
-        // Verify growth happened.
-        assert_eq!(obs.cap_table_capacity, 16);
-        assert!(obs.cap_table_free_head.is_some());
+        // Allocate an Observer in the arena.
+        let observer_id = {
+            let mut observers = ks.observers.acquire();
+            let (id, _obs) = observers.allocate().expect("allocate");
 
-        // Step 3: Resume the Observer → kernel replays Clone.
-        obs.state = crate::observer::PrimaryState::Faulted; // Ensure Faulted for resume.
+            id
+        };
 
-        // We need to make the Observer resumable. The resume path reads the
-        // saved_syscall and re-dispatches. To test this, we call resume
-        // directly on the Observer and then dispatch the saved operation.
-        let saved = crate::frame::cores::observer_take_saved_syscall(ptr);
-
-        assert!(
-            matches!(
-                saved,
-                crate::observer::SavedSyscallContext::Typed(TypedOperation::Clone)
-            ),
-            "D-3.1b: saved context must be Clone"
+        // 1. Source core decides to migrate (simulated placement result).
+        send_ipi(
+            &ks,
+            CoreId(2),
+            crate::kernel_state::IpiRequest::ObserverMigration(observer_id),
         );
 
-        // Resume the Observer.
-        obs.resume().unwrap();
+        // 2. Target core (core 2) receives the IPI and drains its mailbox.
+        let mut target_core = CoreState {
+            core_id: CoreId(2),
+            current: None,
+            scheduler: RoundRobin::new(),
+            deadlines: [None; MAX_DEADLINES_PER_CORE],
+            deadline_count: 0,
+            cascade_continuation: None,
+        };
 
-        assert!(matches!(obs.state, crate::observer::PrimaryState::Runnable));
+        let result = target_core.handle_ipi(&ks);
 
-        // Re-dispatch the saved operation (this is what the kernel does).
-        core.current = Some(ptr);
-
-        if let crate::observer::SavedSyscallContext::Typed(op) = saved {
-            let replay_result = core.dispatch_typed(op, &ks);
-
-            // Now the table has free slots, so Clone should succeed.
-            assert!(
-                matches!(replay_result, DispatchResult::Resume(_)),
-                "D-3.1b: replayed Clone must succeed after table growth"
-            );
+        // 3. The migrated Observer should be scheduled on the target core.
+        match result {
+            DispatchResult::Resume(_) | DispatchResult::ResumeFastPath(_) => {
+                // Success: Observer migrated and scheduled.
+            }
+            DispatchResult::Idle => {
+                panic!("D56: target core must schedule the migrated Observer");
+            }
+            DispatchResult::FatalFault => panic!("unexpected FatalFault"),
         }
-    }
 
-    /// D-3.1c: nested growth failure (Observer already has saved syscall)
-    /// escalates to fatal fault.
-    #[test]
-    fn test_d3_1c_nested_growth_escalates() {
-        let ks = make_kernel_state();
-        let field_id = make_field_in_arena(&ks, 8);
-        let mut core = make_core_state();
-        let mut obs = make_observer_full_table(field_id, 8);
-        let ptr = NonNull::from(&mut obs);
-
-        core.current = Some(ptr);
-        core.scheduler.enqueue(ptr);
-
-        // Pre-set a saved syscall context to simulate a prior growth fault.
-        obs.saved_syscall = crate::observer::SavedSyscallContext::Typed(TypedOperation::SpaceSplit);
-
-        // Now trigger another table-full. This should detect the existing
-        // saved context and escalate (D-3.1c).
-        let target_handle = encode_handle(0);
-
-        setup_typed_regs(
-            ptr,
-            TypedOperation::Clone as u16,
-            target_handle,
-            [0, 0, 0, 0],
-        );
-
-        let result = core.dispatch_typed(TypedOperation::Clone, &ks);
-
-        // D-3.1c: nested growth → fatal fault (escalate → destroy).
+        // 4. Mailbox must be empty after draining.
         assert!(
-            matches!(result, DispatchResult::FatalFault),
-            "D-3.1c: nested table-full must escalate to FatalFault"
+            ks.ipi_mailboxes.mailboxes[2].is_empty(),
+            "D56: mailbox must be drained after handle_ipi"
         );
-    }
-
-    /// D40: ObserverInstallCap into a *target* Observer's full table
-    /// returns TableFull error (not a fault on the caller).
-    #[test]
-    fn test_d40_install_cap_target_full_returns_error() {
-        let ks = make_kernel_state();
-        let mut core = make_core_state();
-
-        // Create a target Observer with a full table (no handler needed
-        // since we're testing the error path, not fault delivery).
-        let target_obs_id = {
-            let mut observers = ks.observers.acquire();
-            let (id, observer) = observers.allocate().expect("allocate observer");
-
-            *observer = crate::observer::Observer::test_with_cap_table(4);
-            observer.object_id = id;
-            // Fill all user slots.
-            observer.cap_table_free_head = None;
-
-            id
-        };
-
-        // Create the caller with an Observer cap targeting the full Observer.
-        let (mut caller, _entries) = make_sender_with_cap(
-            ObjectType::Observer,
-            target_obs_id,
-            Rights::INSTALL_CAP,
-            Badge(0),
-            0,
-        );
-
-        // Install a Space cap in the caller's table as the source.
-        let space_id = make_space_in_arena(&ks, 0x1_0000, 4096);
-        let caller_ptr = NonNull::from(&mut caller);
-        let space_transferred = crate::capability::TransferredCap {
-            object_type: ObjectType::Space,
-            object_id: space_id,
-            rights: Rights::SPACE_ALL,
-            badge: Badge(0),
-            send_once: false,
-            stored_generation: 0,
-        };
-        let space_handle =
-            crate::frame::cores::observer_install_transferred_cap(caller_ptr, &space_transferred)
-                .expect("install space cap");
-
-        core.current = Some(caller_ptr);
-        core.scheduler.enqueue(caller_ptr);
-
-        // ObserverInstallCap: target=Observer (slot 0), source=Space.
-        // args[1] = 0 (normal install, not growth).
-        let target_handle = encode_handle(0);
-
-        setup_typed_regs(
-            caller_ptr,
-            TypedOperation::ObserverInstallCap as u16,
-            target_handle,
-            [space_handle, 0, 0, 0],
-        );
-
-        let result = core.dispatch_typed(TypedOperation::ObserverInstallCap, &ks);
-
-        // Should return TableFull error (caller is NOT faulted).
-        assert!(
-            matches!(result, DispatchResult::Resume(_)),
-            "D40: target table full returns error, not fault"
-        );
-        assert!(
-            matches!(caller.state, crate::observer::PrimaryState::Runnable),
-            "D40: caller remains Runnable when target's table is full"
-        );
-    }
-
-    /// D-3.1a: growth slot install with non-Space cap returns WrongType.
-    #[test]
-    fn test_d3_1a_growth_slot_requires_space() {
-        let ks = make_kernel_state();
-        let mut core = make_core_state();
-
-        // Create a target Observer.
-        let target_obs_id = {
-            let mut observers = ks.observers.acquire();
-            let (id, observer) = observers.allocate().expect("allocate observer");
-
-            *observer = crate::observer::Observer::test_with_cap_table(4);
-            observer.object_id = id;
-
-            id
-        };
-
-        // Caller has Observer cap at slot 0, Field cap as source.
-        let field_id = make_field_in_arena(&ks, 4);
-        let (mut caller, _entries) = make_sender_with_cap(
-            ObjectType::Observer,
-            target_obs_id,
-            Rights::INSTALL_CAP,
-            Badge(0),
-            0,
-        );
-        let caller_ptr = NonNull::from(&mut caller);
-        let field_transferred = crate::capability::TransferredCap {
-            object_type: ObjectType::Field,
-            object_id: field_id,
-            rights: Rights::FIELD_ALL,
-            badge: Badge(0),
-            send_once: false,
-            stored_generation: 0,
-        };
-        let field_handle =
-            crate::frame::cores::observer_install_transferred_cap(caller_ptr, &field_transferred)
-                .expect("install field cap");
-
-        core.current = Some(caller_ptr);
-        core.scheduler.enqueue(caller_ptr);
-
-        // Try growth with a Field cap (not Space) → WrongType.
-        let target_handle = encode_handle(0);
-
-        setup_typed_regs(
-            caller_ptr,
-            TypedOperation::ObserverInstallCap as u16,
-            target_handle,
-            [field_handle, crate::capability::SLOT_GROWTH as u64, 0, 0],
-        );
-
-        let result = core.dispatch_typed(TypedOperation::ObserverInstallCap, &ks);
-
-        // Should succeed (Resume) with a WrongType error code in x0.
-        assert!(matches!(result, DispatchResult::Resume(_)));
-        let (_, x0) = crate::frame::cores::read_ipc_carry_and_x0(caller_ptr);
-        let expected_error = crate::syscall::SyscallError::WrongType.error_code();
-
-        assert_eq!(
-            x0, expected_error,
-            "D-3.1a: growth with non-Space must return WrongType"
-        );
-    }
-
-    /// D40: SavedSyscallContext::None means no replay on resume.
-    #[test]
-    fn test_d40_resume_without_saved_context_is_normal() {
-        let ks = make_kernel_state();
-        let mut core = make_core_state();
-
-        // Create a Faulted Observer with no saved syscall.
-        let target_obs_id = {
-            let mut observers = ks.observers.acquire();
-            let (id, observer) = observers.allocate().expect("allocate observer");
-
-            *observer = crate::observer::Observer::test_with_cap_table(8);
-            observer.object_id = id;
-            observer.state = crate::observer::PrimaryState::Faulted;
-
-            id
-        };
-
-        // Caller has Observer cap.
-        let (mut caller, _entries) = make_sender_with_cap(
-            ObjectType::Observer,
-            target_obs_id,
-            Rights::RESUME,
-            Badge(0),
-            0,
-        );
-        let caller_ptr = NonNull::from(&mut caller);
-
-        core.current = Some(caller_ptr);
-        core.scheduler.enqueue(caller_ptr);
-
-        let target_handle = encode_handle(0);
-
-        setup_typed_regs(
-            caller_ptr,
-            TypedOperation::ObserverResume as u16,
-            target_handle,
-            [0, 0, 0, 0],
-        );
-
-        let result = core.dispatch_typed(TypedOperation::ObserverResume, &ks);
-
-        // Normal resume — should return typed_ok(0).
-        assert!(matches!(result, DispatchResult::Resume(_)));
-        let (_, x0) = crate::frame::cores::read_ipc_carry_and_x0(caller_ptr);
-
-        assert_eq!(x0, 0, "D40: normal resume returns 0 (success)");
     }
 }

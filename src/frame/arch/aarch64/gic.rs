@@ -22,6 +22,13 @@ pub const INTID_VTIMER: u32 = 27;
 /// [`end_of_interrupt`].
 pub const INTID_SPURIOUS: u32 = 1023;
 
+/// First SGI INTID. SGIs occupy INTIDs 0-15 (ARM ARM 9.1: Software
+/// Generated Interrupts). Used to identify IPIs in the IRQ handler.
+pub const INTID_SGI_START: u32 = 0;
+
+/// Last SGI INTID (inclusive). SGIs 0-15 are available.
+pub const INTID_SGI_END: u32 = 15;
+
 // ---------------------------------------------------------------------------
 // Distributor registers (GICD_*, shared, MMIO)
 // ---------------------------------------------------------------------------
@@ -101,6 +108,63 @@ pub fn acknowledge() -> u32 {
 #[inline]
 pub fn end_of_interrupt(intid: u32) {
     sysreg::set_icc_eoir1_el1(intid as u64);
+}
+
+/// Whether an INTID is a Software Generated Interrupt (SGI, 0-15).
+///
+/// Used by the IRQ handler to distinguish IPIs from device/timer interrupts.
+#[inline]
+pub fn is_sgi(intid: u32) -> bool {
+    intid <= INTID_SGI_END
+}
+
+/// Send a Software Generated Interrupt (SGI) to a target core (D56).
+///
+/// Triggers the specified SGI on the target core by writing to
+/// ICC_SGI1R_EL1. The GIC delivers the interrupt to the target's
+/// Group 1 non-secure handler (the EL1h IRQ vector).
+///
+/// ARM ARM D9.2.1: ICC_SGI1R_EL1 encoding:
+/// - Bits[55:48]: Aff3 (0 for our topology)
+/// - Bits[47:44]: Reserved (0)
+/// - Bit[40]:     IRM = 0 (target specific cores, not all)
+/// - Bits[39:32]: Aff2 (0 for our topology)
+/// - Bits[27:24]: INTID[3:0] — the SGI number (0-15)
+/// - Bits[23:16]: Aff1 (0 for our topology)
+/// - Bits[15:0]:  TargetList — bitmask of Aff0 targets
+///
+/// For a flat topology (all cores at Aff0), the target core's bit
+/// position in TargetList equals its core_id.
+#[cfg(target_os = "none")]
+pub fn send_sgi(sgi_number: u32, target_core_id: usize) {
+    debug_assert!(sgi_number <= 15, "SGI number must be 0-15");
+    debug_assert!(target_core_id < 16, "target core must be in Aff0 [0,15]");
+
+    // ICC_SGI1R_EL1 encoding for flat topology:
+    // - INTID in bits [27:24]
+    // - Target core as bit position in TargetList [15:0]
+    let target_list: u64 = 1 << target_core_id;
+    let intid_field: u64 = (sgi_number as u64 & 0xF) << 24;
+    let val = intid_field | target_list;
+
+    // SAFETY: MSR to ICC_SGI1R_EL1 triggers an SGI to the specified target
+    // core. This is a GICv3 system register write that generates an interrupt
+    // on the target — it affects the memory system (the GIC state machine
+    // processes the SGI asynchronously). No `nomem` — LLVM must not reorder
+    // memory accesses past this (the mailbox write must be visible before the
+    // SGI arrives at the target).
+    unsafe {
+        core::arch::asm!(
+            "msr icc_sgi1r_el1, {val}",
+            val = in(reg) val,
+            options(nostack),
+        );
+    }
+
+    // ISB ensures the SGI write is committed before the caller proceeds.
+    // Without this, the MSR could still be in the pipeline when subsequent
+    // instructions execute.
+    sysreg::isb();
 }
 
 // ---------------------------------------------------------------------------
@@ -228,5 +292,25 @@ mod tests {
         let diff = redist_base_for_core(1) - redist_base_for_core(0);
 
         assert_eq!(diff, 0x20000);
+    }
+
+    // ── SGI classification tests ──────────────────────────────────────
+
+    #[test]
+    fn test_is_sgi_range() {
+        for intid in 0..=15 {
+            assert!(is_sgi(intid), "INTID {intid} must be classified as SGI");
+        }
+
+        assert!(!is_sgi(16), "INTID 16 (PPI) must not be SGI");
+        assert!(!is_sgi(INTID_VTIMER), "INTID_VTIMER must not be SGI");
+        assert!(!is_sgi(32), "INTID 32 (first SPI) must not be SGI");
+        assert!(!is_sgi(INTID_SPURIOUS), "INTID_SPURIOUS must not be SGI");
+    }
+
+    #[test]
+    fn test_sgi_intid_constants() {
+        assert_eq!(INTID_SGI_START, 0);
+        assert_eq!(INTID_SGI_END, 15);
     }
 }

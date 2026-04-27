@@ -506,4 +506,79 @@ mod tests {
             "idle bonus must outweigh queue penalty"
         );
     }
+
+    // ── D56 migration-aware placement tests ────────────────────────
+
+    /// D56: placement returns Remote when local is heavily loaded.
+    /// This is the trigger for an Observer migration via IPI.
+    #[test]
+    fn test_d56_migration_trigger_heavily_loaded_local() {
+        let placement = ScoredPlacement::new();
+        let obs = make_observer();
+        let snapshots = [
+            make_snapshot(0, false, 10, 100), // local: very deep queue
+            make_snapshot(1, false, 2, 100),  // remote: lightly loaded
+            make_snapshot(2, true, 0, 100),   // remote: idle
+        ];
+        let result = placement.place(&obs, &snapshots);
+
+        match result {
+            PlacementDecision::Remote(core_id) => {
+                assert_eq!(
+                    core_id,
+                    CoreId(2),
+                    "D56: idle core must win over lightly loaded core"
+                );
+            }
+            PlacementDecision::Local => {
+                panic!("D56: heavily loaded local must lose to idle remote");
+            }
+        }
+    }
+
+    /// D56: placement returns Local when all cores are equally loaded.
+    /// No migration should occur — local affinity wins ties.
+    #[test]
+    fn test_d56_no_migration_when_balanced() {
+        let placement = ScoredPlacement::new();
+        let obs = make_observer();
+        let snapshots = [
+            make_snapshot(0, false, 3, 100),
+            make_snapshot(1, false, 3, 100),
+            make_snapshot(2, false, 3, 100),
+            make_snapshot(3, false, 3, 100),
+        ];
+        let result = placement.place(&obs, &snapshots);
+
+        assert!(
+            matches!(result, PlacementDecision::Local),
+            "D56: balanced load must prefer Local (no migration overhead)"
+        );
+    }
+
+    /// D56: placement with mixed capacity factors — high-capacity core
+    /// breaks a tie with equal queue depths.
+    #[test]
+    fn test_d56_capacity_drives_migration() {
+        let placement = ScoredPlacement::new();
+        let obs = make_observer();
+        let snapshots = [
+            make_snapshot(0, false, 4, 50),  // local: low capacity
+            make_snapshot(1, false, 4, 200), // remote: high capacity
+        ];
+        let result = placement.place(&obs, &snapshots);
+
+        match result {
+            PlacementDecision::Remote(core_id) => {
+                assert_eq!(
+                    core_id,
+                    CoreId(1),
+                    "D56: higher capacity must break queue depth tie"
+                );
+            }
+            PlacementDecision::Local => {
+                panic!("D56: remote with higher capacity must win when depths are equal");
+            }
+        }
+    }
 }

@@ -1,6 +1,6 @@
 {
   "blockers": [],
-  "completed_items": 31,
+  "completed_items": 34,
   "current_phase": 3,
   "items": {
     "0.1": {
@@ -180,18 +180,18 @@
     },
     "4.4": {
       "name": "Cross-core scheduling",
-      "note": "",
-      "status": "pending"
+      "note": "IpiMailbox (lock-free circular queue, 16 slots); IpiRequest enum; SGI send via ICC_SGI1R_EL1; handle_ipi drains mailbox; build_core_snapshot for placement; Observer migration via IPI",
+      "status": "done"
     },
     "4.5": {
       "name": "Lock ordering verification",
-      "note": "",
-      "status": "pending"
+      "note": "9 multi-threaded tests: D53 ordered acquisition, concurrent read/write, arena contention, cross-arena, stress, deadlock timeout",
+      "status": "done"
     },
     "4.6": {
       "name": "Cross-core TLB invalidation",
-      "note": "",
-      "status": "pending"
+      "note": "TLBI VALE1IS (last-level, more precise than VAE1IS) in tlb_invalidate_space_pages; sysreg::tlbi_vale1is added; 7 encoding tests",
+      "status": "done"
     }
   },
   "last_updated": "2026-04-26",
@@ -210,11 +210,11 @@
     },
     "3": {
       "name": "Protocol Completeness",
-      "status": "in_progress"
+      "status": "complete"
     },
     "4": {
       "name": "SMP",
-      "status": "in_progress"
+      "status": "complete"
     }
   },
   "total_items": 38

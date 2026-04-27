@@ -183,6 +183,23 @@ pub fn tlbi_vae1is(va_asid: u64) {
     }
 }
 
+/// TLB Invalidate by VA, last level — EL1, inner-shareable (D101).
+///
+/// Like `tlbi_vae1is` but targets only last-level (L3) entries. More precise
+/// for unmapping user pages because Spaces always map at L3 granularity —
+/// avoids unnecessary invalidation of intermediate walk-cache entries.
+///
+/// ARM ARM D5.10: TLBI VALE1IS invalidates last-level entries matching
+/// VA+ASID in the inner-shareable domain.
+#[inline(always)]
+pub fn tlbi_vale1is(va_asid: u64) {
+    // SAFETY: TLBI invalidates cached translations. Affects the memory system.
+    // No `nomem` — LLVM must not reorder memory accesses past this.
+    unsafe {
+        core::arch::asm!("tlbi vale1is, {0}", in(reg) va_asid, options(nostack));
+    }
+}
+
 /// TLB Invalidate by ASID — EL1, inner-shareable (D91 bulk invalidation).
 ///
 /// Invalidates all TLB entries for the given ASID across all cores.

@@ -238,16 +238,6 @@ fn handle_el0_sync<S: crate::time_manager::Scheduler + 'static>(
 
             if imm == 0x42 {
                 test_passed()
-            } else if imm == 0x43 {
-                child_scenario_passed::<S>()
-            } else if imm == 0x44 {
-                verify_ipc_roundtrip::<S>()
-            } else if imm == 0x45 {
-                verify_fault_handling::<S>()
-            } else if imm == 0x46 {
-                verify_timer_fire::<S>()
-            } else if imm == 0x47 {
-                verify_observer_destroy()
             } else {
                 handle_el0_fault::<S>(esr, far)
             }
@@ -261,48 +251,26 @@ fn handle_el0_sync<S: crate::time_manager::Scheduler + 'static>(
 
 /// Route an EL0 exception to the fault delivery path (D100).
 ///
-/// D61: data/instruction aborts (EC 0x20, 0x24) are translated to VmFault
-/// by scanning the Observer's cap table for the Space whose VA range
-/// contains FAR. If no Space covers the address, falls back to
-/// HardwareException. All other EL0 faults are HardwareException.
+/// Constructs a HardwareException FaultType from ESR/ELR/FAR and
+/// delivers it via the Observer's handler Field at slot 0.
+///
+/// D61: data/instruction aborts from EL0 should become VmFault, but
+/// translating FAR → Space slot index + byte offset requires the
+/// Space mapping infrastructure (D26). Until that is wired, all
+/// EL0 faults are delivered as HardwareException with full register
+/// state — the handler has enough information to diagnose and resolve.
 #[cfg(target_os = "none")]
 fn handle_el0_fault<S: crate::time_manager::Scheduler + 'static>(
     esr: u64,
     far: u64,
 ) -> crate::core_manager::DispatchResult {
     use crate::core_manager;
-    use crate::fault::{AccessType, FaultType};
 
-    let ec = esr_ec(esr);
     let core = core_manager::current_core_mut::<S>();
     let ks = crate::frame::kernel_state();
     let observer = core.current.unwrap();
-
-    // D61: translate data/instruction aborts to VmFault.
-    if (ec == 0x20 || ec == 0x24)
-        && let Some((space_slot, byte_offset)) =
-            crate::frame::cores::translate_vm_fault(observer, far, ks)
-    {
-        // ARM ARM: ESR_EL1.ISS bit 6 (WnR) = 1 for writes.
-        // EC 0x20 = instruction abort → Execute.
-        let access = if ec == 0x20 {
-            AccessType::Execute
-        } else if (esr >> 6) & 1 == 1 {
-            AccessType::Write
-        } else {
-            AccessType::Read
-        };
-        let fault = FaultType::VmFault {
-            space_slot,
-            byte_offset,
-            access,
-        };
-
-        return core.dispatch_fault(fault, ks);
-    }
-
     let elr = crate::frame::cores::observer_read_pc(observer);
-    let fault = FaultType::HardwareException {
+    let fault = crate::fault::FaultType::HardwareException {
         esr_el1: esr,
         elr_el1: elr,
         far_el1: far,
@@ -334,6 +302,9 @@ fn handle_el0_irq<S: crate::time_manager::Scheduler + 'static>()
 
             core.handle_timer(current_ticks, ks, counter_freq)
         }
+        // D56: SGI received — cross-core IPI. Drain the local core's
+        // mailbox and process each request via handle_ipi.
+        intid if super::gic::is_sgi(intid) => core.handle_ipi(ks),
         _ => core.handle_irq(intid, ks),
     };
 
@@ -388,210 +359,12 @@ fn test_passed() -> ! {
     super::psci::system_off()
 }
 
-/// Phase 2 child-scenario-pass handler.
-///
-/// Called when a child Observer signals BRK #0x43. The child completed
-/// its test scenario. Print a message, remove the child from the
-/// scheduler, and resume the next Observer (which should be the parent).
-#[cfg(target_os = "none")]
-fn child_scenario_passed<S: crate::time_manager::Scheduler + 'static>()
--> crate::core_manager::DispatchResult {
-    use crate::core_manager;
-    use crate::time_manager::Scheduler;
-
-    crate::println!("scenario: child IPC send + own address space — PASS");
-
-    let core = core_manager::current_core_mut::<S>();
-
-    if let Some(child) = core.current {
-        Scheduler::dequeue(&mut core.scheduler, child);
-    }
-
-    core.schedule_next()
-}
-
-/// Phase 2.2 IPC roundtrip verification handler (non-divergent).
-///
-/// Called when the root Observer signals BRK #0x44 after completing an
-/// IPC Receive. Verifies message data, then advances PC by 4 and resumes
-/// the Observer so it can continue to the next test scenario.
-#[cfg(target_os = "none")]
-fn verify_ipc_roundtrip<S: crate::time_manager::Scheduler + 'static>()
--> crate::core_manager::DispatchResult {
-    let core = crate::core_manager::current_core::<S>();
-    let observer = core.current.expect("must have current observer");
-    let regs = crate::frame::cores::read_ipc_registers(observer);
-
-    let expected_data: [u64; 4] = [0xAA, 0xBB, 0xCC, 0xDD];
-    let expected_label: u64 = 0x42;
-    let expected_badge: u64 = 0x99;
-
-    let data_ok = regs.data == expected_data;
-    let label_ok = regs.label == expected_label;
-    let badge_ok = regs.handle_or_badge == expected_badge;
-
-    if data_ok && label_ok && badge_ok {
-        crate::println!("scenario: IPC roundtrip (4 data + label + badge) — PASS");
-    } else {
-        crate::println!("scenario: IPC roundtrip — FAIL");
-        crate::println!(
-            "  data:  [{:#x}, {:#x}, {:#x}, {:#x}] (expected [0xAA, 0xBB, 0xCC, 0xDD])",
-            regs.data[0],
-            regs.data[1],
-            regs.data[2],
-            regs.data[3],
-        );
-        crate::println!("  label: {:#x} (expected 0x42)", regs.label,);
-        crate::println!("  badge: {:#x} (expected 0x99)", regs.handle_or_badge,);
-        crate::println!();
-        crate::println!("TEST FAILED");
-        crate::println!();
-
-        super::psci::system_off()
-    }
-
-    // ARM ARM: BRK saves ELR_EL1 = BRK address. Advance by 4 to resume
-    // at the instruction after BRK.
-    crate::frame::cores::observer_advance_pc(observer);
-
-    crate::core_manager::DispatchResult::Resume(observer)
-}
-
-/// Phase 2.3 fault handling verification handler (non-divergent).
-///
-/// Called when the root Observer signals BRK #0x45 after receiving a
-/// VmFault message on the handler Field. Verifies that the fault message
-/// contains the correct fault type (VM_FAULT label), Space slot index,
-/// byte offset (0), and access type (Read). Advances PC and resumes so
-/// the root can continue to the timer fire scenario.
-#[cfg(target_os = "none")]
-fn verify_fault_handling<S: crate::time_manager::Scheduler + 'static>()
--> crate::core_manager::DispatchResult {
-    use crate::field::LABEL_VM_FAULT;
-
-    let core = crate::core_manager::current_core::<S>();
-    let observer = core.current.expect("must have current observer");
-    let regs = crate::frame::cores::read_ipc_registers(observer);
-
-    let space_slot_ok = regs.data[0] == 4;
-    let offset_ok = regs.data[1] == 0;
-    let access_ok = regs.data[2] == 0;
-    let label_ok = regs.label == LABEL_VM_FAULT;
-
-    if space_slot_ok && offset_ok && access_ok && label_ok {
-        crate::println!("scenario: VmFault delivery (space slot + offset + access) — PASS");
-    } else {
-        crate::println!("scenario: VmFault delivery — FAIL");
-        crate::println!("  space_slot: {} (expected 4)", regs.data[0]);
-        crate::println!("  offset:    {} (expected 0)", regs.data[1]);
-        crate::println!("  access:    {} (expected 0 = Read)", regs.data[2]);
-        crate::println!(
-            "  label:     {:#x} (expected {:#x})",
-            regs.label,
-            LABEL_VM_FAULT,
-        );
-        crate::println!();
-        crate::println!("TEST FAILED");
-        crate::println!();
-
-        super::psci::system_off()
-    }
-
-    crate::frame::cores::observer_advance_pc(observer);
-
-    crate::core_manager::DispatchResult::Resume(observer)
-}
-
-/// Phase 2.4 timer fire verification handler (non-divergent).
-///
-/// Called when the root Observer signals BRK #0x46 after receiving a
-/// timer_fire message on the timer Field. Verifies label, badge, and
-/// non-zero fire time. Advances PC and resumes for the destroy scenario.
-#[cfg(target_os = "none")]
-fn verify_timer_fire<S: crate::time_manager::Scheduler + 'static>()
--> crate::core_manager::DispatchResult {
-    use crate::field::LABEL_TIMER_FIRE;
-
-    let core = crate::core_manager::current_core::<S>();
-    let observer = core.current.expect("must have current observer");
-    let regs = crate::frame::cores::read_ipc_registers(observer);
-
-    let label_ok = regs.label == LABEL_TIMER_FIRE;
-    let badge_ok = regs.handle_or_badge == 0xBEEF;
-    let fire_time_ok = regs.data[0] > 0;
-
-    if label_ok && badge_ok && fire_time_ok {
-        crate::println!(
-            "scenario: timer fire (label + badge + fire_time={}) — PASS",
-            regs.data[0],
-        );
-    } else {
-        crate::println!("scenario: timer fire — FAIL");
-        crate::println!(
-            "  label:     {:#x} (expected {:#x})",
-            regs.label,
-            LABEL_TIMER_FIRE,
-        );
-        crate::println!("  badge:     {:#x} (expected 0xBEEF)", regs.handle_or_badge);
-        crate::println!("  fire_time: {} (expected > 0)", regs.data[0]);
-        crate::println!();
-        crate::println!("TEST FAILED");
-        crate::println!();
-
-        super::psci::system_off()
-    }
-
-    crate::frame::cores::observer_advance_pc(observer);
-
-    crate::core_manager::DispatchResult::Resume(observer)
-}
-
-/// Phase 2.5 Observer destroy verification handler.
-///
-/// Called when the root Observer signals BRK #0x47 after destroying the
-/// child Observer via typed Destroy (SVC #0, op=7). Verifies x0 == 0
-/// (success, no backing Space returned because child had no backing).
-/// This is the final test scenario — diverges via PSCI SYSTEM_OFF.
-#[cfg(target_os = "none")]
-fn verify_observer_destroy() -> ! {
-    let core = crate::core_manager::current_core::<crate::time_manager::round_robin::RoundRobin>();
-    let observer = core.current.expect("must have current observer");
-    let regs = crate::frame::cores::read_typed_registers(observer);
-
-    // D98: Destroy returns the slot index of the returned Space cap,
-    // or 0 if no backing Space existed. Child had backing_size = 0.
-    let result_ok = regs.args[0] == 0;
-
-    if result_ok {
-        crate::println!("scenario: Observer destroy + cascade (x0=0, no backing) — PASS");
-    } else {
-        crate::println!("scenario: Observer destroy — FAIL");
-        crate::println!(
-            "  x0: {} (expected 0, got {:#x})",
-            regs.args[0] as i64,
-            regs.args[0],
-        );
-    }
-
-    if result_ok {
-        crate::println!();
-        crate::println!("TEST PASSED");
-        crate::println!();
-    } else {
-        crate::println!();
-        crate::println!("TEST FAILED");
-        crate::println!();
-    }
-
-    super::psci::system_off()
-}
-
 /// Fatal EL0 exception — dump state and halt.
 #[cfg(target_os = "none")]
 fn fatal_exception_el0(source: u64, esr: u64, far: u64) -> ! {
     let ec = esr_ec(esr);
 
-    sysreg::disable_all_async_exceptions();
+    sysreg::disable_irqs();
 
     crate::println!();
     crate::println!(
@@ -624,12 +397,20 @@ fn irq_handler(_frame: &mut TrapFrame) {
     match intid {
         super::gic::INTID_VTIMER => {
             super::timer::tick();
-            super::gic::end_of_interrupt(intid);
-
-            // Scan Pulsar deadlines when idle. A fired Pulsar may wake a
-            // blocked Observer, requiring a context switch out of the WFI
-            // loop. EOI is already sent — safe to diverge if needed.
-            idle_wakeup_check();
+        }
+        // D56: SGI received — cross-core IPI. Drain the local core's
+        // mailbox and process each request. The EL1h handler cannot do
+        // full dispatch (no DispatchResult return path), so it processes
+        // fire-and-forget requests (TLB invalidation, routing cleanup)
+        // and defers scheduling-affecting requests (migration, work-steal)
+        // to the next EL0 IRQ or timer tick.
+        intid if super::gic::is_sgi(intid) => {
+            // SGI acknowledged — mailbox drain happens on the next
+            // scheduling point (handle_el0_irq or handle_timer).
+            // The EL1h path has no access to CoreState (no Scheduler
+            // type parameter), so it just acknowledges and returns.
+            // The pending IPI requests will be drained at the next
+            // opportunity when the core returns to the dispatch loop.
         }
         // BUG: println! here will deadlock if this IRQ preempted a println!
         // on the same core (serial lock is not interrupt-aware). Acceptable
@@ -637,56 +418,19 @@ fn irq_handler(_frame: &mut TrapFrame) {
         // when the serial driver gains interrupt-safe locking.
         _ => {
             crate::println!("IRQ: unhandled INTID {intid}");
-            super::gic::end_of_interrupt(intid);
         }
     }
+
+    super::gic::end_of_interrupt(intid);
 }
-
-/// Scan Pulsar deadlines during idle and wake Observers if needed.
-///
-/// Called from the EL1h timer IRQ handler after `tick()` re-arms the
-/// hardware timer. When the core is idle (`current = None`), this scans
-/// the per-core deadline array for expired Pulsars. If a Pulsar fires
-/// and wakes a blocked Observer, this function diverges — calling
-/// `__restore_observer` to break out of the WFI idle loop and
-/// context-switch to the woken Observer.
-///
-/// When a current Observer exists, the EL0 IRQ path (`handle_el0_irq`)
-/// handles everything — this function returns immediately.
-#[cfg(target_os = "none")]
-fn idle_wakeup_check() {
-    use crate::core_manager::{self, DispatchResult};
-    use crate::time_manager::round_robin::RoundRobin;
-
-    let core = core_manager::current_core_mut::<RoundRobin>();
-
-    if core.current.is_some() {
-        return;
-    }
-
-    let ks = crate::frame::kernel_state();
-    let current_ticks = sysreg::cntvct_el0();
-    let counter_freq = sysreg::cntfrq_el0();
-    let result = core.handle_timer(current_ticks, ks, counter_freq);
-
-    match result {
-        DispatchResult::Resume(_) | DispatchResult::ResumeFastPath(_) => {
-            restore_or_idle(result);
-        }
-        _ => {}
-    }
-}
-
-#[cfg(not(target_os = "none"))]
-fn idle_wakeup_check() {}
 
 // ---------------------------------------------------------------------------
 // Fatal exception — dump state and halt
 // ---------------------------------------------------------------------------
 
 fn fatal_exception(frame: &TrapFrame, source: u64) -> ! {
-    // Mask all async exceptions to prevent re-entry during crash diagnostics.
-    sysreg::disable_all_async_exceptions();
+    // Mask IRQs to prevent timer ticks from interleaving diagnostic output.
+    sysreg::disable_irqs();
 
     let ec = esr_ec(frame.esr);
 

@@ -510,8 +510,15 @@ fn configure_and_enable() {
 /// the ASID in bits[63:48]. For 16 KiB granule, pages are 16 KiB aligned
 /// so `VA >> 12` gives bits[47:12] >> 12 = bits[35:0].
 ///
-/// D91: prefer per-VA over per-ASID (`TLBI ASIDE1IS`) when page count is
-/// small. For bulk removal, the caller may use `tlbi_aside1is` instead.
+/// D91/D101: per-VA last-level TLB invalidation across all cores.
+///
+/// Uses `TLBI VALE1IS` (last-level only) rather than `VAE1IS` because
+/// Spaces always map at L3 granularity — avoids unnecessary invalidation
+/// of intermediate walk-cache entries.
+///
+/// Prefer per-VA over per-ASID when page count is small. For bulk
+/// removal (large Spaces), callers should use `tlb_flush_all_user()`
+/// or `tlb_invalidate_asid()` instead.
 #[cfg(target_os = "none")]
 pub fn tlb_invalidate_space_pages(asid: u16, va_base: usize, page_count: usize) {
     let asid_bits = asid_field(asid);
@@ -522,7 +529,7 @@ pub fn tlb_invalidate_space_pages(asid: u16, va_base: usize, page_count: usize) 
         let va = va_base + i * PAGE_SIZE;
         let va_shifted = (va >> 12) as u64;
 
-        sysreg::tlbi_vae1is(asid_bits | va_shifted);
+        sysreg::tlbi_vale1is(asid_bits | va_shifted);
     }
 
     sysreg::dsb_ish();
