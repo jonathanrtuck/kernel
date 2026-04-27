@@ -168,16 +168,20 @@ pub struct Observer {
     /// Arch core code resolves this for save/restore on context switch.
     pub register_state: RegisterStateHandle,
 
-    /// Per-Observer ASID (D101). Assigned sequentially at creation from
-    /// the kernel's AsidAllocator. Encoded in TTBR0 bits[63:48] and used
-    /// as the TLB invalidation key on Space unmap.
+    /// Per-Observer hardware ASID (D101). Assigned at creation from the
+    /// kernel's AsidAllocator. Encoded in TTBR0 bits[63:48] and used as
+    /// the TLB invalidation key on Space unmap.
     ///
-    /// Interim field: once per-Observer page tables are fully wired
-    /// (D89 L1 root from structural backing → real TTBR0), this field
-    /// can be removed — derive from `page_table_root` bits[63:48]
-    /// instead. The field exists because Phase E sets page_table_root
-    /// to 0 for non-root Observers (identity map, no per-Observer L1).
+    /// May be re-assigned on context switch if `asid_generation` is stale
+    /// (the allocator wrapped and this Observer's hardware ASID now aliases
+    /// a newer Observer). See `refresh_observer_asid`.
     pub asid: u16,
+
+    /// ASID generation epoch (D101). Compared against
+    /// `KernelState::asid_generation` on context switch. If they differ,
+    /// this Observer's hardware ASID is stale and must be re-allocated
+    /// before writing TTBR0.
+    pub asid_generation: u64,
 
     /// Physical address of the per-Observer page table root (D5/D26).
     /// Hot path: loaded into the hardware translation base on context switch.
@@ -476,6 +480,7 @@ impl Observer {
         Observer {
             object_id: ObjectId(0),
             asid: 0,
+            asid_generation: 0,
             register_state: RegisterStateHandle::new(NonNull::dangling()),
             page_table_root: 0,
             cap_table: NonNull::dangling(),
@@ -532,7 +537,7 @@ mod tests {
 
     #[test]
     fn observer_layout() {
-        assert_eq!(core::mem::size_of::<Observer>(), 128);
+        assert_eq!(core::mem::size_of::<Observer>(), 136);
     }
 
     #[test]

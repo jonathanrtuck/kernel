@@ -14,9 +14,10 @@
 //! Direct-indexed by INTID (max 1024). Lock<IrqRoutingTable> with unordered
 //! LockOrder::IrqRouting (does not participate in Field-Observer-Pulsar chain).
 //!
-//! D101: ASID allocator added — sequential counter for per-Observer ASID
-//! assignment. Lock<AsidAllocator> with unordered LockOrder::AsidAllocator.
-//! Wrap triggers full TLB flush; counter resets.
+//! D101: generation-based ASID allocator — sequential counter with epoch
+//! tracking. Lock<AsidAllocator> with unordered LockOrder::AsidAllocator.
+//! Wrap increments generation, triggers full TLB flush, resets counter.
+//! Context switch checks generation via AtomicU64 (lock-free hot path).
 //!
 //! D53: lock ordering — Field < Observer < Pulsar. Space, Time, SpaceManager,
 //! IrqRouting, and AsidAllocator are unordered (no cross-arena operations with
@@ -34,7 +35,7 @@ use crate::space_manager::SpaceManager;
 use crate::time::Time;
 use crate::time_manager::CoreId;
 use core::cell::Cell;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 // ── IRQ routing (D22, D81) ─────────────────────────────────────────
 
@@ -229,30 +230,38 @@ impl IrqRoutingTable {
 /// for that Observer's ASID in one instruction.
 pub const ASID_TLBI_THRESHOLD: usize = 16;
 
-/// Sequential ASID allocator (D101).
+/// Generation-based ASID allocator (D101).
 ///
-/// Each Observer receives a unique ASID at creation. ARM64 supports 8-bit
-/// or 16-bit ASIDs (detected from `ID_AA64MMFR0_EL1` at boot). The allocator
-/// uses the maximum available width.
+/// Each Observer receives a unique `(asid, generation)` pair at creation.
+/// ARM64 supports 8-bit or 16-bit hardware ASIDs (detected from
+/// `ID_AA64MMFR0_EL1` at boot). The allocator uses the maximum available width.
 ///
-/// Assignment is sequential: `next_asid++`. No recycling — sequential
-/// assignment avoids the ABA problem where a reused ASID could match stale
-/// TLB entries from a destroyed Observer. When the counter wraps, the caller
-/// must issue `TLBI VMALLE1IS` (full broadcast) and the counter resets.
+/// Assignment is sequential: `next_asid++`. When the counter wraps, the
+/// generation increments and the caller must issue `TLBI VMALLE1IS` (full
+/// broadcast TLB flush). After a wrap, Observers from previous generations
+/// hold stale hardware ASIDs — the context switch path must check the
+/// generation and re-allocate before writing TTBR0.
 ///
-/// The wrap + flush is a one-time cost amortized over 2^16 (or 2^8) Observer
-/// creations.
+/// This is the standard epoch-based scheme (used by Linux): hardware ASID
+/// numbers repeat across generations, but the `(asid, generation)` pair is
+/// globally unique. The generation comparison is a single load+compare on
+/// the context switch hot path; re-allocation only happens for Observers
+/// that survived a wrap.
 pub struct AsidAllocator {
     next_asid: u16,
     max_asid: u16,
+    generation: u64,
 }
 
 /// Result of an ASID allocation (D101).
 ///
-/// `wrapped` signals that the counter rolled over and all user TLB entries
-/// must be flushed before the returned ASID can be safely used.
+/// `generation` identifies the epoch. Two allocations with the same `asid`
+/// but different `generation` values are distinct — the older one is stale.
+/// `wrapped` signals that the generation just incremented and all user TLB
+/// entries must be flushed before the returned ASID can be safely used.
 pub struct AsidAllocation {
     pub asid: u16,
+    pub generation: u64,
     pub wrapped: bool,
 }
 
@@ -261,6 +270,7 @@ impl AsidAllocator {
     ///
     /// Starts at ASID 1: ASID 0 is architecturally reserved for global
     /// entries (ARM ARM D5.9.1 — translations with nG=0 match any ASID).
+    /// Generation starts at 0.
     pub fn new(asid_width: u8) -> AsidAllocator {
         debug_assert!(
             asid_width == 8 || asid_width == 16,
@@ -272,23 +282,27 @@ impl AsidAllocator {
         AsidAllocator {
             next_asid: 1,
             max_asid,
+            generation: 0,
         }
     }
 
-    /// Allocate the next sequential ASID.
+    /// Allocate the next sequential ASID within the current generation.
     ///
-    /// Returns the ASID and whether a wrap occurred. On wrap, the caller
-    /// MUST issue a full TLB broadcast (`TLBI VMALLE1IS`) before using
-    /// the returned ASID — stale entries from the previous generation
-    /// of that ASID number may exist in TLBs across all cores.
+    /// On wrap, the generation increments and `wrapped` is set. The caller
+    /// MUST issue a full TLB broadcast (`TLBI VMALLE1IS`) and update the
+    /// global `asid_generation` atomic before any Observer uses the returned
+    /// ASID — Observers from previous generations hold stale hardware ASIDs
+    /// that now alias entries in the new generation.
     pub fn allocate(&mut self) -> AsidAllocation {
         let asid = self.next_asid;
 
         if asid >= self.max_asid {
+            self.generation += 1;
             self.next_asid = 1;
 
             AsidAllocation {
                 asid,
+                generation: self.generation,
                 wrapped: true,
             }
         } else {
@@ -296,6 +310,7 @@ impl AsidAllocator {
 
             AsidAllocation {
                 asid,
+                generation: self.generation,
                 wrapped: false,
             }
         }
@@ -309,6 +324,11 @@ impl AsidAllocator {
     /// The next ASID that will be returned (for diagnostics/testing).
     pub const fn next_asid(&self) -> u16 {
         self.next_asid
+    }
+
+    /// The current generation (epoch). Increments on every wrap.
+    pub const fn generation(&self) -> u64 {
+        self.generation
     }
 }
 
@@ -548,9 +568,13 @@ pub struct KernelState {
     /// Unordered lock — acquired independently by handle_irq on the
     /// interrupt path.
     pub irq_routes: Lock<IrqRoutingTable>,
-    /// Sequential ASID allocator (D101). Unordered lock — acquired
+    /// Generation-based ASID allocator (D101). Unordered lock — acquired
     /// during Observer creation to assign a unique ASID.
     pub asid_allocator: Lock<AsidAllocator>,
+    /// Current ASID generation (D101). Updated under `asid_allocator` lock
+    /// when the counter wraps; read without locking on the context switch
+    /// hot path to detect Observers with stale ASIDs.
+    pub asid_generation: AtomicU64,
     /// Per-core IPI mailboxes for cross-core scheduling (D56).
     ///
     /// NOT wrapped in Lock — the mailbox is internally lock-free via
@@ -579,6 +603,7 @@ impl KernelState {
             space_manager: Lock::new(LockOrder::SpaceManager, space_manager),
             irq_routes: Lock::new(LockOrder::IrqRouting, IrqRoutingTable::new()),
             asid_allocator: Lock::new(LockOrder::AsidAllocator, AsidAllocator::new(asid_width)),
+            asid_generation: AtomicU64::new(0),
             ipi_mailboxes: IpiMailboxes::new(),
         }
     }
@@ -1244,6 +1269,7 @@ mod tests {
             let result = alloc.allocate();
 
             assert_eq!(result.asid, expected, "D101: ASID must be sequential");
+            assert_eq!(result.generation, 0, "D101: generation 0 before any wrap");
             assert!(!result.wrapped, "D101: no wrap in first 10 allocations");
         }
     }
@@ -1340,6 +1366,10 @@ mod tests {
         assert_eq!(
             result.asid, 1,
             "D101: first ASID from KernelState must be 1"
+        );
+        assert_eq!(
+            result.generation, 0,
+            "D101: first generation from KernelState must be 0"
         );
     }
 
@@ -1479,6 +1509,136 @@ mod tests {
 
             assert_ne!(r.asid, 0, "ASID 0 is architecturally reserved");
         }
+    }
+
+    // ── ASID generation (D101 correctness) ─────────────────────────
+
+    #[test]
+    fn asid_generation_starts_at_zero() {
+        let alloc = AsidAllocator::new(8);
+
+        assert_eq!(alloc.generation(), 0);
+    }
+
+    #[test]
+    fn asid_generation_stable_within_epoch() {
+        let mut alloc = AsidAllocator::new(8);
+
+        for _ in 0..254 {
+            let result = alloc.allocate();
+
+            assert_eq!(
+                result.generation, 0,
+                "generation must not change before wrap"
+            );
+        }
+    }
+
+    #[test]
+    fn asid_generation_increments_on_wrap() {
+        let mut alloc = AsidAllocator::new(8);
+
+        for _ in 0..254 {
+            alloc.allocate();
+        }
+
+        let wrap_result = alloc.allocate();
+
+        assert!(wrap_result.wrapped);
+        assert_eq!(
+            wrap_result.generation, 1,
+            "generation must increment on wrap"
+        );
+        assert_eq!(alloc.generation(), 1);
+    }
+
+    #[test]
+    fn asid_post_wrap_allocation_carries_new_generation() {
+        let mut alloc = AsidAllocator::new(8);
+
+        for _ in 0..255 {
+            alloc.allocate();
+        }
+
+        let post_wrap = alloc.allocate();
+
+        assert_eq!(post_wrap.asid, 1);
+        assert_eq!(
+            post_wrap.generation, 1,
+            "first allocation after wrap must carry new generation"
+        );
+    }
+
+    #[test]
+    fn asid_same_hardware_asid_different_generation_after_wrap() {
+        let mut alloc = AsidAllocator::new(8);
+        let first = alloc.allocate();
+
+        assert_eq!(first.asid, 1);
+        assert_eq!(first.generation, 0);
+
+        for _ in 1..255 {
+            alloc.allocate();
+        }
+
+        let reused = alloc.allocate();
+
+        assert_eq!(reused.asid, 1, "same hardware ASID after wrap");
+        assert_eq!(reused.generation, 1, "different generation after wrap");
+        assert_ne!(
+            first.generation, reused.generation,
+            "stale and fresh allocations with same ASID must differ in generation"
+        );
+    }
+
+    #[test]
+    fn asid_multiple_wraps_produce_increasing_generations() {
+        let mut alloc = AsidAllocator::new(8);
+
+        for wrap_num in 1..=5u64 {
+            for _ in 0..255 {
+                alloc.allocate();
+            }
+
+            assert_eq!(
+                alloc.generation(),
+                wrap_num,
+                "generation must equal wrap count"
+            );
+        }
+    }
+
+    #[test]
+    fn asid_pair_unique_across_generations() {
+        let mut alloc = AsidAllocator::new(8);
+        // 512 allocations = 2 full epochs. Track (asid, generation) pairs
+        // in a fixed array: 255 slots * 3 generations (0, 1, 2) is enough.
+        let mut seen = [[false; 3]; 256];
+
+        for _ in 0..512 {
+            let result = alloc.allocate();
+            let epoch = result.generation as usize;
+
+            assert!(
+                epoch < 3 && !seen[result.asid as usize][epoch],
+                "(asid={}, generation={}) allocated twice",
+                result.asid,
+                result.generation
+            );
+
+            seen[result.asid as usize][epoch] = true;
+        }
+    }
+
+    #[test]
+    fn asid_generation_available_on_kernel_state() {
+        let state = make_kernel_state();
+
+        assert_eq!(
+            state.asid_generation.load(Ordering::Relaxed),
+            0,
+            "initial asid_generation must be 0"
+        );
     }
 
     // ── IRQ routing edge cases ───────────────────────────────────────

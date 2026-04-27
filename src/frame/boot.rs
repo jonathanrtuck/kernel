@@ -225,12 +225,14 @@ fn create_root_observer(
     rs_pa: usize,
     page_table_root: u64,
     asid: u16,
+    asid_generation: u64,
 ) -> Result<(crate::arena::ObjectId, NonNull<Observer>), AllocError> {
     let mut observers = ks.observers.acquire();
     let (obs_id, obs) = observers.allocate()?;
 
     obs.object_id = obs_id;
     obs.asid = asid;
+    obs.asid_generation = asid_generation;
     obs.register_state = RegisterStateHandle::new(
         NonNull::new(mmu::phys_to_virt(rs_pa) as *mut u8).expect("rs_pa must be non-null"),
     );
@@ -513,13 +515,14 @@ fn create_child_observer(
         rs.sp = child_stack_top as u64;
     }
 
-    let child_asid = crate::frame::cores::allocate_asid(ks);
+    let (child_asid, child_asid_gen) = crate::frame::cores::allocate_asid(ks);
     let child_page_table_root = mmu::make_ttbr0(child_asid, child_l1_pa as u64);
     let mut observers = ks.observers.acquire();
     let (child_id, child_obs) = observers.allocate()?;
 
     child_obs.object_id = child_id;
     child_obs.asid = child_asid;
+    child_obs.asid_generation = child_asid_gen;
     child_obs.register_state = crate::observer::RegisterStateHandle::new(
         NonNull::new(mmu::phys_to_virt(child_rs_pa) as *mut u8)
             .expect("child rs_pa must be non-null"),
@@ -947,11 +950,11 @@ pub fn enter_first_observer(ks: &KernelState) -> ! {
     );
 
     let rs_pa = setup_register_state(ks).expect("allocate register state");
-    let asid = crate::frame::cores::allocate_asid(ks);
+    let (asid, asid_gen) = crate::frame::cores::allocate_asid(ks);
     let l1_pa = allocate_observer_l1(ks).expect("allocate root observer L1");
     let page_table_root = mmu::make_ttbr0(asid, l1_pa as u64);
-    let (obs_id, obs_ptr) =
-        create_root_observer(ks, rs_pa, page_table_root, asid).expect("create root observer");
+    let (obs_id, obs_ptr) = create_root_observer(ks, rs_pa, page_table_root, asid, asid_gen)
+        .expect("create root observer");
     // ── Root Space and cap table setup (Phase 5) ────────────────
     let root_space_id = create_root_space(ks).expect("create root space");
     let cap_entries =

@@ -5503,8 +5503,8 @@ memory for unused regions).
 - `100-fault-delivery-mechanics.md` — reasoning for D100: fault message register
   layout, fault Observer cap rights, kernel-as-root-fault-handler terminus.
 - `101-asid-assignment-and-tlb-invalidation-policy.md` — reasoning for D101:
-  sequential ASID assignment, no recycling, wrap triggers full broadcast. Per-VA
-  vs per-ASID TLB invalidation threshold.
+  generation-based ASID allocation, context switch staleness check, wrap triggers
+  full broadcast. Per-VA vs per-ASID TLB invalidation threshold.
 - `102-test-infrastructure-and-bootstrap-patterns.md` — reasoning for D102: flat
   binary test format, multi-Observer bootstrap sequence, IPC setup pattern.
 - `103-write-read-registers-inline-protocol.md` — reasoning for D103: inline
@@ -5634,12 +5634,16 @@ serial, PSCI SYSTEM_OFF.
 
 ### D101 — ASID assignment and TLB invalidation policy
 
-Sequential ASID assignment from kernel counter; maximum hardware width (16-bit
-where supported). No recycling — sequential avoids ABA on stale TLB entries.
-Wrap triggers full TLB broadcast (TLBI VMALLE1IS) and counter reset. TLB
-invalidation on Space unmap (D24): per-VA (TLBI VAE1IS) when page_count <=
-threshold; per-ASID (TLBI ASIDE1IS) for bulk. Always IS variant for cross-core
-broadcast. DSB ISH for completion.
+Generation-based ASID allocation. Sequential hardware ASID assignment from
+kernel counter; maximum hardware width (16-bit where supported). Each allocation
+returns `(asid, generation)`. Wrap increments the generation, triggers full TLB
+broadcast (TLBI VMALLE1IS), and resets the counter. Context switch compares the
+Observer's stored generation against the global generation (lock-free atomic
+read); stale Observers get a fresh ASID before TTBR0 is written. This is the
+standard epoch scheme (Linux uses the same approach). TLB invalidation on Space
+unmap (D24): per-VA (TLBI VAE1IS) when page_count <= threshold; per-ASID (TLBI
+ASIDE1IS) for bulk. Always IS variant for cross-core broadcast. DSB ISH for
+completion.
 
 - **Rests on:** D5, D24, D25, D26, D46, D56, D88, D89, D91.
 - **Status:** settled.

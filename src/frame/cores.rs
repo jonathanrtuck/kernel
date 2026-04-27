@@ -1072,28 +1072,62 @@ pub fn update_register_state_ptr(rs_ptr: *mut RegisterState) {
 
 /// Allocate a unique ASID from the kernel's AsidAllocator (D101).
 ///
-/// The TLB flush on wrap is issued outside the lock's critical section.
-/// This is safe because the returned ASID is freshly allocated — no
-/// existing TTBR0 encodes it, so no stale TLB entries can exist for it.
-/// The flush only needs to complete before the ASID enters TTBR0, which
-/// happens after this function returns.
-pub fn allocate_asid(ks: &crate::kernel_state::KernelState) -> u16 {
-    let (asid, wrapped) = {
+/// Returns `(hardware_asid, generation)`. The generation identifies the
+/// epoch — Observers must store both and the context switch path compares
+/// the stored generation against `KernelState::asid_generation` to detect
+/// stale ASIDs after a wrap.
+///
+/// On wrap: bumps `KernelState::asid_generation` and issues a full TLB
+/// flush. Both happen outside the lock's critical section — safe because
+/// the returned ASID is freshly allocated and no existing TTBR0 encodes it.
+pub fn allocate_asid(ks: &crate::kernel_state::KernelState) -> (u16, u64) {
+    let (asid, generation, wrapped) = {
         let mut alloc = ks.asid_allocator.acquire();
         let result = alloc.allocate();
 
-        (result.asid, result.wrapped)
+        (result.asid, result.generation, result.wrapped)
     };
 
-    #[cfg(target_os = "none")]
     if wrapped {
+        ks.asid_generation
+            .store(generation, core::sync::atomic::Ordering::Release);
+
+        #[cfg(target_os = "none")]
         crate::frame::arch::mmu::tlb_flush_all_user();
     }
 
-    #[cfg(not(target_os = "none"))]
-    let _ = wrapped;
+    (asid, generation)
+}
 
-    asid
+/// Re-allocate a stale Observer's ASID before context switch (D101).
+///
+/// Compares the Observer's stored `asid_generation` against the current
+/// global generation. If stale (the allocator wrapped since this Observer
+/// last ran), allocates a fresh ASID and rebuilds `page_table_root` with
+/// the new ASID in bits\[63:48\].
+///
+/// Called on the context switch hot path. The common case (generation
+/// matches) is a single atomic load + compare — no lock, no allocation.
+#[cfg(target_os = "none")]
+pub fn refresh_observer_asid(observer_ptr: core::ptr::NonNull<Observer>) {
+    let ks = crate::frame::kernel_state();
+    let current_gen = ks
+        .asid_generation
+        .load(core::sync::atomic::Ordering::Acquire);
+    // SAFETY: observer_ptr points to a live Observer from DispatchResult.
+    // A4 non-reentrancy guarantees no aliasing on a single core.
+    let observer = unsafe { &mut *observer_ptr.as_ptr() };
+
+    if observer.asid_generation == current_gen {
+        return;
+    }
+
+    let (new_asid, new_gen) = allocate_asid(ks);
+    let base_pa = crate::frame::arch::mmu::ttbr_base_address(observer.page_table_root);
+
+    observer.asid = new_asid;
+    observer.asid_generation = new_gen;
+    observer.page_table_root = crate::frame::arch::mmu::make_ttbr0(new_asid, base_pa);
 }
 
 /// Read the hardware counter frequency (D72, CNTFRQ_EL0).

@@ -2259,7 +2259,7 @@ impl<S: Scheduler> CoreState<S> {
                         Ok(pair) => pair,
                         Err(_) => return typed_error(SyscallError::InsufficientResource),
                     };
-                    let asid = crate::frame::cores::allocate_asid(kernel_state);
+                    let (asid, asid_gen) = crate::frame::cores::allocate_asid(kernel_state);
 
                     // D26: allocate per-Observer L1 page table with L1[0] → kernel L2_ROOT.
                     // Host tests skip this — no MMU.
@@ -2279,6 +2279,7 @@ impl<S: Scheduler> CoreState<S> {
 
                     obs.object_id = id;
                     obs.asid = asid;
+                    obs.asid_generation = asid_gen;
                     obs.register_state = crate::observer::RegisterStateHandle::new(rs_ptr);
                     obs.page_table_root = page_table_root;
                     obs.cap_table = cap_entries_new;
@@ -5121,6 +5122,7 @@ mod tests {
         let observer = Observer {
             object_id: ObjectId(0),
             asid: 0,
+            asid_generation: 0,
             register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
             page_table_root: 0,
             cap_table: entries,
@@ -9927,6 +9929,7 @@ mod tests {
         let mut faulting = Observer {
             object_id: ObjectId(99),
             asid: 0,
+            asid_generation: 0,
             register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
             page_table_root: 0,
             cap_table: entries,
@@ -10099,6 +10102,7 @@ mod tests {
         let mut sender = Observer {
             object_id: ObjectId(0),
             asid: 0,
+            asid_generation: 0,
             register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
             page_table_root: 0,
             cap_table: entries,
@@ -10352,6 +10356,7 @@ mod tests {
         let mut requester = Observer {
             object_id: ObjectId(0),
             asid: 0,
+            asid_generation: 0,
             register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
             page_table_root: 0,
             cap_table: entries,

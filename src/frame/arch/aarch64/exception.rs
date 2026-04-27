@@ -354,6 +354,8 @@ fn restore_or_idle(result: crate::core_manager::DispatchResult) -> ! {
 
     match result {
         DispatchResult::Resume(observer_ptr) | DispatchResult::ResumeFastPath(observer_ptr) => {
+            crate::frame::cores::refresh_observer_asid(observer_ptr);
+
             let (rs_ptr, pt_root, clock_access) =
                 crate::frame::cores::observer_restore_info(observer_ptr);
 
