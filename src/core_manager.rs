@@ -2655,11 +2655,9 @@ impl<S: Scheduler> CoreState<S> {
             None => return self.fatal_fault(observer_ptr, &fault),
         };
 
-        if crate::frame::cores::observer_set_faulted(observer_ptr).is_err() {
-            return self.fatal_fault(observer_ptr, &fault);
-        }
-
         // Single lock scope: validate generation and deliver atomically.
+        // D-0.3: validate handler Field BEFORE setting Faulted. If validation
+        // fails, the Observer was never set to Faulted — escalate cleanly.
         let mut fields = kernel_state.fields.acquire();
         let live_gen = match fields.get(obj_id) {
             Some(f) => f.generation.load(Ordering::Acquire),
@@ -2686,6 +2684,14 @@ impl<S: Scheduler> CoreState<S> {
                 return self.fatal_fault(observer_ptr, &fault);
             }
         };
+
+        // All preconditions validated — now transition to Faulted.
+        if crate::frame::cores::observer_set_faulted(observer_ptr).is_err() {
+            drop(fields);
+
+            return self.fatal_fault(observer_ptr, &fault);
+        }
+
         let outcome = crate::fault::deliver_fault(
             fault,
             handler_field,
