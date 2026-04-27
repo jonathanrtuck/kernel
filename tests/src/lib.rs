@@ -9,6 +9,7 @@
 #![no_std]
 
 pub mod bench;
+pub mod harness;
 
 use core::arch::asm;
 
@@ -530,6 +531,51 @@ pub fn create_pulsar(
         space,
         [field, badge, duration_ns, period_ns],
     )
+}
+
+// ── Space info (test infrastructure) ─────────────────────────
+
+/// Read Space VA base and size via BRK #0x49 (test infrastructure).
+///
+/// Returns (va_base, size) on success, (u64::MAX, 0) on error.
+pub fn space_info(handle: u64) -> (u64, u64) {
+    let va_base: u64;
+    let size: u64;
+
+    // SAFETY: BRK #0x49 is the kernel's Space metadata query (test
+    // infrastructure). The kernel reads x0 (handle), resolves it to a
+    // Space, writes va_base to x0 and size to x1, advances PC, resumes.
+    unsafe {
+        asm!(
+            "brk #0x49",
+            in("x0") handle,
+            lateout("x0") va_base,
+            lateout("x1") size,
+        );
+    }
+
+    (va_base, size)
+}
+
+/// Install a Field cap at SLOT_REPLY_FIELD (slot 1) via BRK #0x4A.
+///
+/// Required before the calling Observer can use Call (SVC #3).
+/// Returns true on success.
+pub fn install_reply_field(field_handle: u64) -> bool {
+    let result: u64;
+
+    // SAFETY: BRK #0x4A is the kernel's reply Field installer (test
+    // infrastructure). The kernel copies the Field cap at `field_handle`
+    // to slot 1 in the caller's cap table, advances PC, resumes.
+    unsafe {
+        asm!(
+            "brk #0x4a",
+            in("x0") field_handle,
+            lateout("x0") result,
+        );
+    }
+
+    result == 0
 }
 
 // ── Observer creation ─────────────────────────────────────────

@@ -257,6 +257,10 @@ fn handle_el0_sync<S: crate::time_manager::Scheduler + 'static>(
                 verify_observer_destroy()
             } else if imm == 0x48 {
                 bench_emit::<S>()
+            } else if imm == 0x49 {
+                space_info::<S>()
+            } else if imm == 0x4A {
+                install_reply_field::<S>()
             } else {
                 handle_el0_fault::<S>(esr, far)
             }
@@ -539,8 +543,8 @@ fn verify_observer_destroy() -> ! {
 /// The kernel does not interpret the register semantics — it just prints
 /// them as zero-padded hex for the host benchmark runner to parse.
 #[cfg(target_os = "none")]
-fn bench_emit<S: crate::time_manager::Scheduler + 'static>()
--> crate::core_manager::DispatchResult {
+fn bench_emit<S: crate::time_manager::Scheduler + 'static>() -> crate::core_manager::DispatchResult
+{
     let core = crate::core_manager::current_core::<S>();
     let observer = core.current.expect("must have current observer");
     let regs = crate::frame::cores::read_typed_registers(observer);
@@ -552,6 +556,98 @@ fn bench_emit<S: crate::time_manager::Scheduler + 'static>()
         regs.args[2],
         regs.args[3],
     );
+
+    crate::frame::cores::observer_advance_pc(observer);
+    crate::core_manager::DispatchResult::Resume(observer)
+}
+
+/// BRK #0x49: read Space metadata (test infrastructure).
+///
+/// x0 = Space cap handle. Returns va_base in x0, size in x1,
+/// then resumes execution. On error (bad handle or wrong type),
+/// writes u64::MAX to x0.
+#[cfg(target_os = "none")]
+fn space_info<S: crate::time_manager::Scheduler + 'static>() -> crate::core_manager::DispatchResult
+{
+    let core = crate::core_manager::current_core::<S>();
+    let observer = core.current.expect("must have current observer");
+    let regs = crate::frame::cores::read_typed_registers(observer);
+    let handle = crate::capability::Handle::decode(regs.args[0]);
+    let ks = crate::frame::kernel_state();
+    let (va_base, size) = match crate::frame::cores::observer_read_cap_entry(observer, handle.index)
+    {
+        Some((crate::capability::ObjectType::Space, space_id, _badge)) => {
+            let spaces = ks.spaces.acquire();
+
+            match spaces.get(space_id) {
+                Some(space) => (space.va_base as u64, space.size as u64),
+                None => (u64::MAX, 0),
+            }
+        }
+        _ => (u64::MAX, 0),
+    };
+
+    // SAFETY: observer points to a live Observer. A4 non-reentrancy.
+    // We write va_base to x0 and size to x1 in the saved RegisterState.
+    unsafe {
+        let obs = observer.as_ref();
+        let rs = &mut *(obs.register_state.as_ptr().as_ptr()
+            as *mut crate::frame::arch::register_state::RegisterState);
+
+        rs.gprs[0] = va_base;
+        rs.gprs[1] = size;
+    }
+
+    crate::frame::cores::observer_advance_pc(observer);
+    crate::core_manager::DispatchResult::Resume(observer)
+}
+
+/// BRK #0x4A: install reply Field at SLOT_REPLY_FIELD (test infrastructure).
+///
+/// x0 = Field cap handle. Copies the Field cap entry to slot 1 in the
+/// caller's cap table, enabling Call (SVC #3) for this Observer.
+/// Returns 0 in x0 on success, u64::MAX on error.
+#[cfg(target_os = "none")]
+fn install_reply_field<S: crate::time_manager::Scheduler + 'static>()
+-> crate::core_manager::DispatchResult {
+    let core = crate::core_manager::current_core::<S>();
+    let observer = core.current.expect("must have current observer");
+    let regs = crate::frame::cores::read_typed_registers(observer);
+    let handle = crate::capability::Handle::decode(regs.args[0]);
+    let result = match crate::frame::cores::observer_read_full_cap_entry(observer, handle.index) {
+        Some(entry) if entry.object.is_some_and(|(_ty, _id)| true) => {
+            // SAFETY: observer points to a live Observer. A4 non-reentrancy.
+            // Write the Field cap entry to SLOT_REPLY_FIELD (slot 1).
+            unsafe {
+                let obs = observer.as_ref();
+                let wrote = crate::frame::capabilities::write_entry(
+                    obs.cap_table,
+                    obs.cap_table_capacity,
+                    crate::capability::SLOT_REPLY_FIELD,
+                    crate::capability::Entry {
+                        object: entry.object,
+                        rights: crate::capability::Rights::RECEIVE,
+                        badge: entry.badge,
+                        slot_tag: entry.slot_tag,
+                        send_once: false,
+                        stored_generation: entry.stored_generation,
+                    },
+                );
+
+                if wrote { 0u64 } else { u64::MAX }
+            }
+        }
+        _ => u64::MAX,
+    };
+
+    // SAFETY: same as space_info handler.
+    unsafe {
+        let obs = observer.as_ref();
+        let rs = &mut *(obs.register_state.as_ptr().as_ptr()
+            as *mut crate::frame::arch::register_state::RegisterState);
+
+        rs.gprs[0] = result;
+    }
 
     crate::frame::cores::observer_advance_pc(observer);
     crate::core_manager::DispatchResult::Resume(observer)

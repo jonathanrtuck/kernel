@@ -572,11 +572,11 @@ impl<S: Scheduler> CoreState<S> {
                 // D96: mint reply cap from sender's SLOT_REPLY_FIELD (slot 1).
                 // reply_badge from x7 (D65).
                 let reply_badge = crate::capability::Badge(ipc_regs.reply_info);
-                let reply_cap = crate::frame::cores::observer_read_cap_entry(
+                let reply_info = crate::frame::cores::observer_read_cap_entry(
                     sender_ptr,
                     crate::capability::SLOT_REPLY_FIELD,
-                )
-                .map(|(object_type, object_id, stored_generation)| {
+                );
+                let reply_cap = reply_info.map(|(object_type, object_id, stored_generation)| {
                     crate::capability::TransferredCap {
                         object_type,
                         object_id,
@@ -588,6 +588,7 @@ impl<S: Scheduler> CoreState<S> {
                         stored_generation,
                     }
                 });
+                let reply_field_id = reply_info.map(|(_, id, _)| id);
                 let message = crate::field::Message {
                     data: ipc_regs.data,
                     label: ipc_regs.label,
@@ -618,6 +619,18 @@ impl<S: Scheduler> CoreState<S> {
                         return DispatchResult::Resume(sender_ptr);
                     }
                 };
+
+                // Register sender as waiter on reply Field so the reply
+                // delivery (via ReplyRecv) can find and wake the sender.
+                if let Some(rf_id) = reply_field_id
+                    && let Some(reply_field) = fields_guard.get_mut(rf_id)
+                {
+                    let reply_field_ptr = NonNull::from(&mut *reply_field);
+                    let wait_entry =
+                        crate::frame::cores::observer_prepare_wait(sender_ptr, reply_field_ptr);
+
+                    reply_field.add_waiter(wait_entry);
+                }
 
                 drop(fields_guard);
 
