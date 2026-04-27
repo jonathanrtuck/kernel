@@ -4547,6 +4547,136 @@ downstream).
   what data is available for register writes).
 - **Journal:** `journal/079-scheduling-decision-matrix.md`.
 
+### D80 — Error and fault delivery protocol
+
+Two distinct paths. Syscall errors: dispatch writes error encoding (D49) to the
+current Observer's registers and resumes it — no state transition, no IPC. Fault
+delivery: kernel constructs a fault message (D28 layout, D61 per-type data
+words) and delivers it as IPC to the handler Field. The fault cap is constructed
+directly by the kernel with a 5-right subset (D39: resume, destroy, install-cap,
+write-registers, read-registers) — not minted from the Observer's self-cap.
+Three delivery outcomes: direct delivery to a waiting handler, deferred via D18
+pending list, or handler unavailable (D68 chain terminus).
+
+- **Rests on:** D12, D13, D18, D21, D39, D49, D61, D76.
+- **Status:** settled.
+- **Journal:** `journal/080-error-fault-delivery.md`.
+
+### D81 — Hardware event protocol
+
+IRQ delivery uses a kernel-wide routing table: each INTID maps to a Field with
+badge and generation for stale-route detection. The table is global (D22: IRQs
+must reach any Field regardless of which core takes the interrupt); per-core
+routing rejected. Timer interrupts check a per-core deadline structure; expired
+Pulsars fire and rearm (D62/D63). Queue-full triggers deferred fault delivery
+(D80); overruns tracked per-Pulsar.
+
+- **Rests on:** D2, D22, D44, D62, D63, D75, D76, D82, D83.
+- **Status:** settled.
+- **Journal:** `journal/081-hardware-event-protocol.md`.
+
+### D82 — Global state organization
+
+Shared kernel state (five per-type arenas + SpaceManager) lives in a single
+bundled structure, accessed through a safe global accessor. Each field is
+independently locked (D53 ordering). The structure is initialized at boot and
+immovable thereafter. Alternatives rejected: per-core copies (inflates per-core
+state, complicates test setup), free-standing globals (scatters organization,
+loses single point of change per D75), lazy initialization (boot-time init
+sufficient per A4 + D46).
+
+- **Rests on:** D75, D53, D1, D46, D3, D31, D70, A1.
+- **Status:** settled.
+- **Journal:** `journal/082-global-state-organization.md`.
+
+### D83 — Per-core data organization
+
+Per-core state splits into two layers: a minimal fixed-layout structure
+addressable from assembly (register save target pointer + scheduler state
+pointer), and a richer scheduler state structure accessible only from Rust. The
+fixed-layout structure lives at TPIDR_EL1. Assembly never touches the scheduler
+state directly — the indirection decouples assembly layout from Rust generics.
+Each core also carries a fixed-capacity deadline structure for Pulsar timer
+checking (D44). Pointing TPIDR_EL1 directly at scheduler state rejected (generic
+type makes assembly layout unknowable). Dynamic deadline allocation rejected
+(timer handler must not allocate).
+
+- **Rests on:** D1, D46, D56, D74.
+- **Status:** settled.
+- **Journal:** `journal/083-per-core-data-organization.md`.
+
+### D88 — TTBR0/TTBR1 split contract
+
+Kernel occupies the upper-half virtual address space (TTBR1, 2-level walk, 64
+GiB). Per-Observer user mappings occupy the lower half (TTBR0, 3-level walk, 128
+TiB). E0PD1 prevents EL0 speculative access to kernel space. TTBR0-only rejected
+(every page table must include kernel mappings; weaker security). Symmetric
+2-level for both halves rejected (only 2048 Space slots; breaks D26 shared page
+table subtree model). Full KPTI unnecessary with E0PD (fallback on pre-ARMv8.5
+hardware).
+
+- **Rests on:** A2, D1, D5, D26, D43, D74.
+- **Status:** settled.
+- **Journal:** `journal/088-ttbr-split-contract.md`.
+
+### D89 — Per-Observer page table structure
+
+Three-level structure: per-Observer root, per-Observer per-region intermediate
+tables, and per-Space leaf tables shared across Observers. Each Space occupies a
+fixed VA-aligned region. One leaf table per Space is referenced from each
+holding Observer's intermediate table, scaling as O(Observers + Spaces) rather
+than O(Observers × Spaces). Per-Observer leaf tables (no sharing) rejected on
+memory cost. Sharing with a 2-level structure rejected (limits total Space
+count, wastes VA for small Spaces).
+
+- **Rests on:** D5, D24, D26, D43, D88.
+- **Status:** settled.
+- **Journal:** `journal/089-per-observer-page-table.md`.
+
+### D90 — PTE population policy: eager
+
+Page table entries for a Space's physical pages are populated eagerly at Space
+creation. No demand faults on first access. Demand faulting rejected: per-fault
+overhead exceeds per-entry write cost by orders of magnitude, adds a
+demand-fault check to the exception path, and creates non-deterministic
+first-access latency (D42 tension). Hybrid (eager for small, demand for large)
+rejected: threshold heuristic adds complexity without measurable benefit since
+even large Spaces populate cheaply.
+
+- **Rests on:** D1, D12, D26, D32, D42, D61, D89.
+- **Status:** settled.
+- **Journal:** `journal/090-pte-population-policy.md`.
+
+### D91 — Cap-to-mapping protocol
+
+Page table mutations on cap install/close operate at the intermediate table
+level: one table descriptor write to map a Space's shared leaf table, one clear
+to unmap. Leaf tables are populated eagerly (D90) and shared immutably. On cap
+install: if the Space is already mapped (duplicate cap), no work; otherwise
+write the descriptor and allocate the intermediate table from root pool if
+needed. On close: check whether any remaining caps reference the same Space; if
+this was the last, clear the descriptor and TLB invalidate. Per-Observer
+per-Space reference count rejected: avoids the cap table scan but adds state to
+maintain across install, close, cascade, and transfer.
+
+- **Rests on:** D8, D11, D24, D26, D33, D41, D89, D90.
+- **Status:** settled.
+- **Journal:** `journal/091-cap-to-mapping-protocol.md`.
+
+### D92 — Page table memory accounting
+
+Per-Observer root tables are allocated from the consumed Space at Observer
+creation (D35 structural backing). Per-Observer intermediate tables are
+allocated on demand from the kernel root pool (D31) when the first Space cap in
+a region is installed. Per-Space leaf tables are charged to the Space's type
+conversion overhead (D32) at Space creation. On-demand intermediate allocation
+chosen over pre-reservation (matches typical single-region case, avoids wasting
+memory for unused regions).
+
+- **Rests on:** D31, D32, D35, D43, D70, D89.
+- **Status:** settled.
+- **Journal:** `journal/092-page-table-memory-accounting.md`.
+
 ---
 
 ## Open questions
@@ -4753,15 +4883,15 @@ downstream).
   journal 071: field_split settled as split-to-new only, multi-receive covers
   the two-Field case). Observer wait-state internals must accommodate N-field
   blocking from the initial implementation.
-- **Badge downstream details.** D17 settles badge semantics (minter-assigned,
-  mint right, opt-in per-badge tracking). Remaining: ~~badge size~~ (settled by
-  D58: u64), ~~send-once exemption encoding~~ (settled by D73: structural
-  code-path separation, reply Field always-tracked), ~~badge on D16
-  kernel-created send-once caps~~ (settled by D65: caller-supplied reply_badge),
-  max-badge-count / capacity semantics for tracked fields, ~~badge-closure
-  message format~~ (settled by D64). (Badge-closure × overflow: resolved by D18
-  — dropped on full queue. Per-badge tracking × coalescing: dissolved by D18 —
-  coalescing is not a field mechanism; per-badge map serves tracking only.)
+- ~~**Badge downstream details.**~~ D17 settles badge semantics
+  (minter-assigned, mint right, opt-in per-badge tracking). All sub-items
+  resolved: ~~badge size~~ (D58: u64), ~~send-once exemption encoding~~ (D73),
+  ~~badge on D16 kernel-created send-once caps~~ (D65: caller-supplied
+  reply_badge), ~~max-badge-count / capacity semantics~~ (growable map with hard
+  ceiling; new badges beyond ceiling silently dropped), ~~badge-closure message
+  format~~ (D64). (Badge-closure × overflow: resolved by D18 — dropped on full
+  queue. Per-badge tracking × coalescing: dissolved by D18 — coalescing is not a
+  field mechanism; per-badge map serves tracking only.)
 - ~~**Fault handler representation.**~~ Settled by D21: cap-table entry. The
   handler is a regular capability in the Observer's D8 flat table at a
   kernel-reserved slot index. D11 destroy-invalidation, D17 badge-closure, and
@@ -4813,14 +4943,10 @@ downstream).
 - ~~**Explicit unmap() semantics.**~~ Dissolved by D26: no explicit map() or
   unmap(). The page table is managed by the kernel based on Space cap holdings.
   Holding a cap grants access; losing a cap removes access.
-- **Sub-page packing under D24.** D24's page table cleanup operates at page
-  granularity (the MMU works in pages). If the kernel packs multiple small
-  Spaces onto one physical page, closing the last cap to one Space can't remove
-  the shared page table entry without affecting the other. Resolution options:
-  no packing (each Space gets its own page — internal fragmentation), copy
-  co-located Spaces on cleanup (expensive), or accept that sub-page Spaces don't
-  benefit from automatic cleanup. Kernel-internal implementation concern, but
-  D24 makes it load-bearing.
+- ~~**Sub-page packing under D24.**~~ Dissolved by D25 + D60: Spaces are
+  page-granular (minimum size = one page, all sizes rounded to page boundaries).
+  Multiple Spaces cannot share a physical page, so the cleanup concern cannot
+  arise.
 - ~~**Space acquisition at runtime.**~~ Settled by D31: Observers acquire Space
   through the pager chain. A resource request syscall is routed to the
   Observer's fault handler (D12 mechanism). The handler grants (from own
@@ -4836,23 +4962,14 @@ downstream).
   in a global `KernelState` struct (not in CoreState). Cold-path dispatch code
   accesses them through the global. Lock<T> refactored to own data (UnsafeCell)
   — type-system enforcement of lock-before-access.
-- **Observer cap table capacity.** `Observer::cap_table` is a raw pointer to the
-  flat entry array (D8), but the table capacity is not stored on the Observer.
-  The dispatch hot path needs capacity for bounds-checking handle resolution.
-  D43's remaining item "cap table capacity tracking placement" is this gap.
-  Options: add `cap_table_capacity: u32` to Observer metadata (hot path, ~4
-  bytes), or store capacity in structural backing adjacent to the entry array
-  (cold-path lookup). Surfaced by Phase D Wave 3 implementation.
-- **Per-core Pulsar deadline queue.** `handle_timer` (D44) must check pending
-  Pulsar deadlines on each preemption tick. This requires a per-core sorted
-  deadline structure in CoreState (min-heap or sorted list of upcoming
-  `next_deadline_ticks`). The Pulsar struct and fire_message are implemented;
-  the per-core scheduling of deadline checks is not.
-- **IRQ-to-Field routing table.** `handle_irq` (D22) must map IRQ numbers to
-  registered driver Fields with per-IRQ badges and send-once ack caps. This
-  mapping is not yet in CoreState or any shared kernel structure. The D22
-  derivation describes the mechanism; the data structure is
-  implementation-level.
+- ~~**Observer cap table capacity.**~~ Settled by D83: capacity stored in
+  Observer metadata (hot-path access). D43's remaining item closed.
+- ~~**Per-core Pulsar deadline queue.**~~ Settled by D83: fixed-capacity
+  per-core deadline structure in CoreState. Timer handler checks pending
+  deadlines on each preemption tick.
+- ~~**IRQ-to-Field routing table.**~~ Settled by D81: kernel-wide direct-indexed
+  routing table in KernelState (D82). Each route maps an INTID to a Field with
+  badge and generation for stale-route detection.
 
 ---
 
@@ -5310,6 +5427,94 @@ downstream).
   points). Per-core copies not foreclosed but would require reopening D53.
   Consistent with "push complexity to the leaves" and "isolate uncertain
   decisions behind interfaces."
+- `076-dispatch-entry-contract.md` — reasoning for D76: dispatch entry contract.
+  Pull registers from RegisterState, push results back, three-variant
+  DispatchResult (Resume, ResumeFastPath, Idle). Frame/ boundary between
+  register manipulation and dispatch logic.
+- `077-cap-resolution-protocol.md` — reasoning for cap resolution: handle →
+  entry lookup with bounds check, generation check, rights check. The protocol
+  that every typed operation and IPC path uses to validate capabilities.
+- `078-ipc-message-ownership.md` — reasoning for D78: IPC message ownership.
+  Explicit transfer through return types — outcome structs carry messages and
+  Observer pointers. Prevents use-after-move and double-delivery at the type
+  level.
+- `079-scheduling-decision-matrix.md` — reasoning for D79: state transitions and
+  dispatch results per IPC outcome. Systematic matrix enumerating every
+  send/receive/call/reply-receive combination against Observer state and
+  scheduling decision.
+- `080-error-fault-delivery.md` — reasoning for D80: error and fault delivery
+  protocol. Two paths: error-to-registers for syscall failures, fault-as-IPC for
+  exceptions. Fault cap constructed with 5-right subset.
+- `081-hardware-event-protocol.md` — reasoning for D81: hardware event protocol.
+  Kernel-wide IRQ routing table (D22), per-core deadline checking for Pulsars
+  (D44). Per-core IRQ routing rejected.
+- `082-global-state-organization.md` — reasoning for D82: global state
+  organization. Bundled shared kernel state with independent locks (D53). Lazy
+  init rejected (boot-time sufficient). Per-core copies rejected (inflation).
+- `083-per-core-data-organization.md` — reasoning for D83: per-core data
+  organization. Two-layer split: fixed-layout assembly-visible structure at
+  TPIDR_EL1, richer scheduler state behind pointer indirection. Fixed-capacity
+  deadline structure for Pulsar timer checking.
+- `084-el0-exception-entry-mechanics.md` — implementation mechanics for EL0
+  exception entry. Bootstrap sequence for register save via TPIDR_EL1.
+  Realization of D74 + D83.
+- `085-context-switch-restore-sequence.md` — implementation mechanics for
+  context switch restore. TTBR0 switch sequence, clock access restore, GPR
+  restore ordering. Realization of D74 + D66.
+- `086-svc-decode-el0-dispatch.md` — implementation mechanics for SVC decode.
+  ESR_EL1 classification, dispatch routing for syscalls and faults. Realization
+  of D47 + D48 + D49.
+- `087-ipc-fast-path-mechanics.md` — implementation mechanics for IPC fast-path
+  register pass-through. Deferred: marginal savings relative to complexity.
+  Realization of D50 + D74.
+- `088-ttbr-split-contract.md` — reasoning for D88: virtual address space
+  partitioning. Kernel upper-half (TTBR1, 2-level), user lower-half (TTBR0,
+  3-level). E0PD1 for speculative access prevention.
+- `089-per-observer-page-table.md` — reasoning for D89: per-Observer page table
+  structure. Three-level with shared per-Space leaf tables. O(Observers +
+  Spaces) memory scaling.
+- `090-pte-population-policy.md` — reasoning for D90: eager PTE population.
+  Demand faulting rejected on cost and determinism. Hybrid rejected on
+  complexity.
+- `091-cap-to-mapping-protocol.md` — reasoning for D91: page table mutations on
+  cap install/close. Intermediate-level operations only; leaf tables shared
+  immutably. Last-cap-close triggers unmap.
+- `092-page-table-memory-accounting.md` — reasoning for D92: which Space backs
+  each page table level. Root from consumed Space (D35), intermediate from root
+  pool (D31), leaf from type conversion overhead (D32).
+- `093-boot-memory-and-multicore-init.md` — reasoning for D93: boot memory
+  partitioning and secondary core activation sequence.
+- `094-root-observer-bootstrap-protocol.md` — reasoning for D94: root Observer
+  creation from DTB-discovered binary with initial resource allocation.
+- `095-object-creation-protocols.md` — reasoning for D95: Observer, Field, and
+  Pulsar creation protocols. Reserved slot population, composable setup.
+- `096-ipc-cap-transfer-mechanics.md` — reasoning for D96: reply cap and user
+  cap transfer during IPC. Move semantics for user caps, kernel-created
+  send-once for reply.
+- `097-cap-table-self-mutation-and-mapping-bridge.md` — reasoning for D97:
+  clone, close, mint, install-cap, write/read-registers, change-handler
+  protocols. D24 mapping bridge on Space cap close.
+- `098-destroy-cascade-and-return.md` — reasoning for D98: preemptible destroy
+  cascade with structural backing return. Continuation state for cross-batch
+  preemption.
+- `099-hardware-event-wiring.md` — reasoning for D99: IRQ delegation via
+  FieldSplit routing table updates. Pulsar deadline installation in creating
+  core.
+- `100-fault-delivery-mechanics.md` — reasoning for D100: fault message register
+  layout, fault Observer cap rights, kernel-as-root-fault-handler terminus.
+- `101-asid-assignment-and-tlb-invalidation-policy.md` — reasoning for D101:
+  sequential ASID assignment, no recycling, wrap triggers full broadcast. Per-VA
+  vs per-ASID TLB invalidation threshold.
+- `102-test-infrastructure-and-bootstrap-patterns.md` — reasoning for D102: flat
+  binary test format, multi-Observer bootstrap sequence, IPC setup pattern.
+- `103-write-read-registers-inline-protocol.md` — reasoning for D103: inline
+  register transfer via syscall arguments. Buffer-based transfer rejected (leaks
+  internal layout, expensive for common operations).
+- `104-resource-request-dispatch.md` — reasoning for D104: dual-path resource
+  request dispatch. Non-root faults upward; root handled directly by kernel.
+- `105-pager-chain-no-kernel-stack-recursion.md` — observation for D105: pager
+  chain does not recurse on kernel stack. Liveness under perpetually-faulted
+  handlers remains open.
 
 ### D93 — Boot memory and multi-core initialization
 
@@ -5451,6 +5656,51 @@ Field, installs send cap in child, keeps receive cap.
 - **Rests on:** D24, D26, D31, D32, D35, A3, A5.
 - **Status:** settled.
 - **Journal:** `journal/102-test-infrastructure-and-bootstrap-patterns.md`.
+
+### D103 — WriteRegisters/ReadRegisters: inline register protocol
+
+Registers are transferred inline via syscall argument registers (PC, SP, x0,
+PSTATE masked to NZCV only) rather than through a memory buffer. This decouples
+the kernel's internal RegisterState layout from the ABI, avoiding leaks across
+version changes. Buffer-based full RegisterState transfer rejected: leaks
+internal struct layout, requires expensive Space cap resolution and page table
+walk for common 2–4 register operations. Inline with more registers (x0–x7)
+rejected: not needed for current use cases. Unmasked PSTATE write rejected:
+privilege escalation risk (PSTATE.M bits allow userspace to set exception return
+level to EL1).
+
+- **Rests on:** D35, D39, D47, D97, A5.
+- **Status:** settled.
+- **Journal:** `journal/103-write-read-registers-inline-protocol.md`.
+
+### D104 — ResourceRequest dispatch: dual-path implementation
+
+Non-root Observers fault upward through the pager chain via standard D80 fault
+delivery. Root Observer ResourceRequests are handled directly by the kernel via
+SpaceManager pool allocation — the distinction is structural, not a policy
+choice. Fault delivery to kernel-internal Field rejected: unnecessary
+indirection since the kernel can allocate synchronously. Always fault upward
+rejected: no handler exists above root (D31 designates kernel as root's resource
+provider). Unified path with handler-presence check rejected: conflates fault
+message construction with resource pool management.
+
+- **Rests on:** D12, D21, D31, D61, D80, D100.
+- **Status:** settled.
+- **Journal:** `journal/104-resource-request-dispatch.md`.
+
+### D105 — Pager chain: no kernel-stack recursion
+
+The pager chain does not recurse on the kernel stack. `deliver_fault()` enqueues
+and returns immediately; each supervision level unrolls through a separate
+scheduling round. Liveness under perpetually-faulted (but not destroyed)
+handlers remains an open question — such handlers consume arena capacity without
+triggering D68's cap-invalidation detection. Possible future resolution via
+Pulsar watchdog (D44, D68 pattern), but kernel-level timeout versus userspace
+supervision policy is not yet settled.
+
+- **Rests on:** D12, D31, D44, D68, D80, D100.
+- **Status:** observation (partial) — liveness open.
+- **Journal:** `journal/105-pager-chain-no-kernel-stack-recursion.md`.
 
 ---
 
