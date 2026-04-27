@@ -8,6 +8,8 @@
 
 #![no_std]
 
+pub mod bench;
+
 use core::arch::asm;
 
 // ── Test protocol ───────────────────────────────────────────────

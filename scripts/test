@@ -183,6 +183,10 @@ if [ -f "$TEST_DIR/Cargo.toml" ] && [ -n "$LLVM_OBJCOPY" ]; then
             file "$elf" 2>/dev/null | grep -q "ELF" || continue
 
             name="$(basename "$elf")"
+
+            # Skip bench_* binaries — they're slow and opt-in via scripts/bench.
+            case "$name" in bench_*) continue ;; esac
+
             bin="$TMPDIR/rs_${name}.bin"
 
             if ! "$LLVM_OBJCOPY" -O binary "$elf" "$bin" 2>/dev/null; then
