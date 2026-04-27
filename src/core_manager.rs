@@ -1880,17 +1880,16 @@ impl<S: Scheduler> CoreState<S> {
 
                 let field_id = {
                     let mut fields = kernel_state.fields.acquire();
-                    let (id, new_field) = match fields.allocate() {
-                        Ok(pair) => pair,
-                        Err(_) => return typed_error(SyscallError::InsufficientResource),
-                    };
-
-                    *new_field = crate::field::Field::new(
+                    let new_field = crate::field::Field::new(
                         queue_ptr,
                         queue_capacity as u32,
                         backing_va,
                         space_size,
                     );
+                    let (id, _) = match fields.insert(new_field) {
+                        Ok(pair) => pair,
+                        Err(_) => return typed_error(SyscallError::InsufficientResource),
+                    };
 
                     id
                 };
@@ -1960,17 +1959,16 @@ impl<S: Scheduler> CoreState<S> {
 
                 let mut fields = kernel_state.fields.acquire();
                 let new_field_id = {
-                    let (id, new_field) = match fields.allocate() {
-                        Ok(pair) => pair,
-                        Err(_) => return typed_error(SyscallError::InsufficientResource),
-                    };
-
-                    *new_field = crate::field::Field::new(
+                    let new_field = crate::field::Field::new(
                         queue_ptr,
                         queue_capacity as u32,
                         backing_va,
                         space_size,
                     );
+                    let (id, _) = match fields.insert(new_field) {
+                        Ok(pair) => pair,
+                        Err(_) => return typed_error(SyscallError::InsufficientResource),
+                    };
 
                     id
                 };
@@ -2234,31 +2232,34 @@ impl<S: Scheduler> CoreState<S> {
 
                 let observer_id = {
                     let mut observers = kernel_state.observers.acquire();
-                    let (id, obs) = match observers.allocate() {
+                    let asid = crate::frame::cores::allocate_asid(kernel_state);
+                    let new_obs = crate::observer::Observer {
+                        object_id: ObjectId(0),
+                        asid,
+                        register_state: crate::observer::RegisterStateHandle::new(rs_ptr),
+                        page_table_root: 0,
+                        cap_table: cap_entries_new,
+                        cap_table_capacity: cap_capacity_new,
+                        cap_table_free_head: Some(crate::capability::SLOT_USER_START),
+                        cap_table_count: 0,
+                        state: crate::observer::PrimaryState::Inert,
+                        suspended: false,
+                        compute_aggregate: 0,
+                        responsiveness: crate::observer::DEFAULT_RESPONSIVENESS,
+                        throughput: crate::observer::DEFAULT_THROUGHPUT,
+                        clock_access: false,
+                        wait_state: crate::observer::WaitState::None,
+                        backing_va_base: backing_va,
+                        backing_size: space_size,
+                        refcount: 1,
+                        generation: core::sync::atomic::AtomicU64::new(0),
+                    };
+                    let (id, obs) = match observers.insert(new_obs) {
                         Ok(pair) => pair,
                         Err(_) => return typed_error(SyscallError::InsufficientResource),
                     };
-                    let asid = crate::frame::cores::allocate_asid(kernel_state);
 
                     obs.object_id = id;
-                    obs.asid = asid;
-                    obs.register_state = crate::observer::RegisterStateHandle::new(rs_ptr);
-                    obs.page_table_root = 0;
-                    obs.cap_table = cap_entries_new;
-                    obs.cap_table_capacity = cap_capacity_new;
-                    obs.cap_table_free_head = Some(crate::capability::SLOT_USER_START);
-                    obs.cap_table_count = 0;
-                    obs.state = crate::observer::PrimaryState::Inert;
-                    obs.suspended = false;
-                    obs.compute_aggregate = 0;
-                    obs.responsiveness = crate::observer::DEFAULT_RESPONSIVENESS;
-                    obs.throughput = crate::observer::DEFAULT_THROUGHPUT;
-                    obs.clock_access = false;
-                    obs.wait_state = crate::observer::WaitState::None;
-                    obs.backing_va_base = backing_va;
-                    obs.backing_size = space_size;
-                    obs.refcount = 1;
-                    obs.generation = core::sync::atomic::AtomicU64::new(0);
 
                     id
                 };

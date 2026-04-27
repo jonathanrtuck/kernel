@@ -69,6 +69,14 @@ impl<T> Arena<T> {
         self.store.allocate()
     }
 
+    /// Insert a fully-constructed value into the arena (sound API).
+    ///
+    /// Preferred over allocate() for types containing NonNull (Field,
+    /// Observer) to avoid MaybeUninit::zeroed().assume_init() UB.
+    pub fn insert(&mut self, value: T) -> Result<(ObjectId, &mut T), AllocError> {
+        self.store.insert(value)
+    }
+
     /// Look up an object by identifier.
     ///
     /// Returns `None` if `id` is out of bounds or the slot is free.

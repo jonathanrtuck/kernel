@@ -52,20 +52,15 @@ impl<T> SlabStore<T> {
         }
     }
 
-    /// Allocate a slot: reuse from freelist or grow, zero-initialize,
-    /// and return (index, &mut T).
+    /// Allocate a slot with zero-initialization (legacy API).
     ///
-    /// Returns `Err(OutOfMemory)` when the freelist is empty and the
-    /// slot vector has reached `max_slots`.
+    /// UB for types containing NonNull (zeroed NonNull is invalid).
+    /// Safe for Space, Time, Pulsar (no NonNull fields). For Field
+    /// and Observer, use `insert()` instead.
     pub fn allocate(&mut self) -> Result<(ObjectId, &mut T), AllocError> {
         if let Some(index) = self.freelist.pop() {
-            // Reuse a previously freed slot.
-            // SAFETY: MaybeUninit::zeroed() produces all-zero bytes without
-            // triggering Rust's debug-mode validity checks (which would reject
-            // zero for types containing NonNull). assume_init() is sound here
-            // because the caller MUST initialize all fields through the returned
-            // &mut T before reading. The &mut T is the only live reference to
-            // this slot (exclusive arena lock, LIFO freelist ensures no alias).
+            // SAFETY: zeroed bytes. Caller MUST write all fields before reading.
+            // UB if T contains NonNull — use insert() for those types.
             let zeroed: T = unsafe { core::mem::MaybeUninit::<T>::zeroed().assume_init() };
 
             self.slots[index as usize] = Some(zeroed);
@@ -74,11 +69,7 @@ impl<T> SlabStore<T> {
 
             Ok((ObjectId(index), value))
         } else if (self.slots.len() as u32) < self.max_slots {
-            // Grow the slot vector.
             let index = self.slots.len() as u32;
-            // SAFETY: Same as the freelist path above — MaybeUninit::zeroed()
-            // bypasses validity checks; assume_init() is sound because the
-            // caller initializes all fields before reading.
             let zeroed: T = unsafe { core::mem::MaybeUninit::<T>::zeroed().assume_init() };
 
             self.slots.push(Some(zeroed));
@@ -86,6 +77,30 @@ impl<T> SlabStore<T> {
             let value = self.slots.last_mut().unwrap().as_mut().unwrap();
 
             Ok((ObjectId(index), value))
+        } else {
+            Err(AllocError::OutOfMemory)
+        }
+    }
+
+    /// Insert a fully-constructed value into the arena (sound API).
+    ///
+    /// No UB — the caller provides a valid T. Preferred over allocate()
+    /// for types containing NonNull (Field, Observer).
+    pub fn insert(&mut self, value: T) -> Result<(ObjectId, &mut T), AllocError> {
+        if let Some(index) = self.freelist.pop() {
+            self.slots[index as usize] = Some(value);
+
+            let slot_ref = self.slots[index as usize].as_mut().unwrap();
+
+            Ok((ObjectId(index), slot_ref))
+        } else if (self.slots.len() as u32) < self.max_slots {
+            let index = self.slots.len() as u32;
+
+            self.slots.push(Some(value));
+
+            let slot_ref = self.slots.last_mut().unwrap().as_mut().unwrap();
+
+            Ok((ObjectId(index), slot_ref))
         } else {
             Err(AllocError::OutOfMemory)
         }
@@ -357,6 +372,36 @@ impl<T> SlabStore<T> {
         // size_of::<T>() zero bytes — the caller initializes all fields through
         // the returned &mut T before reading (same contract as test build).
         // Exclusive access: arena lock (D53) + freshly removed from freelist.
+        let reference = unsafe { &mut *(ptr as *mut T) };
+
+        Ok((ObjectId(index), reference))
+    }
+
+    /// Insert a fully-constructed value (sound API for NonNull types).
+    pub fn insert(&mut self, value: T) -> Result<(ObjectId, &mut T), AllocError> {
+        if self.base.is_null() {
+            self.init_page()?;
+        }
+
+        if self.free_head == FREELIST_NONE {
+            return Err(AllocError::OutOfMemory);
+        }
+
+        let index = self.free_head;
+        let ptr = self.slot_ptr(index);
+        // SAFETY: slot is free — first 4 bytes are a next-pointer.
+        let next_free = unsafe { (ptr as *const u32).read() };
+
+        self.free_head = next_free;
+        self.mark_occupied(index);
+
+        // SAFETY: ptr is properly aligned, within page bounds, and
+        // exclusively ours (just removed from freelist). ptr::write
+        // writes a valid T without reading the uninitialized slot.
+        unsafe {
+            core::ptr::write(ptr as *mut T, value);
+        }
+
         let reference = unsafe { &mut *(ptr as *mut T) };
 
         Ok((ObjectId(index), reference))

@@ -11,12 +11,12 @@
     "0.10": {
       "name": "Scheduler duplicate prevention",
       "note": "",
-      "status": "in_progress"
+      "status": "done"
     },
     "0.11": {
       "name": "Slab MaybeUninit soundness",
       "note": "",
-      "status": "pending"
+      "status": "in_progress"
     },
     "0.12": {
       "name": "Overlapping routing range prevention",
