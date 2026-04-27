@@ -15,12 +15,15 @@ use userspace_rs::*;
 
 fn test_cycles_monotonic() {
     let c1 = cycles();
+
     // Do some work between reads so the counter advances
     // (CNTVCT_EL0 ticks at counter frequency, not CPU frequency).
     for _ in 0..100 {
         core::hint::black_box(0u64);
     }
+
     let c2 = cycles();
+
     assert_or_fail!(c2 > c1);
 }
 
@@ -31,9 +34,11 @@ fn test_bench_emit_resumes() {
 
 fn test_stats_basic() {
     let mut s = Stats::new();
+
     s.record(100);
     s.record(200);
     s.record(300);
+
     assert_eq_or_fail!(s.min, 100);
     assert_eq_or_fail!(s.max, 300);
     assert_eq_or_fail!(s.count, 3);
@@ -42,27 +47,35 @@ fn test_stats_basic() {
 
 fn test_stats_emit() {
     let mut s = Stats::new();
+
     for i in 1..=10 {
         s.record(i * 10);
     }
+
     // Emits 5 BENCH lines: tag+0=min, tag+1=median, tag+2=p99, tag+3=mean, tag+4=count
     s.emit(0x100);
 }
 
 fn test_stopwatch() {
     let sw = Stopwatch::start();
+
     for _ in 0..100 {
         core::hint::black_box(0u64);
     }
+
     let elapsed = sw.elapsed();
+
     assert_or_fail!(elapsed > 0);
 }
 
 fn test_burn_cycles() {
     let before = cycles();
-    burn_cycles(10000);
+
+    burn_cycles(10_000);
+
     let after = cycles();
     let elapsed = after - before;
+
     assert_or_fail!(elapsed > 1000);
 }
 
@@ -75,6 +88,7 @@ extern "C" fn _start() -> ! {
     test_stats_emit();
     test_stopwatch();
     test_burn_cycles();
+
     pass();
 }
 

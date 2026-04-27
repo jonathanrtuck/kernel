@@ -89,6 +89,7 @@ pub const CAP_ABSENT: u64 = u64::MAX;
 /// Returns true on success (carry clear), false on error (carry set).
 pub fn send(handle: u64, label: u64, data: [u64; 4]) -> bool {
     let result: u64;
+
     // SAFETY: SVC #1 = Send (D48). Register layout per D47:
     //   x0-x3 = data words, x4 = label, x5 = handle,
     //   x6 = user cap (CAP_ABSENT), x7 = reply info (0).
@@ -109,6 +110,7 @@ pub fn send(handle: u64, label: u64, data: [u64; 4]) -> bool {
             in("x7") 0u64,
         );
     }
+
     // Carry is bit 29 of NZCV. Clear = success.
     (result & (1 << 29)) == 0
 }
@@ -125,6 +127,7 @@ pub fn receive(handle: u64) -> Message {
     let badge: u64;
     let user_cap: u64;
     let reply_cap: u64;
+
     // SAFETY: SVC #2 = Receive (D48). x5 = handle on entry.
     // On return: x0-x3 = data, x4 = label, x5 = badge,
     // x6 = user cap slot, x7 = reply cap handle.
@@ -142,6 +145,7 @@ pub fn receive(handle: u64) -> Message {
             out("x7") reply_cap,
         );
     }
+
     Message {
         data: [d0, d1, d2, d3],
         label,
@@ -155,13 +159,7 @@ pub fn receive(handle: u64) -> Message {
 ///
 /// Sends data to the Field at `handle` and blocks until the server replies.
 /// This is the client-side fast path for ping-pong IPC.
-pub fn call(
-    handle: u64,
-    label: u64,
-    data: [u64; 4],
-    user_cap: u64,
-    reply_badge: u64,
-) -> Message {
+pub fn call(handle: u64, label: u64, data: [u64; 4], user_cap: u64, reply_badge: u64) -> Message {
     let d0: u64;
     let d1: u64;
     let d2: u64;
@@ -170,6 +168,7 @@ pub fn call(
     let badge: u64;
     let ruser_cap: u64;
     let reply_cap: u64;
+
     // SAFETY: SVC #3 = Call (D48). Sends message then blocks on reply.
     // Register layout per D47:
     //   Entry: x0-x3 = data, x4 = label, x5 = handle, x6 = user cap, x7 = reply badge.
@@ -197,6 +196,7 @@ pub fn call(
             lateout("x7") reply_cap,
         );
     }
+
     Message {
         data: [d0, d1, d2, d3],
         label: rlabel,
@@ -227,6 +227,7 @@ pub fn reply_receive(
     let badge: u64;
     let ruser_cap: u64;
     let reply_cap: u64;
+
     // SAFETY: SVC #4 = ReplyRecv (D48). Replies then blocks on receive.
     // Register layout per D47:
     //   Entry: x0-x3 = reply data, x4 = reply label, x5 = reply handle (send-once),
@@ -256,6 +257,7 @@ pub fn reply_receive(
             lateout("x7") reply_cap,
         );
     }
+
     Message {
         data: [d0, d1, d2, d3],
         label: rlabel,
@@ -286,6 +288,7 @@ impl TypedResult {
 /// Returns x0 (negative = error, non-negative = success/result).
 pub fn typed_syscall(op_code: u16, target: u64, args: [u64; 4]) -> TypedResult {
     let result: u64;
+
     // SAFETY: SVC #0 = typed operation (D48). Register layout per D47.
     unsafe {
         asm!(
@@ -304,6 +307,7 @@ pub fn typed_syscall(op_code: u16, target: u64, args: [u64; 4]) -> TypedResult {
             lateout("x7") _,
         );
     }
+
     TypedResult(result as i64)
 }
 
@@ -413,6 +417,7 @@ pub fn observer_read_registers(observer: u64) -> RegistersResult {
     let r1: u64;
     let r2: u64;
     let r3: u64;
+
     // SAFETY: SVC #0 with op_code=3 (ObserverReadRegisters). On success:
     // x0=PC, x1=SP, x2=target's x0, x3=PSTATE. On error: x0 is negative.
     unsafe {
@@ -432,10 +437,23 @@ pub fn observer_read_registers(observer: u64) -> RegistersResult {
             lateout("x7") _,
         );
     }
+
     if (r0 as i64) < 0 {
-        RegistersResult { ok: false, pc: 0, sp: 0, x0: 0, pstate: 0 }
+        RegistersResult {
+            ok: false,
+            pc: 0,
+            sp: 0,
+            x0: 0,
+            pstate: 0,
+        }
     } else {
-        RegistersResult { ok: true, pc: r0, sp: r1, x0: r2, pstate: r3 }
+        RegistersResult {
+            ok: true,
+            pc: r0,
+            sp: r1,
+            x0: r2,
+            pstate: r3,
+        }
     }
 }
 
@@ -445,17 +463,21 @@ pub fn observer_suspend(observer: u64) -> TypedResult {
 }
 
 /// Change the fault handler Field and badge for an Observer.
-pub fn observer_change_handler(
-    observer: u64,
-    handler_field: u64,
-    badge: u64,
-) -> TypedResult {
-    typed_syscall(OP_OBSERVER_CHANGE_HANDLER, observer, [handler_field, badge, 0, 0])
+pub fn observer_change_handler(observer: u64, handler_field: u64, badge: u64) -> TypedResult {
+    typed_syscall(
+        OP_OBSERVER_CHANGE_HANDLER,
+        observer,
+        [handler_field, badge, 0, 0],
+    )
 }
 
 /// Set scheduling parameters (responsiveness, throughput) for an Observer.
 pub fn observer_set_scheduling(observer: u64, responsiveness: u64, throughput: u64) -> TypedResult {
-    typed_syscall(OP_OBSERVER_SET_SCHEDULING, observer, [responsiveness, throughput, 0, 0])
+    typed_syscall(
+        OP_OBSERVER_SET_SCHEDULING,
+        observer,
+        [responsiveness, throughput, 0, 0],
+    )
 }
 
 // ── Capability operations ─────────────────────────────────────
@@ -503,17 +525,21 @@ pub fn create_pulsar(
     duration_ns: u64,
     period_ns: u64,
 ) -> TypedResult {
-    typed_syscall(OP_CREATE_PULSAR, space, [field, badge, duration_ns, period_ns])
+    typed_syscall(
+        OP_CREATE_PULSAR,
+        space,
+        [field, badge, duration_ns, period_ns],
+    )
 }
 
 // ── Observer creation ─────────────────────────────────────────
 
 /// Create a new Observer from a Space.
 /// `handler_field`: fault handler Field handle, `handler_badge`: badge for fault messages.
-pub fn create_observer(
-    space: u64,
-    handler_field: u64,
-    handler_badge: u64,
-) -> TypedResult {
-    typed_syscall(OP_CREATE_OBSERVER, space, [handler_field, handler_badge, 0, 0])
+pub fn create_observer(space: u64, handler_field: u64, handler_badge: u64) -> TypedResult {
+    typed_syscall(
+        OP_CREATE_OBSERVER,
+        space,
+        [handler_field, handler_badge, 0, 0],
+    )
 }

@@ -25,6 +25,7 @@ extern "C" fn _start() -> ! {
             out("x3") _,
         );
     }
+
     // If we reach here, BRK #0x48 resumed (didn't exit the Observer).
     pass();
 }

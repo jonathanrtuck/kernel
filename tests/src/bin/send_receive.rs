@@ -13,13 +13,15 @@ use userspace_rs::*;
 #[unsafe(link_section = ".text.start")]
 extern "C" fn _start() -> ! {
     let split = space_split(ROOT_SPACE_HANDLE, 4096);
+
     assert_or_fail!(split.is_ok());
+
     let space_handle = split.value();
-
     let create = create_field(space_handle, 8);
-    assert_or_fail!(create.is_ok());
-    let field_handle = space_handle;
 
+    assert_or_fail!(create.is_ok());
+
+    let field_handle = space_handle;
     let sent_data: [u64; 4] = [0xBEEF, 0xCAFE, 0xDEAD, 0xF00D];
     let sent_label: u64 = 0x42;
 

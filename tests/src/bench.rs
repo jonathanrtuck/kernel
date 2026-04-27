@@ -15,6 +15,7 @@ use core::arch::asm;
 #[inline(always)]
 pub fn cycles() -> u64 {
     let val: u64;
+
     // SAFETY: MRS CNTVCT_EL0 reads the virtual count register.
     // Requires EL0 access enabled (CNTKCTL_EL1.EL0VCTEN=1, which D66
     // sets for root Observer via clock_access=true). This will fault
@@ -29,6 +30,7 @@ pub fn cycles() -> u64 {
             options(nomem, nostack, preserves_flags),
         );
     }
+
     val
 }
 
@@ -88,6 +90,7 @@ impl Stats {
         if value > self.max {
             self.max = value;
         }
+
         self.sum += value;
         self.samples[self.count as usize % MAX_SAMPLES] = value;
         self.count += 1;
@@ -99,15 +102,18 @@ impl Stats {
         if self.count == 0 {
             return 0;
         }
+
         self.sum / self.count as u64
     }
 
     /// Median of stored samples (sorts in-place on first call).
     pub fn median(&mut self) -> u64 {
         let n = self.sample_count();
+
         if n == 0 {
             return 0;
         }
+
         self.sort();
         self.samples[n / 2]
     }
@@ -115,9 +121,11 @@ impl Stats {
     /// 99th percentile of stored samples (sorts in-place on first call).
     pub fn p99(&mut self) -> u64 {
         let n = self.sample_count();
+
         if n == 0 {
             return 0;
         }
+
         self.sort();
         self.samples[n * 99 / 100]
     }
@@ -128,6 +136,7 @@ impl Stats {
         let n = self.sample_count();
         let median = if n > 0 { self.samples[n / 2] } else { 0 };
         let p99 = if n > 0 { self.samples[n * 99 / 100] } else { 0 };
+
         bench_emit(tag, self.min, 0, 0);
         bench_emit(tag + 1, median, 0, 0);
         bench_emit(tag + 2, p99, 0, 0);
@@ -145,16 +154,21 @@ impl Stats {
         if self.sorted {
             return;
         }
+
         let n = self.sample_count();
+
         for i in 1..n {
             let key = self.samples[i];
             let mut j = i;
+
             while j > 0 && self.samples[j - 1] > key {
                 self.samples[j] = self.samples[j - 1];
                 j -= 1;
             }
+
             self.samples[j] = key;
         }
+
         self.sorted = true;
     }
 }
@@ -190,12 +204,17 @@ pub fn benchmark<F: FnMut()>(warmup: u32, measure: u32, mut body: F) -> Stats {
     for _ in 0..warmup {
         body();
     }
+
     let mut stats = Stats::new();
+
     for _ in 0..measure {
         let sw = Stopwatch::start();
+
         body();
+
         stats.record(sw.elapsed());
     }
+
     stats
 }
 
@@ -212,14 +231,19 @@ pub fn benchmark<F: FnMut()>(warmup: u32, measure: u32, mut body: F) -> Stats {
 pub fn burn_cycles(target_ticks: u64) {
     let calibration_iters: u64 = 10_000;
     let start = cycles();
+
     for _ in 0..calibration_iters {
         core::hint::black_box(0u64);
     }
+
     let calibration_ticks = cycles() - start;
+
     if calibration_ticks == 0 {
         return;
     }
+
     let needed_iters = target_ticks * calibration_iters / calibration_ticks;
+
     for _ in 0..needed_iters {
         core::hint::black_box(0u64);
     }
@@ -234,9 +258,11 @@ mod tests {
     #[test]
     fn stats_basic() {
         let mut s = Stats::new();
+
         for v in [10, 20, 30, 40, 50] {
             s.record(v);
         }
+
         assert_eq!(s.min, 10);
         assert_eq!(s.max, 50);
         assert_eq!(s.mean(), 30);
@@ -246,16 +272,20 @@ mod tests {
     #[test]
     fn stats_p99_with_outlier() {
         let mut s = Stats::new();
+
         for i in 0..100 {
             s.record(i);
         }
+
         s.record(1000); // outlier
+
         assert!(s.p99() >= 99); // p99 should be near 99, not 1000
     }
 
     #[test]
     fn stats_empty() {
         let mut s = Stats::new();
+
         assert_eq!(s.mean(), 0);
         assert_eq!(s.median(), 0);
         assert_eq!(s.p99(), 0);
@@ -264,7 +294,9 @@ mod tests {
     #[test]
     fn stats_single() {
         let mut s = Stats::new();
+
         s.record(42);
+
         assert_eq!(s.min, 42);
         assert_eq!(s.max, 42);
         assert_eq!(s.mean(), 42);
@@ -275,9 +307,11 @@ mod tests {
     #[test]
     fn stats_count_tracking() {
         let mut s = Stats::new();
+
         for i in 0..200 {
             s.record(i);
         }
+
         assert_eq!(s.count, 200);
         assert_eq!(s.min, 0);
         assert_eq!(s.max, 199);
@@ -289,6 +323,7 @@ mod tests {
         let stats = benchmark(5, 10, || {
             call_count += 1;
         });
+
         // 5 warmup + 10 measure = 15 total calls
         assert_eq!(call_count, 15);
         assert_eq!(stats.count, 10);

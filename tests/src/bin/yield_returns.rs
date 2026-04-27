@@ -10,6 +10,7 @@ use userspace_rs::{fail, pass, yield_cpu};
 #[unsafe(link_section = ".text.start")]
 extern "C" fn _start() -> ! {
     yield_cpu();
+
     pass();
 }
 

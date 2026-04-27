@@ -12,8 +12,10 @@ const SELF_HANDLE: u64 = 2;
 #[unsafe(link_section = ".text.start")]
 extern "C" fn _start() -> ! {
     let result = clock_read(SELF_HANDLE);
+
     assert_or_fail!(result.is_ok());
     assert_or_fail!(result.value() != 0);
+
     pass();
 }
 
