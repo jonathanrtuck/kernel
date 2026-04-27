@@ -157,18 +157,10 @@ pub fn kernel_state() -> &'static KernelState {
 mod tests {
     use super::*;
     use crate::frame::lock::LockOrder;
-    use crate::space_manager::{RootPool, SpaceManager};
+    use crate::space_manager::SpaceManager;
 
     fn make_space_manager() -> SpaceManager {
-        SpaceManager {
-            root_pool: RootPool {
-                total_bytes: 16 * 4096,
-                free_bytes: 16 * 4096,
-                page_size: 4096,
-            },
-            next_physical_base: 4096,
-            next_va_base: 4096,
-        }
+        SpaceManager::test_default()
     }
 
     /// D82: init_kernel_state + kernel_state roundtrip. The global

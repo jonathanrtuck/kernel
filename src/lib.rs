@@ -1035,15 +1035,15 @@ mod integration_tests {
     #[test]
     fn test_integration_wave2_space_manager_conservation_slab_lifecycle() {
         // 1. Create a SpaceManager with 16 pages.
-        let mut space_manager = SpaceManager {
-            root_pool: RootPool {
+        let mut space_manager = SpaceManager::new(
+            RootPool {
                 total_bytes: 16 * 4096,
                 free_bytes: 16 * 4096,
                 page_size: 4096,
             },
-            next_physical_base: 4096,
-            next_va_base: 4096,
-        };
+            4096,
+            4096,
+        );
         let initial_free = space_manager.root_pool.free_bytes;
         let page_size = space_manager.root_pool.page_size;
         // 2. Simulate arena slab: allocate 4 pages (one slab page each for
@@ -1094,15 +1094,15 @@ mod integration_tests {
 
     #[test]
     fn test_integration_wave2_type_conversion_overhead_and_allocate_accounting() {
-        let mut space_manager = SpaceManager {
-            root_pool: RootPool {
+        let mut space_manager = SpaceManager::new(
+            RootPool {
                 total_bytes: 64 * 4096,
                 free_bytes: 64 * 4096,
                 page_size: 4096,
             },
-            next_physical_base: 4096,
-            next_va_base: 4096,
-        };
+            4096,
+            4096,
+        );
         let page_size = space_manager.root_pool.page_size;
         let child_size_bytes = 8 * page_size; // 8 pages for the child Space
         // 1. Compute the overhead for a child Space of child_size_bytes.
@@ -1355,15 +1355,15 @@ mod integration_tests {
 
         const FREQ: u64 = 24_000_000;
         let ks = KernelState::new(
-            SpaceManager {
-                root_pool: RootPool {
+            SpaceManager::new(
+                RootPool {
                     total_bytes: 16 * 4096,
                     free_bytes: 16 * 4096,
                     page_size: 4096,
                 },
-                next_physical_base: 4096,
-                next_va_base: 4096,
-            },
+                4096,
+                4096,
+            ),
             16,
         );
         let mut core = CoreState {
@@ -1466,15 +1466,15 @@ mod integration_tests {
 
         const FREQ: u64 = 24_000_000;
         let ks = KernelState::new(
-            SpaceManager {
-                root_pool: RootPool {
+            SpaceManager::new(
+                RootPool {
                     total_bytes: 16 * 4096,
                     free_bytes: 16 * 4096,
                     page_size: 4096,
                 },
-                next_physical_base: 4096,
-                next_va_base: 4096,
-            },
+                4096,
+                4096,
+            ),
             16,
         );
         let mut core = CoreState {

@@ -32,6 +32,11 @@ pub struct Space {
     /// Number of capability references to this Space (D11).
     pub refcount: u32,
 
+    /// Physical address of the Space's content pages.
+    /// Set at Space creation (D32 type conversion), immutable
+    /// thereafter. Needed for reclamation when the Space is destroyed.
+    pub content_pa: u64,
+
     /// Physical address of the L3 page table for this Space (D89/D92).
     /// One L3 table per 32 MiB of content (with 16 KiB granule: 2048
     /// entries * 16 KiB = 32 MiB coverage). Set at Space creation,
@@ -150,7 +155,7 @@ mod tests {
 
     #[test]
     fn space_layout() {
-        assert_eq!(core::mem::size_of::<Space>(), 40);
+        assert_eq!(core::mem::size_of::<Space>(), 48);
     }
 
     #[test]
@@ -159,6 +164,7 @@ mod tests {
             va_base: 0x1000,
             size: 0x4000,
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: 0xDEAD_0000,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -175,6 +181,7 @@ mod tests {
             va_base: 0,
             size: 4096,
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: 0,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -188,6 +195,7 @@ mod tests {
             va_base: 0,
             size: 4096,
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: 0,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -201,6 +209,7 @@ mod tests {
             va_base: 0x1000,
             size: 0x2000,
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: 0xAAAA_0000,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -208,6 +217,7 @@ mod tests {
             va_base: 0x3000,
             size: 0x1000,
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: 0xBBBB_0000,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -215,6 +225,7 @@ mod tests {
             va_base: 0x5000,
             size: 0x1000,
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: 0xCCCC_0000,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -230,6 +241,7 @@ mod tests {
             va_base: 0,
             size: 4096,
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: 0,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -252,6 +264,7 @@ mod tests {
             va_base: 0x1000,
             size: 4 * 16384, // 4 pages of 16 KiB
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: original_l3_pa,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -273,6 +286,7 @@ mod tests {
             va_base: 0x0,
             size: 8 * 4096, // 8 pages of 4 KiB
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: original_l3_pa,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -299,6 +313,7 @@ mod tests {
             va_base: 0x1000,
             size: 0x2000,
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: target_l3_pa,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -306,6 +321,7 @@ mod tests {
             va_base: 0x3000,
             size: 0x1000,
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: source_l3_pa,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -328,6 +344,7 @@ mod tests {
             va_base: 0x0,
             size: 0x4000,
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: 0x1111_0000,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -335,6 +352,7 @@ mod tests {
             va_base: 0x4000,
             size: 0x4000,
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: 0x2222_0000,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -359,6 +377,7 @@ mod tests {
             va_base: 0,
             size: 4 * page_size,
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: 0,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -378,6 +397,7 @@ mod tests {
             va_base: 0,
             size: page_size,
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: 0,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -398,6 +418,7 @@ mod tests {
             va_base: 0,
             size: 2048 * page_size, // 32 MiB
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: 0,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -417,6 +438,7 @@ mod tests {
             va_base: 0,
             size: 2049 * page_size,
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: 0,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -436,6 +458,7 @@ mod tests {
             va_base: 0,
             size: 10 * page_size,
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: 0,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -454,6 +477,7 @@ mod tests {
             va_base: 0,
             size: 0,
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: 0,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -471,6 +495,7 @@ mod tests {
             va_base: 0x0,
             size: 8 * 4096,
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: 0,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -486,6 +511,7 @@ mod tests {
             va_base: 0x10000,
             size: 4 * 4096,
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: 0,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -501,6 +527,7 @@ mod tests {
             va_base: 0,
             size: 2 * 16384,
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: 0,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -515,6 +542,7 @@ mod tests {
             va_base: 0,
             size: 2 * 4096,
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: 0,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -531,6 +559,7 @@ mod tests {
             va_base: 0,
             size: 4096,
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: 0,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -538,6 +567,7 @@ mod tests {
             va_base: 4096,
             size: 4096,
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: 0,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -554,6 +584,7 @@ mod tests {
             va_base: 0,
             size: 4096,
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: 0,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -561,6 +592,7 @@ mod tests {
             va_base: 8192,
             size: 4096,
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: 0,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -574,6 +606,7 @@ mod tests {
             va_base: 0,
             size: 8192,
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: 0,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -581,6 +614,7 @@ mod tests {
             va_base: 4096,
             size: 4096,
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: 0,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -594,6 +628,7 @@ mod tests {
             va_base: 0,
             size: 0,
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: 0,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -607,6 +642,7 @@ mod tests {
             va_base: 0,
             size: 4096,
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: 0,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -628,6 +664,7 @@ mod tests {
             va_base: 0,
             size: 4 * page_size,
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: 0,
             generation: core::sync::atomic::AtomicU64::new(0),
         };
@@ -637,6 +674,7 @@ mod tests {
             va_base: new_va,
             size: new_size,
             refcount: 1,
+            content_pa: 0,
             l3_table_pa: 0,
             generation: core::sync::atomic::AtomicU64::new(0),
         };

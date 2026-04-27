@@ -706,6 +706,9 @@ fn create_child_space(ks: &KernelState) -> Result<crate::arena::ObjectId, AllocE
 
     space.va_base = 0x200_0000;
     space.size = 3 * PAGE_SIZE;
+    // Boot Spaces are hand-assembled, not via create_space — 0 means
+    // the bitmap allocator silently skips reclamation on destroy.
+    space.content_pa = 0;
     space.l3_table_pa = 0;
     space.refcount = 1;
     space.generation = AtomicU64::new(0);
@@ -885,7 +888,7 @@ fn create_root_space(ks: &KernelState) -> Result<crate::arena::ObjectId, AllocEr
         let sm = ks.space_manager.acquire();
 
         (
-            sm.next_va_base,
+            sm.va_start(),
             sm.root_pool.free_bytes,
             sm.root_pool.page_size,
         )
@@ -897,6 +900,9 @@ fn create_root_space(ks: &KernelState) -> Result<crate::arena::ObjectId, AllocEr
 
     space.va_base = va_base;
     space.size = size;
+    // Root Space owns all usable memory — not allocated via create_space,
+    // so content_pa is 0 (bitmap skips reclamation on destroy).
+    space.content_pa = 0;
     space.l3_table_pa = l3_pa;
     space.refcount = 1;
     space.generation = AtomicU64::new(0);

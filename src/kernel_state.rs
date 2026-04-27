@@ -612,20 +612,11 @@ impl KernelState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::space_manager::RootPool;
 
     // ── Test helpers ──────────────────────────────────────────────────
 
     fn make_space_manager() -> SpaceManager {
-        SpaceManager {
-            root_pool: RootPool {
-                total_bytes: 16 * 4096,
-                free_bytes: 16 * 4096,
-                page_size: 4096,
-            },
-            next_physical_base: 4096,
-            next_va_base: 4096,
-        }
+        SpaceManager::test_default()
     }
 
     fn make_kernel_state() -> KernelState {

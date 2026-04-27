@@ -47,15 +47,15 @@ extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
         usable_bytes / page_size,
     );
 
-    let space_manager = SpaceManager {
-        root_pool: RootPool {
+    let space_manager = SpaceManager::new(
+        RootPool {
             total_bytes: usable_bytes,
             free_bytes: usable_bytes,
             page_size,
         },
-        next_physical_base: usable_start,
-        next_va_base: usable_start,
-    };
+        usable_start,
+        usable_start,
+    );
     let asid_width = arch::mmu::asid_width();
 
     println!("asid: {}-bit", asid_width);

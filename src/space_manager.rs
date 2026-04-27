@@ -83,6 +83,186 @@ pub struct SpaceCreationResult {
     pub page_count: usize,
 }
 
+// ── Page bitmap allocator ────────────────────────────────────────
+
+use crate::config::MAX_BITMAP_PAGES;
+
+const BITMAP_WORDS: usize = MAX_BITMAP_PAGES / 64;
+
+/// Bitmap-based page allocator.
+///
+/// One bit per page: 1 = allocated, 0 = free. First-fit allocation
+/// with page-granularity alignment. Double-free detected via bit
+/// state (only set bits are cleared). Conservation is exact: free
+/// pages = total_pages minus popcount(bits).
+///
+/// No coalescing needed — contiguous free pages are implicitly
+/// represented as consecutive zero bits. No capacity limits — every
+/// fragmentation pattern is representable.
+struct PageBitmap {
+    bits: [u64; BITMAP_WORDS],
+    total_pages: usize,
+    base: usize,
+    page_size: usize,
+}
+
+impl PageBitmap {
+    fn new(base: usize, total_pages: usize, page_size: usize) -> Self {
+        assert!(
+            total_pages <= MAX_BITMAP_PAGES,
+            "total_pages ({total_pages}) exceeds MAX_BITMAP_PAGES ({MAX_BITMAP_PAGES})"
+        );
+
+        PageBitmap {
+            bits: [0u64; BITMAP_WORDS],
+            total_pages,
+            base,
+            page_size,
+        }
+    }
+
+    fn word_count(&self) -> usize {
+        self.total_pages.div_ceil(64)
+    }
+
+    /// Allocate `count` contiguous pages aligned to `alignment_pages`.
+    /// Returns the base address or None.
+    ///
+    /// Alignment is in absolute addresses, not page indices: the
+    /// returned address satisfies `addr % (alignment_pages * page_size) == 0`.
+    fn allocate(&mut self, count: usize, alignment_pages: usize) -> Option<usize> {
+        let align = alignment_pages.max(1);
+        let first = if align <= 1 {
+            0
+        } else {
+            let base_mod = (self.base / self.page_size) % align;
+
+            if base_mod == 0 { 0 } else { align - base_mod }
+        };
+        let mut start = first;
+
+        while start + count <= self.total_pages {
+            if self.range_is_free(start, count) {
+                self.set_range(start, count);
+
+                return Some(self.base + start * self.page_size);
+            }
+
+            start += align;
+        }
+
+        None
+    }
+
+    /// Free `count` pages at `addr`. Returns the number actually freed
+    /// (for exact accounting — fewer than `count` if pages were already
+    /// free or out of bounds).
+    fn free(&mut self, addr: usize, count: usize) -> usize {
+        if count == 0 || addr < self.base {
+            return 0;
+        }
+
+        let offset = addr - self.base;
+
+        if !offset.is_multiple_of(self.page_size) {
+            return 0;
+        }
+
+        let start = offset / self.page_size;
+
+        if start >= self.total_pages {
+            return 0;
+        }
+
+        let end = (start + count).min(self.total_pages);
+
+        self.clear_range(start, end - start)
+    }
+
+    fn range_is_free(&self, start: usize, count: usize) -> bool {
+        let end = start + count;
+        let first_word = start / 64;
+        let last_word = end.div_ceil(64);
+
+        for w in first_word..last_word.min(self.word_count()) {
+            let (lo, hi) = Self::bit_range(w, start, end);
+
+            if lo >= hi {
+                continue;
+            }
+
+            if self.bits[w] & Self::mask(lo, hi) != 0 {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    fn set_range(&mut self, start: usize, count: usize) {
+        let end = start + count;
+        let first_word = start / 64;
+        let last_word = end.div_ceil(64);
+
+        for w in first_word..last_word.min(self.word_count()) {
+            let (lo, hi) = Self::bit_range(w, start, end);
+
+            if lo < hi {
+                self.bits[w] |= Self::mask(lo, hi);
+            }
+        }
+    }
+
+    /// Clear bits in [start, start+count), returning how many were
+    /// actually set (allocated). Only set bits are cleared — already-
+    /// free bits are silently skipped, making over-return safe. The
+    /// return value enables exact `free_bytes` accounting.
+    fn clear_range(&mut self, start: usize, count: usize) -> usize {
+        let end = start + count;
+        let first_word = start / 64;
+        let last_word = end.div_ceil(64);
+        let mut freed = 0usize;
+
+        for w in first_word..last_word.min(self.word_count()) {
+            let (lo, hi) = Self::bit_range(w, start, end);
+
+            if lo >= hi {
+                continue;
+            }
+
+            let mask = Self::mask(lo, hi);
+            let was_set = self.bits[w] & mask;
+
+            freed += was_set.count_ones() as usize;
+            self.bits[w] &= !mask;
+        }
+
+        freed
+    }
+
+    /// Bit range within word `w` that overlaps [start, end).
+    fn bit_range(w: usize, start: usize, end: usize) -> (usize, usize) {
+        let word_start = w * 64;
+        let lo = start.saturating_sub(word_start);
+        let hi = end.saturating_sub(word_start).min(64);
+
+        (lo, hi)
+    }
+
+    /// Bitmask for bits [lo, hi) within a u64.
+    fn mask(lo: usize, hi: usize) -> u64 {
+        debug_assert!(lo < hi && hi <= 64);
+
+        let width = hi - lo;
+
+        if width >= 64 {
+            u64::MAX
+        } else {
+            ((1u64 << width) - 1) << lo
+        }
+    }
+}
+
 // ── SpaceManager ───────────────────────────────────────────────────
 
 /// The kernel's single Space management interface (D3).
@@ -91,64 +271,108 @@ pub struct SpaceCreationResult {
 /// conversion (D32). Internal strategy (partitioning, NUMA awareness,
 /// per-core page caches) is behind this interface — a leaf node
 /// (philosophy: push complexity to the leaves).
+///
+/// Physical pages and VA ranges are tracked by bitmap allocators.
+/// Both `return_pages` and `return_va` reclaim addresses for reuse,
+/// preventing exhaustion under create/destroy cycles. Double-free is
+/// detected (debug_assert). Conservation is exact (no accounting
+/// divergence).
 pub struct SpaceManager {
     pub root_pool: RootPool,
-    /// Bump allocator cursor for physical page allocation.
-    /// Initialized to page_size to avoid returning address 0.
-    pub next_physical_base: usize,
-    /// Bump allocator cursor for VA assignment.
-    /// Initialized to page_size to avoid returning address 0.
-    pub next_va_base: usize,
+    physical: PageBitmap,
+    va: PageBitmap,
 }
 
 impl SpaceManager {
+    /// Create a new SpaceManager with bitmap allocators.
+    ///
+    /// `physical_start`: base address of usable physical memory.
+    /// `va_start`: base address of assignable virtual address space.
+    /// Both are typically `page_size` (tests) or `kernel_end` (boot).
+    pub fn new(root_pool: RootPool, physical_start: usize, va_start: usize) -> Self {
+        let page_size = root_pool.page_size;
+        let total_pages = root_pool.total_bytes / page_size;
+
+        SpaceManager {
+            physical: PageBitmap::new(physical_start, total_pages, page_size),
+            va: PageBitmap::new(va_start, total_pages, page_size),
+            root_pool,
+        }
+    }
+
+    /// 16 pages of 4 KiB for unit tests. Deterministic and small enough
+    /// that exhaustion tests hit limits predictably.
+    #[cfg(test)]
+    pub fn test_default() -> Self {
+        Self::new(
+            RootPool {
+                total_bytes: 16 * 4096,
+                free_bytes: 16 * 4096,
+                page_size: 4096,
+            },
+            4096,
+            4096,
+        )
+    }
+
+    /// The start of the assignable VA range.
+    ///
+    /// Used by boot code to determine where the root Space begins (D94).
+    pub fn va_start(&self) -> usize {
+        self.va.base
+    }
+
     /// Allocate pages from the root pool for a new Space or arena slab.
     ///
     /// D31: draws from unallocated physical memory. Returns an error
-    /// if the pool is exhausted.
+    /// if the pool is exhausted or fragmented beyond satisfying the
+    /// request contiguously.
     ///
     /// D70: arena slab pages use this same path. When all slots on a
     /// slab page are freed, the page returns here via `return_pages`.
     pub fn allocate_pages(&mut self, count: usize) -> Result<usize, AllocError> {
         if count == 0 {
-            return Ok(self.next_physical_base);
+            return Ok(0);
         }
 
-        let bytes_needed = count
-            .checked_mul(self.root_pool.page_size)
-            .ok_or(AllocError::OutOfMemory)?;
-
-        if bytes_needed > self.root_pool.free_bytes {
+        if count.checked_mul(self.root_pool.page_size).is_none() {
             return Err(AllocError::OutOfMemory);
         }
 
-        self.root_pool.free_bytes -= bytes_needed;
+        let base = self
+            .physical
+            .allocate(count, 1)
+            .ok_or(AllocError::OutOfMemory)?;
 
-        let base = self.next_physical_base;
-
-        self.next_physical_base += bytes_needed;
+        self.root_pool.free_bytes -= count * self.root_pool.page_size;
 
         Ok(base)
     }
 
-    /// Return pages to the root pool.
+    /// Return pages to the root pool for reuse.
     ///
     /// D70: freed slab pages return here. D33: cascade-freed structural
     /// backing returns here (not to the caller — only top-level destroy
     /// returns Space to the destroyer).
-    pub fn return_pages(&mut self, _base: usize, count: usize) {
+    ///
+    /// The `base` address must be the same value returned by the
+    /// corresponding `allocate_pages` call. Out-of-bounds or
+    /// already-free pages are silently skipped (debug_assert on
+    /// double-free).
+    pub fn return_pages(&mut self, base: usize, count: usize) {
         if count == 0 {
             return;
         }
 
-        let bytes_returned = count
+        let _ = count
             .checked_mul(self.root_pool.page_size)
             .expect("return_pages: count * page_size overflow");
+        let actually_freed = self.physical.free(base, count);
 
         self.root_pool.free_bytes = self
             .root_pool
             .free_bytes
-            .saturating_add(bytes_returned)
+            .saturating_add(actually_freed * self.root_pool.page_size)
             .min(self.root_pool.total_bytes);
     }
 
@@ -175,37 +399,64 @@ impl SpaceManager {
             "alignment must be a power of two, got {effective_alignment}"
         );
 
-        let align_mask = effective_alignment - 1;
         let page_mask = page_size - 1;
-        // Round up to page boundary; overflow means the request is impossibly large.
         let aligned_size = size.checked_add(page_mask).ok_or(AllocError::OutOfMemory)? & !page_mask;
-        // A zero-size request still consumes one page of VA space.
         let consume = if aligned_size == 0 {
             page_size
         } else {
             aligned_size
         };
-        // Round up the cursor to the requested alignment.
-        let aligned_cursor = self
-            .next_va_base
-            .checked_add(align_mask)
-            .ok_or(AllocError::OutOfMemory)?
-            & !align_mask;
-        // VA budget: physical memory size, starting from page_size.
-        let va_limit = page_size.saturating_add(self.root_pool.total_bytes);
-        let next = aligned_cursor
-            .checked_add(consume)
+        let page_count = consume / page_size;
+        let alignment_pages = (effective_alignment / page_size).max(1);
+        let va_base = self
+            .va
+            .allocate(page_count, alignment_pages)
             .ok_or(AllocError::OutOfMemory)?;
 
-        if next > va_limit {
-            return Err(AllocError::OutOfMemory);
+        Ok(VaAssignment { va_base })
+    }
+
+    /// Return a VA range for reuse.
+    ///
+    /// Called when a Space is destroyed to reclaim its virtual address
+    /// range. Without this, create/destroy cycles exhaust the VA space.
+    pub fn return_va(&mut self, base: usize, size: usize) {
+        if size == 0 {
+            return;
         }
 
-        self.next_va_base = next;
+        let page_count = size / self.root_pool.page_size;
 
-        Ok(VaAssignment {
-            va_base: aligned_cursor,
-        })
+        if page_count > 0 {
+            self.va.free(base, page_count);
+        }
+    }
+
+    /// Return all resources allocated by `create_space`.
+    ///
+    /// Symmetric with `create_space`: frees content pages, L3 table
+    /// pages, and the VA range. Safe to call with `content_pa = 0` or
+    /// `l3_table_pa = 0` — zero-address ranges are silently skipped
+    /// by the bitmap (used for boot-assembled Spaces).
+    pub fn destroy_space(
+        &mut self,
+        content_pa: usize,
+        l3_table_pa: usize,
+        va_base: usize,
+        size: usize,
+    ) {
+        let page_size = self.root_pool.page_size.max(1);
+        let page_count = size / page_size;
+        let l3_table_count = self.l3_table_count(page_count);
+
+        if page_count > 0 {
+            self.return_pages(content_pa, page_count);
+        }
+        if l3_table_count > 0 {
+            self.return_pages(l3_table_pa, l3_table_count);
+        }
+
+        self.return_va(va_base, size);
     }
 
     /// Compute the overhead of type conversion for a given Space size.
@@ -298,33 +549,21 @@ mod tests {
 
     // ── Test helper ───────────────────────────────────────────────────
 
-    /// Create a SpaceManager with 16 pages of 4096 bytes (65536 total bytes).
-    ///
-    /// Using a small, deterministic configuration makes all assertions
-    /// about free_bytes, page counts, and exhaustion predictable.
     fn make_space_manager() -> SpaceManager {
-        SpaceManager {
-            root_pool: RootPool {
-                total_bytes: 16 * 4096, // 65536
-                free_bytes: 16 * 4096,
-                page_size: 4096,
-            },
-            next_physical_base: 4096,
-            next_va_base: 4096,
-        }
+        SpaceManager::test_default()
     }
 
     /// Create a SpaceManager with a custom page count and page size.
     fn make_space_manager_with(page_count: usize, page_size: usize) -> SpaceManager {
-        SpaceManager {
-            root_pool: RootPool {
+        SpaceManager::new(
+            RootPool {
                 total_bytes: page_count * page_size,
                 free_bytes: page_count * page_size,
                 page_size,
             },
-            next_physical_base: page_size,
-            next_va_base: page_size,
-        }
+            page_size,
+            page_size,
+        )
     }
 
     // ── D31 — Root pool allocation ─────────────────────────────────────
@@ -1900,6 +2139,78 @@ mod tests {
         );
     }
 
+    /// destroy_space round-trips create_space: all resources returned.
+    #[test]
+    fn destroy_space_round_trip_conservation() {
+        const PAGE_16K: usize = 16384;
+        let mut sm = make_space_manager_with(4096, PAGE_16K);
+        let free_before = sm.root_pool.free_bytes;
+        let result = sm
+            .create_space(8 * PAGE_16K, SPACE_VA_ALIGNMENT)
+            .expect("create_space must succeed");
+
+        sm.destroy_space(
+            result.content_pa,
+            result.l3_table_pa,
+            result.va_base,
+            result.size,
+        );
+
+        assert_eq!(
+            sm.root_pool.free_bytes, free_before,
+            "free_bytes must return to pre-create value"
+        );
+    }
+
+    /// destroy_space with zero addresses (boot-assembled Spaces).
+    #[test]
+    fn destroy_space_zero_pa_is_safe() {
+        const PAGE_16K: usize = 16384;
+        let mut sm = make_space_manager_with(4096, PAGE_16K);
+        let free_before = sm.root_pool.free_bytes;
+
+        sm.destroy_space(0, 0, 0, 3 * PAGE_16K);
+
+        assert_eq!(
+            sm.root_pool.free_bytes, free_before,
+            "zero-address destroy must not change free_bytes"
+        );
+    }
+
+    /// destroy_space after multiple creates: each destroy reclaims
+    /// exactly its own allocation without affecting others.
+    #[test]
+    fn destroy_space_multiple_independent() {
+        const PAGE_16K: usize = 16384;
+        let mut sm = make_space_manager_with(8192, PAGE_16K);
+        let free_before = sm.root_pool.free_bytes;
+        let a = sm
+            .create_space(8 * PAGE_16K, SPACE_VA_ALIGNMENT)
+            .expect("first create");
+        let b = sm
+            .create_space(4 * PAGE_16K, SPACE_VA_ALIGNMENT)
+            .expect("second create");
+        let after_both = sm.root_pool.free_bytes;
+
+        sm.destroy_space(a.content_pa, a.l3_table_pa, a.va_base, a.size);
+
+        let after_first_destroy = sm.root_pool.free_bytes;
+        let a_total = (a.page_count * PAGE_16K) + sm.type_conversion_overhead(a.size);
+
+        assert_eq!(
+            after_first_destroy,
+            after_both + a_total,
+            "destroying first Space reclaims exactly its resources"
+        );
+
+        sm.destroy_space(b.content_pa, b.l3_table_pa, b.va_base, b.size);
+
+        assert_eq!(
+            sm.root_pool.free_bytes, free_before,
+            "destroying both Spaces restores original free_bytes"
+        );
+    }
+
     /// D32: rollback atomicity — after a failed create_space, the
     /// SpaceManager state is identical to before the call.
     #[test]
@@ -1919,8 +2230,8 @@ mod tests {
             sm.root_pool.free_bytes, free_before,
             "free_bytes must be restored after rollback"
         );
-        // Bump allocator cursors advance monotonically and are not rolled
-        // back — free_bytes is the critical conservation invariant.
+        // free_bytes is the critical conservation invariant — the bitmap
+        // may leave fragmentation gaps, but bytes are always returned.
     }
 
     /// D32: pool has exactly enough for content + L3 table.

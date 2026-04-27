@@ -1487,7 +1487,7 @@ impl<S: Scheduler> CoreState<S> {
                         ))
                     }
                     ObjectType::Space => {
-                        let (live_gen, size) = {
+                        let (live_gen, size, content_pa, l3_table_pa, va_base) = {
                             let spaces = kernel_state.spaces.acquire();
                             let space = match spaces.get(object_id) {
                                 Some(s) => s,
@@ -1495,7 +1495,13 @@ impl<S: Scheduler> CoreState<S> {
                             };
                             let live_gen = space.generation.load(Ordering::Acquire);
 
-                            (live_gen, space.size)
+                            (
+                                live_gen,
+                                space.size,
+                                space.content_pa as usize,
+                                space.l3_table_pa as usize,
+                                space.va_base,
+                            )
                         };
 
                         if !entry.check_generation(live_gen) {
@@ -1504,11 +1510,8 @@ impl<S: Scheduler> CoreState<S> {
 
                         {
                             let mut sm = kernel_state.space_manager.acquire();
-                            let page_count = size / sm.root_pool.page_size.max(1);
 
-                            if page_count > 0 {
-                                sm.return_pages(0, page_count);
-                            }
+                            sm.destroy_space(content_pa, l3_table_pa, va_base, size);
                         }
 
                         consume_space(kernel_state, object_id);
@@ -1775,6 +1778,7 @@ impl<S: Scheduler> CoreState<S> {
                     va_base: source_va_base,
                     size: source_size,
                     refcount: 0,
+                    content_pa: 0,
                     l3_table_pa: 0,
                     generation: core::sync::atomic::AtomicU64::new(0),
                 };
@@ -3127,7 +3131,7 @@ mod tests {
     use crate::capability::{Badge, ObjectType, Rights};
     use crate::kernel_state::{IrqRoute, IrqRoutingTable, MAX_IRQS};
     use crate::observer::Observer;
-    use crate::space_manager::{RootPool, SpaceManager};
+    use crate::space_manager::SpaceManager;
     use crate::syscall::{IpcOperation, TypedOperation};
     use crate::time_manager::round_robin::RoundRobin;
 
@@ -3150,15 +3154,7 @@ mod tests {
     }
 
     fn make_space_manager() -> SpaceManager {
-        SpaceManager {
-            root_pool: RootPool {
-                total_bytes: 16 * 4096,
-                free_bytes: 16 * 4096,
-                page_size: 4096,
-            },
-            next_physical_base: 4096,
-            next_va_base: 4096,
-        }
+        SpaceManager::test_default()
     }
 
     fn make_kernel_state() -> KernelState {
