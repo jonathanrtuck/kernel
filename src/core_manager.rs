@@ -2783,10 +2783,24 @@ impl<S: Scheduler> CoreState<S> {
                 self.schedule_next()
             }
             crate::fault::FaultDeliveryOutcome::Deferred => {
-                // D18: the faulting Observer should be linked into the
-                // handler Field's pending list. Pending list linkage is
-                // not yet wired — the fault stays deferred until the
-                // handler Field drains a slot.
+                // D18: link the faulting Observer into the handler
+                // Field's pending list. When receive() drains a slot,
+                // it checks pending_head and delivers the deferred message.
+                let mut fields = kernel_state.fields.acquire();
+
+                if let Some(handler_field) = fields.get_mut(handler_field_id) {
+                    let field_ptr = NonNull::from(&*handler_field);
+                    let wait_entry =
+                        crate::frame::cores::observer_prepare_wait(observer_ptr, field_ptr);
+
+                    wait_entry.next = handler_field.pending_head;
+                    handler_field.pending_head = Some(NonNull::from(&*wait_entry));
+                }
+
+                drop(fields);
+
+                // Dequeue faulted Observer from scheduler.
+                self.scheduler.dequeue(observer_ptr);
                 self.schedule_next()
             }
             crate::fault::FaultDeliveryOutcome::HandlerUnavailable => {

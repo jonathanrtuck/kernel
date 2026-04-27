@@ -26,12 +26,12 @@
     "0.13": {
       "name": "Boot invariant promotion",
       "note": "",
-      "status": "in_progress"
+      "status": "done"
     },
     "0.14": {
       "name": "Deferred fault delivery linkage",
       "note": "",
-      "status": "pending"
+      "status": "in_progress"
     },
     "0.2": {
       "name": "Unified message delivery path",
