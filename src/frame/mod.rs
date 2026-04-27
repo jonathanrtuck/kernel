@@ -86,7 +86,7 @@ pub fn init_kernel_state(state: KernelState) {
     // secondary cores have not been activated. The write to the
     // UnsafeCell is therefore data-race-free.
     unsafe {
-        debug_assert!(
+        assert!(
             !KERNEL_STATE_INITIALIZED.load(Ordering::Relaxed),
             "init_kernel_state called more than once — boot sequencing bug"
         );
@@ -117,7 +117,7 @@ pub fn kernel_state() -> &'static KernelState {
     // &'static because the static lives for the duration of the kernel.
     // Concurrent reads are safe because KernelState fields are Lock-wrapped.
     unsafe {
-        debug_assert!(
+        assert!(
             KERNEL_STATE_INITIALIZED.load(Ordering::Acquire),
             "kernel_state() called before init_kernel_state() — boot sequencing bug"
         );
