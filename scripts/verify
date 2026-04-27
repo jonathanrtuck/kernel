@@ -68,7 +68,7 @@ pass "speculation barriers present"
 
 # h: Bare-metal integration — boot the kernel and check test scenarios.
 if command -v hypervisor >/dev/null 2>&1; then
-    BM_OUTPUT=$(hypervisor --no-gpu --timeout 10 target/aarch64-unknown-none/debug/kernel 2>&1)
+    BM_OUTPUT=$(hypervisor --no-gpu --timeout 10 --cpus 2 target/aarch64-unknown-none/debug/kernel 2>&1)
 
     if echo "$BM_OUTPUT" | grep -q "TEST PASSED"; then
         pass "bare-metal integration (hypervisor)"

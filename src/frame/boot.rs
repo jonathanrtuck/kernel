@@ -565,12 +565,13 @@ const CHILD_BINARY: &[u8] = &{
     buf
 };
 
-/// Create and enqueue a child Observer for Phase 2 integration tests.
+/// Create a child Observer for Phase 2 integration tests.
 ///
 /// Allocates a code page (with CHILD_BINARY), stack page, L1 table,
 /// RegisterState, and cap table with IPC Send + fault handler + Space caps.
-/// Maps user pages via install_user_l3. The child Observer starts in
-/// Runnable state in the scheduler queue.
+/// Maps user pages via install_user_l3. The child Observer is Runnable
+/// but NOT enqueued — the caller decides whether to enqueue locally or
+/// migrate to another core via IPI.
 #[cfg(target_os = "none")]
 fn create_child_observer(
     ks: &KernelState,
@@ -675,8 +676,6 @@ fn create_child_observer(
         // 4 installed caps: handler field, self, ipc field, space.
         child.cap_table_count = 4;
     }
-
-    enqueue_observer(child_ptr);
 
     crate::println!(
         "boot: child observer id={} asid={} entry={:#x}",
@@ -1178,12 +1177,29 @@ pub fn enter_first_observer(ks: &KernelState) -> ! {
     // (VmFault). Root's FALLBACK_BINARY does three Receives: IPC
     // (BRK #0x44 verify), fault message (BRK #0x45 verify), and timer
     // fire (BRK #0x46 verify).
-    //
-    // Must be called AFTER init_bsp_per_core_data and set_current_observer
-    // so that enqueue_observer operates on the initialized BSP_CORE_STATE.
-    let (child_id, _child_ptr) =
+    let (child_id, child_ptr) =
         create_child_observer(ks, ipc_field_id, handler_field_id, child_space_id)
             .expect("create child observer");
+
+    // Schedule the child Observer. When a secondary core is online,
+    // migrate the child there via IPI — this exercises the full SMP
+    // path (PSCI boot, SGI delivery, mailbox drain, Observer migration,
+    // cross-core IPC). On single-core, enqueue locally as before.
+    let core_count = crate::frame::arch::platform::core_count();
+
+    if core_count > 1 {
+        let target = CoreId(1);
+
+        crate::core_manager::send_ipi(
+            ks,
+            target,
+            crate::kernel_state::IpiRequest::ObserverMigration(child_id),
+        );
+
+        crate::println!("boot: child migrated to core {}", target.0);
+    } else {
+        enqueue_observer(child_ptr);
+    }
 
     // Phase 2.5: install child Observer cap at slot 7 in root's table
     // so the root can issue Destroy. OBSERVER_ALL includes Destroy right.

@@ -64,6 +64,16 @@ extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
 
     kernel::frame::init_kernel_state(kernel_state);
 
+    // ── Phase 2.5: SMP — secondary core boot (D46) ──────────────────
+    //
+    // Issue PSCI CPU_ON for all secondary cores discovered in the DTB.
+    // Each secondary initializes its exception vectors, MMU, GIC, and
+    // per-core data, then enters the WFI idle loop waiting for IPIs.
+    // Must be after kernel state init (secondaries need KernelState for
+    // IPI mailbox access) and after GIC init (distributor must be
+    // configured before secondaries init their redistributors).
+    arch::cpu::activate_secondaries();
+
     // ── Phase 3: Root Observer and EL0 entry (D94, D102) ────────────
     //
     // Create the root Observer, initialize per-core data, and context

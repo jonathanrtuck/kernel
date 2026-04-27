@@ -576,12 +576,10 @@ fn irq_handler(_frame: &mut TrapFrame) {
         // and defers scheduling-affecting requests (migration, work-steal)
         // to the next EL0 IRQ or timer tick.
         intid if super::gic::is_sgi(intid) => {
-            // SGI acknowledged — mailbox drain happens on the next
-            // scheduling point (handle_el0_irq or handle_timer).
-            // The EL1h path has no access to CoreState (no Scheduler
-            // type parameter), so it just acknowledges and returns.
-            // The pending IPI requests will be drained at the next
-            // opportunity when the core returns to the dispatch loop.
+            super::gic::end_of_interrupt(intid);
+            idle_ipi_check();
+
+            return;
         }
         // BUG: println! here will deadlock if this IRQ preempted a println!
         // on the same core (serial lock is not interrupt-aware). Acceptable
@@ -626,6 +624,38 @@ fn idle_wakeup_check() {
 
 #[cfg(not(target_os = "none"))]
 fn idle_wakeup_check() {}
+
+/// Drain IPI mailbox when an SGI arrives at an idle core.
+///
+/// The EL1h IRQ handler cannot do full dispatch (no DispatchResult return
+/// path back to EL0). But when the core is idle (current == None), an IPI
+/// may carry an ObserverMigration that gives this core work. Drain the
+/// mailbox via handle_ipi and diverge into restore_or_idle if an Observer
+/// became runnable.
+#[cfg(target_os = "none")]
+fn idle_ipi_check() {
+    use crate::core_manager::{self, DispatchResult};
+    use crate::time_manager::round_robin::RoundRobin;
+
+    let core = core_manager::current_core_mut::<RoundRobin>();
+
+    if core.current.is_some() {
+        return;
+    }
+
+    let ks = crate::frame::kernel_state();
+    let result = core.handle_ipi(ks);
+
+    match result {
+        DispatchResult::Resume(_) | DispatchResult::ResumeFastPath(_) => {
+            restore_or_idle(result);
+        }
+        _ => {}
+    }
+}
+
+#[cfg(not(target_os = "none"))]
+fn idle_ipi_check() {}
 
 // ---------------------------------------------------------------------------
 // Fatal exception — dump state and halt

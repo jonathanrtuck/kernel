@@ -240,8 +240,15 @@ fn init_redistributor(redist_base: usize) {
         mmio::write8(redist_base + GICR_IPRIORITYR + intid, 0xA0);
     }
 
-    // Enable the virtual timer PPI (INTID 27).
-    mmio::write32(redist_base + GICR_ISENABLER0, 1 << INTID_VTIMER);
+    // Enable SGI 0 (IPI) and the virtual timer PPI (INTID 27).
+    // GICv3 does not guarantee SGIs are enabled at reset (ARM ARM:
+    // GICR_ISENABLER0 reset values are IMPLEMENTATION DEFINED for
+    // INTIDs 0-15). ISENABLER is set-enable: writing 1 enables,
+    // writing 0 has no effect.
+    mmio::write32(
+        redist_base + GICR_ISENABLER0,
+        (1 << crate::kernel_state::IPI_SGI_NUMBER) | (1 << INTID_VTIMER),
+    );
 
     // Ensure all redistributor writes complete before CPU interface setup.
     sysreg::dsb_sy();
