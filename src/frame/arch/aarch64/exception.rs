@@ -238,6 +238,16 @@ fn handle_el0_sync<S: crate::time_manager::Scheduler + 'static>(
 
             if imm == 0x42 {
                 test_passed()
+            } else if imm == 0x43 {
+                child_scenario_passed::<S>()
+            } else if imm == 0x44 {
+                verify_ipc_roundtrip::<S>()
+            } else if imm == 0x45 {
+                verify_fault_handling::<S>()
+            } else if imm == 0x46 {
+                verify_timer_fire::<S>()
+            } else if imm == 0x47 {
+                verify_observer_destroy()
             } else {
                 handle_el0_fault::<S>(esr, far)
             }
@@ -355,6 +365,145 @@ fn test_passed() -> ! {
     crate::println!();
     crate::println!("TEST PASSED");
     crate::println!();
+
+    super::psci::system_off()
+}
+
+#[cfg(target_os = "none")]
+fn child_scenario_passed<S: crate::time_manager::Scheduler + 'static>()
+-> crate::core_manager::DispatchResult {
+    use crate::core_manager;
+    use crate::time_manager::Scheduler;
+
+    crate::println!("scenario: child IPC send + own address space — PASS");
+
+    let core = core_manager::current_core_mut::<S>();
+
+    if let Some(child) = core.current {
+        Scheduler::dequeue(&mut core.scheduler, child);
+    }
+
+    core.schedule_next()
+}
+
+#[cfg(target_os = "none")]
+fn verify_ipc_roundtrip<S: crate::time_manager::Scheduler + 'static>()
+-> crate::core_manager::DispatchResult {
+    let core = crate::core_manager::current_core::<S>();
+    let observer = core.current.expect("must have current observer");
+    let regs = crate::frame::cores::read_ipc_registers(observer);
+
+    let data_ok = regs.data == [0xAA, 0xBB, 0xCC, 0xDD];
+    let label_ok = regs.label == 0x42;
+    let badge_ok = regs.handle_or_badge == 0x99;
+
+    if data_ok && label_ok && badge_ok {
+        crate::println!("scenario: IPC roundtrip (4 data + label + badge) — PASS");
+    } else {
+        crate::println!("scenario: IPC roundtrip — FAIL");
+        crate::println!(
+            "  data:  [{:#x}, {:#x}, {:#x}, {:#x}]",
+            regs.data[0],
+            regs.data[1],
+            regs.data[2],
+            regs.data[3]
+        );
+        crate::println!("  label: {:#x} (expected 0x42)", regs.label);
+        crate::println!("  badge: {:#x} (expected 0x99)", regs.handle_or_badge);
+        super::psci::system_off()
+    }
+
+    crate::frame::cores::observer_advance_pc(observer);
+
+    crate::core_manager::DispatchResult::Resume(observer)
+}
+
+#[cfg(target_os = "none")]
+fn verify_fault_handling<S: crate::time_manager::Scheduler + 'static>()
+-> crate::core_manager::DispatchResult {
+    use crate::field::LABEL_VM_FAULT;
+
+    let core = crate::core_manager::current_core::<S>();
+    let observer = core.current.expect("must have current observer");
+    let regs = crate::frame::cores::read_ipc_registers(observer);
+
+    let label_ok = regs.label == LABEL_VM_FAULT;
+    let space_slot_ok = regs.data[0] == 4;
+    let offset_ok = regs.data[1] == 0;
+    let access_ok = regs.data[2] == 0;
+
+    if label_ok && space_slot_ok && offset_ok && access_ok {
+        crate::println!("scenario: VmFault delivery (space slot + offset + access) — PASS");
+    } else {
+        crate::println!("scenario: VmFault delivery — FAIL");
+        crate::println!(
+            "  label: {:#x} (expected {:#x})",
+            regs.label,
+            LABEL_VM_FAULT
+        );
+        crate::println!("  space_slot: {} (expected 4)", regs.data[0]);
+        super::psci::system_off()
+    }
+
+    crate::frame::cores::observer_advance_pc(observer);
+
+    crate::core_manager::DispatchResult::Resume(observer)
+}
+
+#[cfg(target_os = "none")]
+fn verify_timer_fire<S: crate::time_manager::Scheduler + 'static>()
+-> crate::core_manager::DispatchResult {
+    use crate::field::LABEL_TIMER_FIRE;
+
+    let core = crate::core_manager::current_core::<S>();
+    let observer = core.current.expect("must have current observer");
+    let regs = crate::frame::cores::read_ipc_registers(observer);
+
+    let label_ok = regs.label == LABEL_TIMER_FIRE;
+    let badge_ok = regs.handle_or_badge == 0xBEEF;
+    let fire_time_ok = regs.data[0] > 0;
+
+    if label_ok && badge_ok && fire_time_ok {
+        crate::println!(
+            "scenario: timer fire (badge + fire_time={}) — PASS",
+            regs.data[0]
+        );
+    } else {
+        crate::println!("scenario: timer fire — FAIL");
+        crate::println!(
+            "  label: {:#x} (expected {:#x})",
+            regs.label,
+            LABEL_TIMER_FIRE
+        );
+        crate::println!("  badge: {:#x} (expected 0xBEEF)", regs.handle_or_badge);
+        super::psci::system_off()
+    }
+
+    crate::frame::cores::observer_advance_pc(observer);
+
+    crate::core_manager::DispatchResult::Resume(observer)
+}
+
+#[cfg(target_os = "none")]
+fn verify_observer_destroy() -> ! {
+    let core = crate::core_manager::current_core::<crate::time_manager::round_robin::RoundRobin>();
+    let observer = core.current.expect("must have current observer");
+    let regs = crate::frame::cores::read_typed_registers(observer);
+
+    if regs.args[0] == 0 {
+        crate::println!("scenario: Observer destroy + cascade (x0=0, no backing) — PASS");
+        crate::println!();
+        crate::println!("TEST PASSED");
+        crate::println!();
+    } else {
+        crate::println!(
+            "scenario: Observer destroy — FAIL (x0={})",
+            regs.args[0] as i64
+        );
+        crate::println!();
+        crate::println!("TEST FAILED");
+        crate::println!();
+    }
 
     super::psci::system_off()
 }
