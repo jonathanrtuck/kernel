@@ -74,7 +74,6 @@ fn jitter_u64() -> u64 {
         let jitter = delta ^ last_delta;
 
         state = state.rotate_left(1) ^ jitter;
-
         last_delta = delta;
         last = now;
     }

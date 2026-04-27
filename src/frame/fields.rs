@@ -401,7 +401,6 @@ pub fn route_add(
                         return Err(FieldError::RoutingTableFull);
                     }
                 }
-
                 // Shift entries after insert_at to make room.
                 if insert_at < count {
                     // SAFETY: We are shifting entries within the valid
@@ -520,7 +519,6 @@ pub fn allocate_badge_map() -> Option<NonNull<BadgeMap>> {
 
     // SAFETY: entries_raw is non-null (checked above).
     let entries_nn = unsafe { NonNull::new_unchecked(entries_raw as *mut BadgeMapEntry) };
-
     let map_layout = Layout::new::<BadgeMap>();
     // SAFETY: map_layout has non-zero size (BadgeMap is non-ZST).
     let map_raw = unsafe { alloc(map_layout) };

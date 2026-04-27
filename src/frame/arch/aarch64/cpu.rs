@@ -88,6 +88,7 @@ static mut SECONDARY_CORE_STATES: [CoreState<RoundRobin>; config::MAX_CORES - 1]
 #[cfg(target_os = "none")]
 fn init_secondary_per_core_data(core_id: usize) {
     assert!((1..config::MAX_CORES).contains(&core_id));
+
     let idx = core_id - 1;
     let stacks_base = CORE_STACKS.0.get() as usize;
     let stack_top = stack_top_for_core(core_id, stacks_base);
@@ -214,6 +215,7 @@ extern "C" fn secondary_main(core_id: usize) -> ! {
     super::exception::init();
     super::mmu::init_secondary();
     super::gic::init_per_core(core_id);
+
     init_secondary_per_core_data(core_id);
 
     crate::println!("core {}: alive", core_id);

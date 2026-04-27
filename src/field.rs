@@ -2205,7 +2205,6 @@ mod tests {
         source.add_route(200, 299, ObjectId(2), 0).unwrap(); // will be removed
         source.add_route(300, 399, ObjectId(3), 0).unwrap();
         source.add_route(400, 499, ObjectId(2), 0).unwrap(); // will be removed
-
         source.remove_routes_to(ObjectId(2));
 
         // Remaining routes must still resolve correctly.
@@ -2297,7 +2296,6 @@ mod tests {
             !field.badge_decrement(Badge(200)),
             "D17: second close must not trigger closure"
         );
-
         // Close last — closure fires.
         assert!(
             field.badge_decrement(Badge(200)),
@@ -2318,7 +2316,6 @@ mod tests {
             field.badge_decrement(Badge(10)),
             "D17: closing last cap with badge 10 must trigger closure"
         );
-
         // Close badge 20 — closure fires for badge 20.
         assert!(
             field.badge_decrement(Badge(20)),
@@ -2369,9 +2366,9 @@ mod tests {
         // Close first — no closure.
         assert!(!field.badge_decrement(Badge(77)));
         assert_eq!(field.queue_length, 0, "no closure message yet");
-
         // Close second — closure fires.
         assert!(field.badge_decrement(Badge(77)));
+
         field.enqueue_badge_closure(Badge(77));
 
         // Receive the closure message.
@@ -2404,7 +2401,6 @@ mod tests {
 
         // Drain one message to make room.
         let _ = field.dequeue();
-
         // Drain pending closures (what the receive path does).
         let delivered = crate::frame::fields::drain_pending_closures(&mut field);
 
@@ -2449,7 +2445,6 @@ mod tests {
         for i in 0..20u64 {
             field.badge_increment(Badge(i));
         }
-
         // Close all — each should trigger closure.
         for i in 0..20u64 {
             assert!(
@@ -2478,7 +2473,6 @@ mod tests {
             !field.badge_decrement(Badge(42)),
             "D17: first close of second lifecycle must not trigger closure"
         );
-
         // Close second — closure fires again.
         assert!(
             field.badge_decrement(Badge(42)),

@@ -4,6 +4,13 @@
 //! architecture. Platform-specific values (device addresses, RAM layout)
 //! live in `arch/aarch64/platform.rs`.
 
+/// Default Field queue capacity in messages.
+///
+/// D13: bounded queue. This is the initial capacity for Fields created
+/// without an explicit size. The actual capacity is limited by the
+/// Space consumed at creation (D32).
+pub const DEFAULT_QUEUE_CAPACITY: u32 = 16;
+
 /// Kernel stack size per core. — link.ld sync: `.bss.stack`
 ///
 /// 256 KiB: KernelState contains IrqRoutingTable (~24 KiB). In debug
@@ -13,10 +20,3 @@ pub const KERNEL_STACK_SIZE: usize = 256 * 1024;
 
 /// Maximum number of CPU cores.
 pub const MAX_CORES: usize = 8;
-
-/// Default Field queue capacity in messages.
-///
-/// D13: bounded queue. This is the initial capacity for Fields created
-/// without an explicit size. The actual capacity is limited by the
-/// Space consumed at creation (D32).
-pub const DEFAULT_QUEUE_CAPACITY: u32 = 16;

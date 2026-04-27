@@ -1617,11 +1617,27 @@ impl<S: Scheduler> CoreState<S> {
                     crate::frame::cores::observer_close_cap(sender_ptr, handle.index);
 
                 match close_result {
-                    capability::CloseResult::Closed { .. } => {
-                        // D24 (bare-metal): when closed_type == Space,
-                        // scan for remaining Space caps via
-                        // observer_has_cap_to_object and unmap if none
-                        // remain (frame::mapping::unmap_space_from_observer).
+                    capability::CloseResult::Closed {
+                        object_type: closed_type,
+                        object_id: closed_id,
+                        ..
+                    } => {
+                        // D26 (bare-metal): when closing a Space cap, check
+                        // whether the Observer still holds another cap to the
+                        // same Space. If not, unwire the page table mapping.
+                        #[cfg(target_os = "none")]
+                        if closed_type == ObjectType::Space {
+                            let still_has = crate::frame::cores::observer_has_cap_to_object(
+                                sender_ptr,
+                                ObjectType::Space,
+                                closed_id,
+                                u32::MAX,
+                            );
+
+                            if !still_has {
+                                unwire_space_for_observer(sender_ptr, closed_id, kernel_state);
+                            }
+                        }
 
                         typed_ok(0)
                     }
@@ -1963,7 +1979,6 @@ impl<S: Scheduler> CoreState<S> {
                 }
 
                 drop(fields);
-
                 consume_space(kernel_state, space_id);
 
                 {
@@ -1986,6 +2001,7 @@ impl<S: Scheduler> CoreState<S> {
                         stored_generation: 0,
                     },
                 );
+
                 debug_assert!(wrote);
 
                 typed_ok(0)
@@ -2212,10 +2228,26 @@ impl<S: Scheduler> CoreState<S> {
                     };
                     let asid = crate::frame::cores::allocate_asid(kernel_state);
 
+                    // D26: allocate per-Observer L1 page table with L1[0] → kernel L2_ROOT.
+                    // Host tests skip this — no MMU.
+                    #[cfg(target_os = "none")]
+                    let page_table_root = {
+                        match crate::frame::boot::allocate_observer_l1(kernel_state) {
+                            Ok(l1_pa) => crate::frame::arch::mmu::make_ttbr0(asid, l1_pa as u64),
+                            Err(_) => {
+                                observers.free(id);
+
+                                return typed_error(SyscallError::InsufficientResource);
+                            }
+                        }
+                    };
+                    #[cfg(not(target_os = "none"))]
+                    let page_table_root = 0u64;
+
                     obs.object_id = id;
                     obs.asid = asid;
                     obs.register_state = crate::observer::RegisterStateHandle::new(rs_ptr);
-                    obs.page_table_root = 0;
+                    obs.page_table_root = page_table_root;
                     obs.cap_table = cap_entries_new;
                     obs.cap_table_capacity = cap_capacity_new;
                     obs.cap_table_free_head = Some(crate::capability::SLOT_USER_START);
@@ -2718,6 +2750,7 @@ impl<S: Scheduler> CoreState<S> {
         match self.scheduler.pick_next() {
             Some(observer) => {
                 self.current = Some(observer);
+
                 DispatchResult::Resume(observer)
             }
             None => {
@@ -2890,6 +2923,45 @@ fn verify_space(
 ///
 /// D32 type conversion: the Space's backing memory is repurposed for the
 /// new object type. Generation bump invalidates all outstanding caps.
+/// D26 auto-unmapping: remove a Space's page table entries from an Observer.
+///
+/// Called after Close determines the Observer no longer holds any cap to
+/// this Space. Looks up the Space's metadata and delegates to
+/// `unwire_space_mapping` for the actual page table update + TLB invalidation.
+#[cfg(target_os = "none")]
+fn unwire_space_for_observer(
+    observer_ptr: NonNull<Observer>,
+    space_id: ObjectId,
+    kernel_state: &KernelState,
+) {
+    let (va_base, l3_pa, page_count) = {
+        let spaces = kernel_state.spaces.acquire();
+
+        match spaces.get(space_id) {
+            Some(space) => {
+                let pc = space.size / crate::frame::arch::mmu::page_size();
+                (space.va_base, space.l3_table_pa, pc)
+            }
+            None => return,
+        }
+    };
+
+    let (pt_root, asid) = crate::frame::cores::observer_page_table_info(observer_ptr);
+
+    if pt_root == 0 {
+        return;
+    }
+
+    crate::frame::mapping::unwire_space_mapping(
+        pt_root,
+        va_base,
+        l3_pa,
+        page_count,
+        asid,
+        kernel_state,
+    );
+}
+
 #[cfg(any(target_os = "none", test))]
 fn consume_space(kernel_state: &KernelState, space_id: ObjectId) {
     let mut spaces = kernel_state.spaces.acquire();
@@ -2925,6 +2997,7 @@ fn return_backing_space(
                 space.l3_table_pa = 0;
                 space.refcount = 1;
                 space.generation = core::sync::atomic::AtomicU64::new(0);
+
                 id
             }
             Err(_) => return 0,
@@ -4834,6 +4907,7 @@ mod tests {
 
         // Scheduler invariant: current is in the queue.
         core.scheduler.enqueue(ptr);
+
         core.current = Some(ptr);
 
         let result = core.dispatch_ipc(IpcOperation::Yield, &ks);
@@ -5775,6 +5849,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
         core.dispatch_typed(TypedOperation::Destroy, &ks);
 
@@ -5829,6 +5904,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
         core.dispatch_typed(TypedOperation::Destroy, &ks);
 
@@ -5986,6 +6062,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
         core.dispatch_typed(TypedOperation::Destroy, &ks);
 
@@ -6183,6 +6260,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
 
         let result = core.dispatch_ipc(IpcOperation::Send, &ks);
@@ -6269,6 +6347,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
 
         // First Send must succeed.
@@ -6351,6 +6430,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
 
         let _ = core.dispatch_ipc(IpcOperation::Send, &ks);
@@ -6400,6 +6480,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
 
         let result = core.dispatch_ipc(IpcOperation::Send, &ks);
@@ -6471,6 +6552,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
 
         let result = core.dispatch_ipc(IpcOperation::Send, &ks);
@@ -6530,6 +6612,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
 
         let result = core.dispatch_ipc(IpcOperation::Send, &ks);
@@ -6589,6 +6672,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
 
         let result = core.dispatch_ipc(IpcOperation::Send, &ks);
@@ -6628,6 +6712,7 @@ mod tests {
         let ks = make_kernel_state();
         // Allocate a Field in the arena and pre-enqueue a message.
         let field_id = make_field_in_arena(&ks, 8);
+
         {
             let mut fields = ks.fields.acquire();
             let field = fields.get_mut(field_id).unwrap();
@@ -6642,6 +6727,7 @@ mod tests {
                 })
                 .expect("pre-enqueue must succeed");
         };
+
         // Create receiver with RECEIVE cap.
         let (mut receiver, _entries) = make_sender_with_cap(
             crate::capability::ObjectType::Field,
@@ -6839,6 +6925,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
 
         let result = core.dispatch_ipc(IpcOperation::Call, &ks);
@@ -6901,6 +6988,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
 
         let result = core.dispatch_typed(TypedOperation::CreateField, &ks);
@@ -6973,6 +7061,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
 
         let result = core.dispatch_typed(TypedOperation::CreateField, &ks);
@@ -7013,6 +7102,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
 
         core.dispatch_typed(TypedOperation::CreateField, &ks);
@@ -7065,6 +7155,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
 
         assert_eq!(core.deadline_count, 0, "precondition: no deadlines");
@@ -7159,6 +7250,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
 
         let result = core.dispatch_typed(TypedOperation::CreateObserver, &ks);
@@ -7300,6 +7392,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
 
         core.dispatch_typed(TypedOperation::CreateObserver, &ks);
@@ -7637,6 +7730,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
 
         let outcome = crate::communication::CallOutcome::DirectSwitch(receiver_ptr);
@@ -7707,6 +7801,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
 
         // D96 §4 slow path: WokeReceiverSlowPath carries both user and reply cap.
@@ -7876,6 +7971,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
         core.dispatch_typed(TypedOperation::Clone, &ks);
 
@@ -7943,6 +8039,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
         core.dispatch_typed(TypedOperation::Clone, &ks);
 
@@ -7990,6 +8087,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
         core.dispatch_typed(TypedOperation::Clone, &ks);
 
@@ -8025,6 +8123,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
         core.dispatch_typed(TypedOperation::Close, &ks);
 
@@ -8100,6 +8199,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
         core.dispatch_typed(TypedOperation::Close, &ks);
 
@@ -8156,6 +8256,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
         core.dispatch_typed(TypedOperation::Mint, &ks);
 
@@ -8218,6 +8319,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
         core.dispatch_typed(TypedOperation::Mint, &ks);
 
@@ -8257,6 +8359,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
 
         // MINT right is not in the source cap — should fail NoRight.
@@ -8351,6 +8454,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
         core.dispatch_typed(TypedOperation::ObserverInstallCap, &ks);
 
@@ -8482,6 +8586,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
         core.dispatch_typed(TypedOperation::ObserverChangeHandler, &ks);
 
@@ -8598,6 +8703,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
         core.dispatch_typed(TypedOperation::ObserverChangeHandler, &ks);
 
@@ -8639,6 +8745,7 @@ mod tests {
         let mut core = make_core_state();
 
         core.current = Some(sender_ptr);
+
         core.scheduler.enqueue(sender_ptr);
         core.dispatch_typed(TypedOperation::Close, &ks);
 
@@ -9168,6 +9275,7 @@ mod tests {
         let ptr = NonNull::from(&mut obs);
 
         core.current = Some(ptr);
+
         core.scheduler.enqueue(ptr);
 
         let fault = crate::fault::FaultType::HardwareException {
@@ -9307,6 +9415,7 @@ mod tests {
         let ptr = NonNull::from(&mut obs);
 
         core.current = Some(ptr);
+
         core.scheduler.enqueue(ptr);
 
         let fault = crate::fault::FaultType::CapTableFull;
@@ -10229,7 +10338,6 @@ mod tests {
     fn test_d56_handle_ipi_empty_mailbox_returns_schedule_next() {
         let ks = make_kernel_state();
         let mut core = make_core_state();
-
         // No IPI requests pending — handle_ipi should return Idle (empty queue).
         let result = core.handle_ipi(&ks);
 
@@ -10293,7 +10401,6 @@ mod tests {
     fn test_d56_handle_ipi_observer_migration() {
         let ks = make_kernel_state();
         let mut core = make_core_state();
-
         // Allocate an Observer in the global arena.
         let observer_id = {
             let mut observers = ks.observers.acquire();
@@ -10380,6 +10487,7 @@ mod tests {
         let ptr = NonNull::from(&mut obs);
 
         core.current = Some(ptr);
+
         core.scheduler.enqueue(ptr);
 
         let snapshot = core.build_core_snapshot();
@@ -10448,7 +10556,6 @@ mod tests {
         // Full flow: placement decides Remote, send_ipi enqueues request,
         // target core's handle_ipi picks up the Observer.
         let ks = make_kernel_state();
-
         // Allocate an Observer in the arena.
         let observer_id = {
             let mut observers = ks.observers.acquire();
@@ -10473,7 +10580,6 @@ mod tests {
             deadline_count: 0,
             cascade_continuation: None,
         };
-
         let result = target_core.handle_ipi(&ks);
 
         // 3. The migrated Observer should be scheduled on the target core.
@@ -10506,15 +10612,12 @@ mod tests {
     fn test_integration_receive_then_send_roundtrip() {
         let ks = make_kernel_state();
         let field_id = make_field_in_arena(&ks, 8);
-
         let (mut receiver, _re) =
             make_sender_with_cap(ObjectType::Field, field_id, Rights::RECEIVE, Badge(0), 0);
         let receiver_ptr = NonNull::from(&mut receiver);
-
         let (mut sender, _se) =
             make_sender_with_cap(ObjectType::Field, field_id, Rights::SEND, Badge(0xBEEF), 0);
         let sender_ptr = NonNull::from(&mut sender);
-
         let handle = encode_handle(0);
 
         // Step 1: Receiver does Receive on empty Field → blocks.
@@ -10530,11 +10633,14 @@ mod tests {
         );
 
         let mut core = make_core_state();
+
         core.current = Some(receiver_ptr);
+
         core.scheduler.enqueue(receiver_ptr);
         core.scheduler.enqueue(sender_ptr);
 
         let result = core.dispatch_ipc(IpcOperation::Receive, &ks);
+
         assert!(matches!(result, DispatchResult::Resume(p) if p == sender_ptr));
         assert!(!core.scheduler.contains(receiver_ptr));
 
@@ -10549,18 +10655,22 @@ mod tests {
                 reply_info: 0,
             },
         );
+
         core.current = Some(sender_ptr);
 
         let result = core.dispatch_ipc(IpcOperation::Send, &ks);
+
         assert!(matches!(result, DispatchResult::Resume(p) if p == sender_ptr));
 
         // Receiver must have message in registers.
         let regs = crate::frame::cores::read_ipc_registers(receiver_ptr);
+
         assert_eq!(regs.data, [0x1111, 0x2222, 0x3333, 0x4444]);
         assert_eq!(regs.label, 0xABCD);
         assert_eq!(regs.handle_or_badge, 0xBEEF);
 
         let (carry, _) = crate::frame::cores::read_ipc_carry_and_x0(receiver_ptr);
+
         assert!(!carry, "receiver carry must be clear");
         assert!(
             core.scheduler.contains(receiver_ptr),
@@ -10573,7 +10683,6 @@ mod tests {
     fn test_integration_fault_delivery_to_blocked_handler() {
         let ks = make_kernel_state();
         let handler_field_id = make_field_in_arena(&ks, 8);
-
         let (mut handler_obs, _he) = make_sender_with_cap(
             ObjectType::Field,
             handler_field_id,
@@ -10582,7 +10691,6 @@ mod tests {
             0,
         );
         let handler_ptr = NonNull::from(&mut handler_obs);
-
         let handle = encode_handle(0);
 
         // Step 1: Handler blocks on Receive.
@@ -10596,16 +10704,21 @@ mod tests {
                 reply_info: 0,
             },
         );
+
         let mut core = make_core_state();
+
         core.current = Some(handler_ptr);
+
         core.scheduler.enqueue(handler_ptr);
 
         let result = core.dispatch_ipc(IpcOperation::Receive, &ks);
+
         assert!(matches!(result, DispatchResult::Idle));
 
         // Step 2: Faulting Observer faults → delivered to blocked handler.
         let mut faulting_obs = make_observer_with_handler(Some((handler_field_id, 0)));
         let faulting_ptr = NonNull::from(&mut faulting_obs);
+
         core.current = Some(faulting_ptr);
 
         let fault = crate::fault::FaultType::HardwareException {
@@ -10614,10 +10727,12 @@ mod tests {
             far_el1: 0xBAD0_CAFE,
         };
         let result = core.dispatch_fault(fault, &ks);
+
         assert!(matches!(result, DispatchResult::Resume(p) if p == handler_ptr));
 
         // Handler's registers must contain fault message.
         let regs = crate::frame::cores::read_ipc_registers(handler_ptr);
+
         assert_eq!(regs.label, crate::field::LABEL_HARDWARE_EXCEPTION);
         assert_eq!(regs.data[0], 0xDEAD_0001, "ESR");
         assert_eq!(regs.data[1], 0x0040_0000, "ELR");
@@ -10633,18 +10748,14 @@ mod tests {
     fn test_integration_block_wake_scheduler_no_duplicates() {
         let ks = make_kernel_state();
         let field_id = make_field_in_arena(&ks, 8);
-
         let (mut receiver, _re) =
             make_sender_with_cap(ObjectType::Field, field_id, Rights::RECEIVE, Badge(0), 0);
         let receiver_ptr = NonNull::from(&mut receiver);
-
         let (mut sender, _se) =
             make_sender_with_cap(ObjectType::Field, field_id, Rights::SEND, Badge(0xAAAA), 0);
         let sender_ptr = NonNull::from(&mut sender);
-
         let mut bystander = make_observer();
         let bystander_ptr = NonNull::from(&mut bystander);
-
         let handle = encode_handle(0);
 
         // Step 1: Receiver blocks.
@@ -10658,13 +10769,17 @@ mod tests {
                 reply_info: 0,
             },
         );
+
         let mut core = make_core_state();
+
         core.current = Some(receiver_ptr);
+
         core.scheduler.enqueue(receiver_ptr);
         core.scheduler.enqueue(sender_ptr);
         core.scheduler.enqueue(bystander_ptr);
 
         let result = core.dispatch_ipc(IpcOperation::Receive, &ks);
+
         assert!(matches!(result, DispatchResult::Resume(_)));
 
         // Step 2: Sender wakes receiver.
@@ -10678,13 +10793,17 @@ mod tests {
                 reply_info: 0,
             },
         );
-        core.current = Some(sender_ptr);
-        let result = core.dispatch_ipc(IpcOperation::Send, &ks);
-        assert!(matches!(result, DispatchResult::Resume(_)));
 
+        core.current = Some(sender_ptr);
+
+        let result = core.dispatch_ipc(IpcOperation::Send, &ks);
+
+        assert!(matches!(result, DispatchResult::Resume(_)));
         // Queue must have exactly 3 entries (no duplicate receiver).
         assert_eq!(core.scheduler.queue_depth(), 3);
+
         core.scheduler.dequeue(receiver_ptr);
+
         assert!(!core.scheduler.contains(receiver_ptr));
         assert_eq!(core.scheduler.queue_depth(), 2);
     }

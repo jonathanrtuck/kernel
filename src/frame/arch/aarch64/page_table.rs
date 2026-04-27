@@ -1032,7 +1032,6 @@ mod tests {
         install_space_in_l2(&mut l2, va, l3_pa);
 
         assert!(l2_maps_space(&l2, va, l3_pa));
-
         // Step 3: Verify both levels
         assert!(is_valid_table(l1[l1_index(va)]));
         assert!(is_valid_table(l2[l2_index(va)]));
@@ -1260,7 +1259,6 @@ mod tests {
     #[test]
     fn d91_remove_space_from_l2_on_empty_returns_true() {
         let mut l2 = [0u64; ENTRIES_PER_TABLE];
-
         // Removing from an already-empty slot — table was already empty
         let is_empty = remove_space_from_l2(&mut l2, 0);
 

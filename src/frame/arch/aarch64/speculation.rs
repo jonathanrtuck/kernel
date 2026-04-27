@@ -11,13 +11,13 @@
 //!
 //! ## Mitigation landscape for ARM64
 //!
-//! | Vulnerability          | Hardware feature       | Software fallback         | Plug point                    |
-//! |------------------------|------------------------|---------------------------|-------------------------------|
-//! | Meltdown               | E0PD (TCR_EL1 bit)     | KPTI (separate page tables)| `mmu.rs` TCR config           |
-//! | Spectre v1 (bounds)    | None — always software  | SB after bounds checks    | `capabilities.rs` via this module |
-//! | Spectre v2 (branch)    | CSV2 / CSV3            | Branch predictor flush    | Context switch path           |
-//! | Spectre-BHB            | CSV3 / CLRBHB          | BHB clearing loop         | `exception.S` preamble        |
-//! | Store bypass (SSB)     | SSBS                   | Per-Observer SSBS mgmt    | Register save/restore         |
+//! | Vulnerability          | Hardware feature       | Software fallback          | Plug point                        |
+//! |------------------------|------------------------|----------------------------|-----------------------------------|
+//! | Meltdown               | E0PD (TCR_EL1 bit)     | KPTI (separate page tables)| `mmu.rs` TCR config               |
+//! | Spectre v1 (bounds)    | None — always software | SB after bounds checks     | `capabilities.rs` via this module |
+//! | Spectre v2 (branch)    | CSV2 / CSV3            | Branch predictor flush     | Context switch path               |
+//! | Spectre-BHB            | CSV3 / CLRBHB          | BHB clearing loop          | `exception.S` preamble            |
+//! | Store bypass (SSB)     | SSBS                   | Per-Observer SSBS mgmt     | Register save/restore             |
 //!
 //! ## Porting guide
 //!

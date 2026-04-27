@@ -265,13 +265,10 @@ fn init_cpu_interface() {
 
     sysreg::set_icc_sre_el1(sre | (1 << 0)); // SRE bit
     sysreg::isb();
-
     // Set the priority mask to accept all priorities.
     sysreg::set_icc_pmr_el1(0xFF);
-
     // Set binary point (group/subgroup split). Default is fine.
     sysreg::set_icc_bpr1_el1(0);
-
     // Enable Group 1 non-secure interrupts.
     sysreg::set_icc_igrpen1_el1(1);
     sysreg::isb();

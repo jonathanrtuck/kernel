@@ -149,7 +149,6 @@ extern "C" fn exception_handler(frame: &mut TrapFrame, source: u64) {
         // EL1h IRQ — timer and device interrupts.
         // Returns to let assembly eret resume the interrupted code.
         5 => irq_handler(frame),
-
         // Everything else is unhandled — print diagnostics and halt.
         _ => fatal_exception(frame, source),
     }
@@ -214,6 +213,7 @@ fn handle_el0_sync<S: crate::time_manager::Scheduler + 'static>(
                     Some(op) => core.dispatch_typed(op, ks),
                     None => {
                         crate::frame::cores::write_typed_result(observer, (-1i64) as u64);
+
                         DispatchResult::Resume(observer)
                     }
                 }
@@ -225,6 +225,7 @@ fn handle_el0_sync<S: crate::time_manager::Scheduler + 'static>(
                             observer,
                             crate::syscall::SyscallError::InvalidCap,
                         );
+
                         DispatchResult::Resume(observer)
                     }
                 }
@@ -409,7 +410,6 @@ fn verify_ipc_roundtrip<S: crate::time_manager::Scheduler + 'static>()
     let core = crate::core_manager::current_core::<S>();
     let observer = core.current.expect("must have current observer");
     let regs = crate::frame::cores::read_ipc_registers(observer);
-
     let data_ok = regs.data == [0xAA, 0xBB, 0xCC, 0xDD];
     let label_ok = regs.label == 0x42;
     let badge_ok = regs.handle_or_badge == 0x99;
@@ -431,7 +431,6 @@ fn verify_ipc_roundtrip<S: crate::time_manager::Scheduler + 'static>()
     }
 
     crate::frame::cores::observer_advance_pc(observer);
-
     crate::core_manager::DispatchResult::Resume(observer)
 }
 
@@ -443,7 +442,6 @@ fn verify_fault_handling<S: crate::time_manager::Scheduler + 'static>()
     let core = crate::core_manager::current_core::<S>();
     let observer = core.current.expect("must have current observer");
     let regs = crate::frame::cores::read_ipc_registers(observer);
-
     let label_ok = regs.label == LABEL_VM_FAULT;
     let space_slot_ok = regs.data[0] == 4;
     let offset_ok = regs.data[1] == 0;
@@ -463,7 +461,6 @@ fn verify_fault_handling<S: crate::time_manager::Scheduler + 'static>()
     }
 
     crate::frame::cores::observer_advance_pc(observer);
-
     crate::core_manager::DispatchResult::Resume(observer)
 }
 
@@ -475,7 +472,6 @@ fn verify_timer_fire<S: crate::time_manager::Scheduler + 'static>()
     let core = crate::core_manager::current_core::<S>();
     let observer = core.current.expect("must have current observer");
     let regs = crate::frame::cores::read_ipc_registers(observer);
-
     let label_ok = regs.label == LABEL_TIMER_FIRE;
     let badge_ok = regs.handle_or_badge == 0xBEEF;
     let fire_time_ok = regs.data[0] > 0;
@@ -497,7 +493,6 @@ fn verify_timer_fire<S: crate::time_manager::Scheduler + 'static>()
     }
 
     crate::frame::cores::observer_advance_pc(observer);
-
     crate::core_manager::DispatchResult::Resume(observer)
 }
 

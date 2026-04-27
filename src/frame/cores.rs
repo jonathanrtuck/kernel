@@ -602,15 +602,52 @@ pub fn observer_free_cap_slot(observer_ptr: NonNull<Observer>, index: u32) {
 /// Install a transferred capability into an Observer's cap table (D96).
 /// Delegates to Table::install_transferred_cap. Returns the encoded handle
 /// or Err(TableFull).
+///
+/// D26 (bare-metal): when the installed cap is a Space, the kernel
+/// automatically wires the Space's L3 table into the Observer's page
+/// table. Holding a Space cap is sufficient for memory access.
 #[cfg(any(target_os = "none", test))]
 pub fn observer_install_transferred_cap(
     observer_ptr: NonNull<Observer>,
     transferred: &crate::capability::TransferredCap,
 ) -> Result<u64, crate::capability::CapError> {
     // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy.
-    unsafe {
+    let result = unsafe {
         (*observer_ptr.as_ptr()).with_cap_table(|table| table.install_transferred_cap(transferred))
+    };
+
+    #[cfg(target_os = "none")]
+    if result.is_ok() && transferred.object_type == crate::capability::ObjectType::Space {
+        wire_space_for_observer(observer_ptr, transferred.object_id);
     }
+
+    result
+}
+
+/// D26 auto-mapping: wire a Space's L3 table into an Observer's page table.
+///
+/// Called after a Space cap is successfully installed into the Observer's
+/// cap table. Uses the global KernelState to look up the Space's VA base
+/// and L3 table PA.
+#[cfg(target_os = "none")]
+fn wire_space_for_observer(observer_ptr: NonNull<Observer>, space_id: crate::arena::ObjectId) {
+    let ks = crate::frame::kernel_state();
+    let (va_base, l3_pa) = {
+        let spaces = ks.spaces.acquire();
+
+        match spaces.get(space_id) {
+            Some(space) => (space.va_base, space.l3_table_pa),
+            None => return,
+        }
+    };
+
+    let (pt_root, _asid) = observer_page_table_info(observer_ptr);
+
+    if pt_root == 0 {
+        return;
+    }
+
+    let _ = crate::frame::mapping::wire_space_mapping(pt_root, va_base, l3_pa, ks);
 }
 
 /// Read a specific cap table entry from an Observer (D96, D43).

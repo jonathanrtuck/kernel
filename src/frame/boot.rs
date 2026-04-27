@@ -501,7 +501,6 @@ fn create_child_observer(
     // Stack page at L3 index 2 → VA = 0x200_0000 + 2 * 16 KiB = 0x200_8000.
     let child_code_va: usize = 0x200_4000;
     let child_stack_top: usize = 0x200_8000 + PAGE_SIZE;
-
     let child_rs_pa = alloc_zeroed_pages(ks, 1)?;
 
     // SAFETY: child_rs_pa is a valid zeroed page. RegisterState fits.
@@ -514,7 +513,6 @@ fn create_child_observer(
 
     let child_asid = crate::frame::cores::allocate_asid(ks);
     let child_page_table_root = mmu::make_ttbr0(child_asid, child_l1_pa as u64);
-
     let mut observers = ks.observers.acquire();
     let (child_id, child_obs) = observers.allocate()?;
 
@@ -682,6 +680,7 @@ fn create_boot_field(
     let queue = crate::frame::fields::allocate_field_queue(IPC_FIELD_QUEUE_CAPACITY)
         .ok_or(AllocError::OutOfMemory)?;
     let mut value = Field::new(queue, IPC_FIELD_QUEUE_CAPACITY, 0, 0);
+
     value.refcount = refcount;
 
     let mut fields = ks.fields.acquire();
@@ -825,7 +824,6 @@ fn create_boot_pulsar(
 ) -> Result<(crate::arena::ObjectId, u64), AllocError> {
     let counter_freq = crate::frame::arch::cntfrq_el0();
     let now_ticks = crate::frame::arch::cntvct_el0();
-
     let mut pulsars = ks.pulsars.acquire();
     let (pulsar_id, pulsar) = pulsars.allocate()?;
 
@@ -889,7 +887,6 @@ fn create_root_space(ks: &KernelState) -> Result<crate::arena::ObjectId, AllocEr
     };
     let page_count = size / page_size;
     let l3_pa = allocate_space_l3(ks, va_base as u64, page_count)?;
-
     let mut spaces = ks.spaces.acquire();
     let (space_id, space) = spaces.allocate()?;
 
@@ -957,13 +954,11 @@ pub fn enter_first_observer(ks: &KernelState) -> ! {
     let root_space_id = create_root_space(ks).expect("create root space");
     let cap_entries =
         setup_root_cap_table(ks, obs_id, root_space_id).expect("setup root cap table");
-
     // ── Phase 2.2: IPC Field for integration tests ────────────────
     //
     // Create a Field for IPC testing. Install a Receive cap in root's
     // table (slot 4) and a Send cap in child's table (slot 3).
     let ipc_field_id = create_boot_field(ks, 2).expect("create IPC field");
-
     // Phase 2.3: handler Field for fault delivery + child Space for VmFault.
     let handler_field_id = create_boot_field(ks, 2).expect("create handler field");
     let child_space_id = create_child_space(ks).expect("create child space");
@@ -1042,7 +1037,6 @@ pub fn enter_first_observer(ks: &KernelState) -> ! {
 
     init_bsp_per_core_data(mmu::phys_to_virt(rs_pa) as *mut RegisterState);
     set_current_observer(obs_ptr);
-
     // Phase 2.4: install Pulsar deadline in BSP core state.
     // Must be after init_bsp_per_core_data (BSP_CORE_STATE initialized).
     install_deadline_at_boot(pulsar_id, timer_field_id, deadline_ticks);
