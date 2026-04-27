@@ -264,11 +264,10 @@ impl<T> SlabStore<T> {
         );
 
         // SAFETY: `pa` is a valid, page-aligned physical address returned
-        // by SpaceManager::allocate_pages. Under identity mapping (kernel
-        // VA = PA for kernel-owned pages), this is a valid writable pointer.
-        // The page is exclusively ours — SpaceManager removed it from the
-        // free pool.
-        let base = pa as *mut u8;
+        // by SpaceManager::allocate_pages. D88: phys_to_virt converts PA
+        // to the TTBR1 linear map VA. The page is exclusively ours —
+        // SpaceManager removed it from the free pool.
+        let base = crate::frame::phys_to_virt(pa) as *mut u8;
 
         // Thread the intrusive freelist: each free slot stores the index
         // of the next free slot. The last slot stores FREELIST_NONE.

@@ -1,7 +1,7 @@
 {
   "blockers": [],
-  "completed_items": 0,
-  "current_phase": 0,
+  "completed_items": 14,
+  "current_phase": 1,
   "items": {
     "0.1": {
       "name": "Send-once cap consumption",
@@ -31,7 +31,7 @@
     "0.14": {
       "name": "Deferred fault delivery linkage",
       "note": "",
-      "status": "in_progress"
+      "status": "done"
     },
     "0.2": {
       "name": "Unified message delivery path",
@@ -75,8 +75,8 @@
     },
     "1.1": {
       "name": "TTBR1 kernel linear map",
-      "note": "Requires D-1.1 decision (slab init)",
-      "status": "pending"
+      "note": "",
+      "status": "in_progress"
     },
     "1.2": {
       "name": "Per-Observer L1 page tables",
@@ -198,11 +198,11 @@
   "phases": {
     "0": {
       "name": "Correctness",
-      "status": "in_progress"
+      "status": "complete"
     },
     "1": {
       "name": "Memory Pipeline",
-      "status": "pending"
+      "status": "in_progress"
     },
     "2": {
       "name": "Integration Proof",

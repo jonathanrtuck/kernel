@@ -583,7 +583,7 @@ pub fn allocate_field_queue(capacity: u32) -> Option<NonNull<Message>> {
         let ks = crate::frame::kernel_state();
         let pa = crate::frame::boot::alloc_zeroed_pages(ks, page_count).ok()?;
 
-        NonNull::new(pa as *mut Message)
+        NonNull::new(crate::frame::phys_to_virt(pa) as *mut Message)
     }
 }
 

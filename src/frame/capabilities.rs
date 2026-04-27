@@ -152,7 +152,7 @@ pub fn allocate_cap_table(capacity: u32) -> Option<NonNull<Entry>> {
         let page_count = total_bytes.div_ceil(crate::frame::arch::mmu::page_size());
         let ks = crate::frame::kernel_state();
         let pa = crate::frame::boot::alloc_zeroed_pages(ks, page_count).ok()?;
-        let entries = NonNull::new(pa as *mut Entry)?;
+        let entries = NonNull::new(crate::frame::phys_to_virt(pa) as *mut Entry)?;
 
         init_freelist(entries, capacity, crate::capability::SLOT_USER_START);
 

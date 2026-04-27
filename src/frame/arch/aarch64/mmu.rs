@@ -63,11 +63,7 @@ const ENTRIES_PER_TABLE: usize = PAGE_SIZE / 8;
 // Asymmetric VA sizes: user T0SZ=17 (47-bit, 128 TiB, 3-level L1→L2→L3),
 // kernel T1SZ=28 (36-bit, 64 GiB, 2-level L2→L3).
 
-/// Kernel virtual address offset (D88).
-///
-/// The TTBR1 linear map: `VA = PA + KERNEL_VIRT_OFFSET`.
-/// With T1SZ=28 the TTBR1 base is `0xFFFF_FFF0_0000_0000`.
-pub const KERNEL_VIRT_OFFSET: usize = 0xFFFF_FFF0_0000_0000;
+pub use crate::frame::KERNEL_VIRT_OFFSET;
 
 /// Maximum user virtual address (exclusive).
 ///
@@ -95,6 +91,7 @@ struct PageTablePage(UnsafeCell<[u64; ENTRIES_PER_TABLE]>);
 // via the hardware page table walk, not through Rust references).
 unsafe impl Sync for PageTablePage {}
 
+static L1_ROOT: PageTablePage = PageTablePage(UnsafeCell::new([0; ENTRIES_PER_TABLE]));
 static L2_ROOT: PageTablePage = PageTablePage(UnsafeCell::new([0; ENTRIES_PER_TABLE]));
 static L3_KERNEL: PageTablePage = PageTablePage(UnsafeCell::new([0; ENTRIES_PER_TABLE]));
 
@@ -215,22 +212,8 @@ fn build_l3(table: &mut [u64; ENTRIES_PER_TABLE], block_base: usize, layout: &Ke
 // TTBR split helpers (D88)
 // ---------------------------------------------------------------------------
 
-/// Convert a physical address to a kernel virtual address.
-///
-/// D88: the TTBR1 linear map is `PA + KERNEL_VIRT_OFFSET`. Single-instruction
-/// operation — no page table walk.
-#[inline(always)]
-pub const fn phys_to_virt(pa: usize) -> usize {
-    pa.wrapping_add(KERNEL_VIRT_OFFSET)
-}
-
-/// Convert a kernel virtual address to a physical address.
-///
-/// Inverse of [`phys_to_virt`]. Only valid for addresses in the TTBR1 range.
-#[inline(always)]
-pub const fn virt_to_phys(va: usize) -> usize {
-    va.wrapping_sub(KERNEL_VIRT_OFFSET)
-}
+pub use crate::frame::phys_to_virt;
+pub use crate::frame::virt_to_phys;
 
 /// Construct a TTBR0 value from an ASID and L1 root physical address.
 ///
@@ -360,8 +343,9 @@ pub fn install_user_l3_in_kernel_l2(l2_index: usize, l3_pa: usize) {
 
 /// Read the current TTBR0_EL1 value.
 ///
-/// Used to set Observer.page_table_root to the current TTBR0 when all
-/// Observers share the kernel's identity map (Phase E, before D88 split).
+/// D88: after the split, TTBR0 points to L1_ROOT (identity map with
+/// 3-level walk). The root Observer uses this L1 table. Phase 1.2
+/// allocates per-Observer L1 tables.
 #[cfg(target_os = "none")]
 pub fn current_ttbr0() -> u64 {
     sysreg::ttbr0_el1()
@@ -417,6 +401,14 @@ pub fn init() {
     build_l2(l2, l3_pa, platform::ram_base(), platform::ram_size());
     build_l3(l3, platform::ram_base(), &layout);
 
+    // D88: build L1 root for TTBR0 (3-level walk with T0SZ=17).
+    // L1[0] → L2_ROOT covers VA 0..64 GiB — the kernel identity map.
+    // SAFETY: Single-threaded init, L1_ROOT is written before MMU enable.
+    let l1 = unsafe { &mut *L1_ROOT.0.get() };
+    let l2_pa = L2_ROOT.0.get() as usize;
+
+    l1[0] = l2_table_desc(l2_pa);
+
     configure_and_enable();
 }
 
@@ -429,10 +421,15 @@ pub fn init_secondary() {
     configure_and_enable();
 }
 
-/// Program MAIR/TCR/TTBR0, invalidate TLBs, and enable the MMU.
+/// Program MAIR/TCR/TTBR0/TTBR1, invalidate TLBs, and enable the MMU.
 ///
 /// Shared by both BSP ([`init`]) and secondary cores ([`init_secondary`]).
 /// Page tables must already exist before this is called.
+///
+/// D88: TTBR0/TTBR1 split. TTBR0 (L1_ROOT, 3-level walk, T0SZ=17)
+/// provides identity-mapped kernel code execution. TTBR1 (L2_ROOT,
+/// 2-level walk, T1SZ=28) provides the kernel linear map at high VAs.
+/// E0PD1 prevents EL0 speculative access to TTBR1 (Meltdown mitigation).
 fn configure_and_enable() {
     // -----------------------------------------------------------------------
     // MAIR_EL1: memory attribute definitions
@@ -442,77 +439,41 @@ fn configure_and_enable() {
     sysreg::set_mair_el1(mair);
 
     // -----------------------------------------------------------------------
-    // TCR_EL1: translation control
+    // TCR_EL1: translation control (D88 split)
     // -----------------------------------------------------------------------
-    // Read the hardware's physical address size from ID_AA64MMFR0_EL1[3:0].
-    // The PARange field encodes the supported PA width (32, 36, 40, 42, 44,
-    // 48, or 52 bits). We use this directly as TCR_EL1.IPS — the encodings
-    // are identical by design.
-    //
-    // SPECULATION MITIGATION PLUG POINT — E0PD (Meltdown)
-    //
-    // When the kernel moves to a TTBR0 (user) / TTBR1 (kernel) split,
-    // set TCR_EL1.E0PD1 (bit 56) to prevent EL0 speculative accesses to
-    // TTBR1-mapped kernel pages. This is the hardware Meltdown mitigation
-    // (FEAT_E0PD, ARMv8.5+). With E0PD, full KPTI is unnecessary.
-    //
-    // On pre-ARMv8.5 hardware without E0PD, a porter must implement KPTI:
-    // separate user/kernel page table configurations with a TTBR swap on
-    // every exception entry/exit (trampoline in exception.S, table
-    // management here). See speculation.rs for the full porting guide.
     let pa_range = sysreg::id_aa64mmfr0_el1() & 0xF;
-    #[allow(clippy::identity_op)]
-    #[rustfmt::skip]
-    let tcr: u64 =
-          (28      <<  0)  // T0SZ = 28: 36-bit VA (64 GiB)
-        | (0b01    <<  8)  // IRGN0: Inner Write-Back Write-Allocate
-        | (0b01    << 10)  // ORGN0: Outer Write-Back Write-Allocate
-        | (0b11    << 12)  // SH0: Inner Shareable
-        | (0b10    << 14)  // TG0: 16 KiB granule
-        | (28      << 16)  // T1SZ = 28
-        // EPD1=1: disable TTBR1 walks. Correct for the current TTBR0-only
-        // identity map where all kernel and user pages live in the lower VA
-        // range. build_tcr_split() uses EPD1=0 because it configures the
-        // future TTBR0 (user) / TTBR1 (kernel) split where both halves
-        // must be walkable.
-        | (1       << 23)
-        | (0b01    << 24)  // IRGN1: Inner Write-Back Write-Allocate
-        | (0b01    << 26)  // ORGN1: Outer Write-Back Write-Allocate
-        | (0b11    << 28)  // SH1: Inner Shareable
-        | (0b01    << 30)  // TG1: 16 KiB granule
-        | (pa_range << 32); // IPS: from hardware (ID_AA64MMFR0_EL1.PARange)
+    let tcr = build_tcr_split(pa_range);
 
     sysreg::set_tcr_el1(tcr);
 
     // -----------------------------------------------------------------------
-    // TTBR0_EL1: point to L2 root table
+    // TTBR0_EL1: L1 root for identity map (3-level walk, T0SZ=17)
+    // -----------------------------------------------------------------------
+    let l1_pa = L1_ROOT.0.get() as u64;
+
+    sysreg::set_ttbr0_el1(l1_pa);
+
+    // -----------------------------------------------------------------------
+    // TTBR1_EL1: L2 root for kernel linear map (2-level walk, T1SZ=28)
     // -----------------------------------------------------------------------
     let l2_pa = L2_ROOT.0.get() as u64;
 
-    sysreg::set_ttbr0_el1(l2_pa);
+    sysreg::set_ttbr1_el1(make_ttbr1(l2_pa));
 
     // -----------------------------------------------------------------------
     // Invalidate TLBs and enable MMU
     // -----------------------------------------------------------------------
 
-    // Ensure system register writes (MAIR, TCR, TTBR) take effect.
     sysreg::isb();
 
-    // Ensure page table stores are visible to hardware walkers before TLBI.
-    // DSB ISHST (store-only) is the ARM ARM D5.10 recommended pre-TLBI barrier.
+    // DSB ISHST (store-only): ARM ARM D5.10 recommended pre-TLBI barrier.
     sysreg::dsb_ishst();
 
-    // Invalidate stale TLB entries (defensive — none should exist before
-    // first enable, but firmware or EL2 may have populated speculative entries).
-    // IS (inner-shareable) is deliberate: PSCI leaves TLB state IMPLEMENTATION
-    // DEFINED, so we broadcast to handle hypervisors with shared TLB structures.
+    // IS broadcast: PSCI leaves TLB state IMPLEMENTATION DEFINED.
     sysreg::tlbi_vmalle1is();
     sysreg::dsb_ish();
     sysreg::isb();
 
-    // Enable MMU, caches, and W^X enforcement via assembly trampoline.
-    // The trampoline is the single transition point from physical to virtual
-    // addressing — see mmu.S for why this must be in assembly.
     let mut sctlr = sysreg::sctlr_el1();
 
     sctlr |= 1 << 0; // M: MMU enable
@@ -523,10 +484,9 @@ fn configure_and_enable() {
     unsafe extern "C" {
         fn __mmu_enable(sctlr: u64);
     }
-    // SAFETY: Page tables are populated (by BSP's init or shared for
-    // secondaries). MAIR/TCR/TTBR0 are configured above. TLBs are
-    // invalidated. The identity map ensures VA == PA, so the trampoline can
-    // return after enabling.
+    // SAFETY: Page tables are populated. MAIR/TCR/TTBR0/TTBR1 configured
+    // above. TLBs invalidated. L1_ROOT[0] → L2_ROOT preserves the identity
+    // map (VA == PA for low addresses), so the trampoline returns safely.
     unsafe { __mmu_enable(sctlr) };
 }
 

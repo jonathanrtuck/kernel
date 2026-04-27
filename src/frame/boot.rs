@@ -4,11 +4,12 @@
 //! table entries needed to enter EL0 for the first time. All unsafe operations
 //! are confined here (framekernel discipline).
 //!
-//! Phase E strategy: user pages are added to the kernel's existing TTBR0
-//! identity map at L2 index 0 (VA 0x0–0x01FF_FFFF). The kernel's RAM
-//! mappings at L2 indices 32+ are EL1-only. __restore_observer skips the
-//! TTBR switch since TTBR0 doesn't change. This avoids the full D88 TTBR
-//! split while proving the complete EL0 ↔ kernel dispatch path.
+//! D88 TTBR split: TTBR1 provides the kernel linear map (VA = PA +
+//! KERNEL_VIRT_OFFSET). All dynamically allocated memory is accessed
+//! through TTBR1 via `phys_to_virt()`. TTBR0 provides identity-mapped
+//! kernel code and user pages (L1_ROOT[0] → L2_ROOT). User pages are
+//! added at L2 index 0 (VA 0x0–0x01FF_FFFF), EL1-only kernel pages at
+//! L2 indices 32+.
 
 #[cfg(target_os = "none")]
 use crate::arena::AllocError;
@@ -112,9 +113,10 @@ pub(super) fn alloc_zeroed_pages(ks: &KernelState, count: usize) -> Result<usize
     drop(sm);
 
     // SAFETY: `pa` is a valid physical address returned by SpaceManager.
-    // Identity mapping: PA = VA. The pages are exclusively ours.
+    // D88: phys_to_virt converts PA to the TTBR1 linear map VA. The
+    // pages are exclusively ours.
     unsafe {
-        core::ptr::write_bytes(pa as *mut u8, 0, count * page_size);
+        core::ptr::write_bytes(mmu::phys_to_virt(pa) as *mut u8, 0, count * page_size);
     }
 
     Ok(pa)
@@ -130,9 +132,9 @@ fn setup_user_pages(ks: &KernelState, code_pa: usize, stack_pa: usize) -> Result
     let l3_pa = alloc_zeroed_pages(ks, 1)?;
 
     // SAFETY: l3_pa points to a zeroed page exclusively owned by us.
-    // Identity mapping: PA = VA. We write L3 page descriptors.
+    // D88: phys_to_virt converts to TTBR1 linear map VA.
     unsafe {
-        let l3 = &mut *(l3_pa as *mut [u64; page_table::ENTRIES_PER_TABLE]);
+        let l3 = &mut *(mmu::phys_to_virt(l3_pa) as *mut [u64; page_table::ENTRIES_PER_TABLE]);
 
         l3[1] = page_table::user_code_descriptor(code_pa as u64);
         l3[2] = page_table::user_data_descriptor(stack_pa as u64);
@@ -153,9 +155,13 @@ fn install_module_binary(code_pa: usize, module_pa: usize, module_size: usize) {
     // SAFETY: module_pa is the physical address from the DTB module-start
     // property — the hypervisor placed the binary there. code_pa points to
     // a zeroed page exclusively owned by us. module_size was validated by
-    // the caller. Identity mapping: PA = VA for both addresses.
+    // the caller. D88: phys_to_virt converts both PAs to TTBR1 VAs.
     unsafe {
-        core::ptr::copy_nonoverlapping(module_pa as *const u8, code_pa as *mut u8, module_size);
+        core::ptr::copy_nonoverlapping(
+            mmu::phys_to_virt(module_pa) as *const u8,
+            mmu::phys_to_virt(code_pa) as *mut u8,
+            module_size,
+        );
     }
 }
 
@@ -163,11 +169,12 @@ fn install_module_binary(code_pa: usize, module_pa: usize, module_size: usize) {
 #[cfg(target_os = "none")]
 fn install_fallback_binary(code_pa: usize) {
     // SAFETY: code_pa points to a zeroed page exclusively owned by us.
-    // FALLBACK_BINARY.len() < PAGE_SIZE. Identity mapping: PA = VA.
+    // FALLBACK_BINARY.len() < PAGE_SIZE. D88: phys_to_virt converts to
+    // TTBR1 VA. FALLBACK_BINARY is in kernel .rodata (identity-mapped).
     unsafe {
         core::ptr::copy_nonoverlapping(
             FALLBACK_BINARY.as_ptr(),
-            code_pa as *mut u8,
+            mmu::phys_to_virt(code_pa) as *mut u8,
             FALLBACK_BINARY.len(),
         );
     }
@@ -182,9 +189,9 @@ fn setup_register_state(ks: &KernelState) -> Result<usize, AllocError> {
     let rs_pa = alloc_zeroed_pages(ks, 1)?;
 
     // SAFETY: rs_pa points to a zeroed page. RegisterState is 816 bytes,
-    // fits in one 16 KiB page. Identity mapping: PA = VA.
+    // fits in one 16 KiB page. D88: phys_to_virt converts to TTBR1 VA.
     unsafe {
-        let rs = &mut *(rs_pa as *mut RegisterState);
+        let rs = &mut *(mmu::phys_to_virt(rs_pa) as *mut RegisterState);
 
         rs.pc = USER_CODE_VA as u64;
         rs.sp = USER_STACK_TOP as u64;
@@ -210,8 +217,9 @@ fn create_root_observer(
 
     obs.object_id = obs_id;
     obs.asid = asid;
-    obs.register_state =
-        RegisterStateHandle::new(NonNull::new(rs_pa as *mut u8).expect("rs_pa must be non-null"));
+    obs.register_state = RegisterStateHandle::new(
+        NonNull::new(mmu::phys_to_virt(rs_pa) as *mut u8).expect("rs_pa must be non-null"),
+    );
     obs.page_table_root = page_table_root;
     obs.cap_table = NonNull::dangling();
     obs.cap_table_capacity = 0;
@@ -350,10 +358,9 @@ fn setup_root_cap_table(
 ) -> Result<NonNull<capability::Entry>, AllocError> {
     let cap_page_pa = alloc_zeroed_pages(ks, 1)?;
     // cap_page_pa is a valid physical address returned by alloc_zeroed_pages,
-    // zeroed, and exclusively ours. Identity mapping: PA = VA. NonNull::new
-    // is safe — it checks for null (which alloc_zeroed_pages never returns).
-    let entries =
-        NonNull::new(cap_page_pa as *mut capability::Entry).expect("cap_page_pa must be non-null");
+    // zeroed, and exclusively ours. D88: phys_to_virt converts to TTBR1 VA.
+    let entries = NonNull::new(mmu::phys_to_virt(cap_page_pa) as *mut capability::Entry)
+        .expect("cap_page_pa must be non-null");
     let first_free = capability::SLOT_USER_START + 1;
 
     crate::frame::capabilities::init_freelist(entries, ROOT_CAP_TABLE_CAPACITY, first_free);
@@ -505,7 +512,7 @@ pub fn enter_first_observer(ks: &KernelState) -> ! {
         ROOT_CAP_TABLE_CAPACITY,
     );
 
-    init_bsp_per_core_data(rs_pa as *mut RegisterState);
+    init_bsp_per_core_data(mmu::phys_to_virt(rs_pa) as *mut RegisterState);
     set_current_observer(obs_ptr);
 
     crate::println!("boot: entering EL0 at {:#x}", USER_CODE_VA);

@@ -17,6 +17,33 @@ pub mod lock;
 pub mod mapping;
 pub mod slab;
 
+// ── D88: kernel linear map helpers ───────────────────────────────
+//
+// phys_to_virt is pure arithmetic — no hardware dependency. Defined
+// here so modules outside the cfg-gated frame::arch can use it.
+
+/// Kernel virtual address offset (D88).
+///
+/// TTBR1 linear map: `VA = PA + KERNEL_VIRT_OFFSET`.
+/// With T1SZ=28 the TTBR1 base is `0xFFFF_FFF0_0000_0000`.
+pub const KERNEL_VIRT_OFFSET: usize = 0xFFFF_FFF0_0000_0000;
+
+/// Convert a physical address to a kernel virtual address (D88).
+///
+/// Single-instruction operation — no page table walk.
+#[inline(always)]
+pub const fn phys_to_virt(pa: usize) -> usize {
+    pa.wrapping_add(KERNEL_VIRT_OFFSET)
+}
+
+/// Convert a kernel virtual address to a physical address (D88).
+///
+/// Inverse of [`phys_to_virt`]. Only valid for addresses in the TTBR1 range.
+#[inline(always)]
+pub const fn virt_to_phys(va: usize) -> usize {
+    va.wrapping_sub(KERNEL_VIRT_OFFSET)
+}
+
 // ── Global KernelState (D75, D82) ────────────────────────────────
 
 use crate::kernel_state::KernelState;

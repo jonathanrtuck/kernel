@@ -923,7 +923,7 @@ pub fn allocate_register_state() -> Option<NonNull<u8>> {
         let ks = crate::frame::kernel_state();
         let pa = crate::frame::boot::alloc_zeroed_pages(ks, page_count).ok()?;
 
-        NonNull::new(pa as *mut u8)
+        NonNull::new(crate::frame::phys_to_virt(pa) as *mut u8)
     }
 }
 
