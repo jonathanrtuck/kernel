@@ -190,10 +190,9 @@ pub fn receive(field: &mut Field, receiver: &mut WaitEntry) -> ReceiveOutcome {
             let _ = field.enqueue(placeholder);
         }
 
-        // D-3.2c/D18: drain any pending badge-closure notifications that
-        // were deferred because the queue was full when the last send cap
-        // with a particular badge was closed.
-        crate::frame::fields::drain_pending_closures(field);
+        if field.badge_tracking {
+            crate::frame::fields::drain_pending_closures(field);
+        }
 
         return ReceiveOutcome::Received(message);
     }

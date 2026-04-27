@@ -107,7 +107,7 @@ pub fn send_ipi(
     request: crate::kernel_state::IpiRequest,
 ) {
     // Push to the target core's mailbox. If full, silently drop.
-    let pushed = kernel_state.ipi_mailboxes.mailboxes[target_core.0 as usize].push(request);
+    let pushed = kernel_state.ipi_mailboxes.push_to(target_core, request);
 
     if pushed {
         // Trigger SGI on the target core to wake it and process the mailbox.
@@ -2581,7 +2581,7 @@ impl<S: Scheduler> CoreState<S> {
 
         // Drain all pending IPI requests from this core's mailbox.
         loop {
-            let request = kernel_state.ipi_mailboxes.mailboxes[self.core_id.0 as usize].pop();
+            let request = kernel_state.ipi_mailboxes.pop_from(self.core_id);
 
             match request {
                 None => break,
@@ -2631,14 +2631,13 @@ impl<S: Scheduler> CoreState<S> {
     /// queue depth, and capacity factor. Used by the Placement trait
     /// to compare cores and decide where to schedule a new Observer.
     pub fn build_core_snapshot(&self) -> crate::time_manager::CoreSnapshot {
+        let next = self.scheduler.pick_next();
+
         crate::time_manager::CoreSnapshot {
             core_id: self.core_id,
-            idle: self.current.is_none() && self.scheduler.pick_next().is_none(),
-            queue_depth: match self.scheduler.pick_next() {
-                Some(_) => 1, // Approximate — RoundRobin exposes queue_depth() but the trait doesn't.
-                None => 0,
-            },
-            capacity_factor: 100, // Uniform capacity until big.LITTLE detection (D56 tuning).
+            idle: self.current.is_none() && next.is_none(),
+            queue_depth: if next.is_some() { 1 } else { 0 },
+            capacity_factor: 100,
         }
     }
 

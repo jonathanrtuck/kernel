@@ -18,6 +18,8 @@ use crate::capability::{self, Badge, ObjectType, Rights, SlotTag};
 #[cfg(target_os = "none")]
 use crate::core_manager::{CoreState, MAX_DEADLINES_PER_CORE};
 #[cfg(target_os = "none")]
+use crate::field::Field;
+#[cfg(target_os = "none")]
 use crate::frame::arch::mmu;
 #[cfg(target_os = "none")]
 use crate::frame::arch::page_table;
@@ -602,34 +604,9 @@ fn create_child_observer(
         l3[2] = page_table::user_data_descriptor(child_stack_pa as u64);
     }
 
-    // Install the child's user L3 in the child's L2 (via L1[0] → L2_ROOT).
-    // The child shares the kernel's L2_ROOT at L1[0]. Install the child's
-    // user L3 at L2 index 1 (VA 0x200_0000–0x3FF_FFFF) to avoid collision
-    // with the root Observer's user pages at L2 index 0.
-    //
-    // Actually, each Observer has its own L1. L1[0] → L2_ROOT which
-    // includes the root Observer's user pages at index 0. We need a
-    // SEPARATE L2 for child's user pages to avoid sharing the root's.
-    //
-    // Simpler: install child's L3 at L2 index 0 of a FRESH L2 under the
-    // child's L1. But child's L1[0] → L2_ROOT for kernel code.
-    //
-    // Solution: give the child a second L1 entry (L1[1]) pointing to a
-    // new L2 that holds the child's user L3. Child user VA starts at
-    // 64 GiB * 1 = too high for 16-bit ASID...
-    //
-    // Actually, L1 index 0 → L2_ROOT already has index 0 used by root.
-    // The child shares L2_ROOT (same physical table), so the root's
-    // user pages (L2 index 0) are visible in the child. This is
-    // incorrect — the child should NOT see the root's user pages.
-    //
-    // For Phase 2 MVP: install the child's user L3 at L2 index 1 in
-    // L2_ROOT. Both observers share L2_ROOT through their L1[0].
-    // The nG (non-global) bit in L3 descriptors + different ASIDs
-    // prevent cross-Observer TLB collisions. The root's pages at L2
-    // index 0 are tagged with root's ASID; child's pages at L2 index 1
-    // are tagged with child's ASID. Hardware only uses TLB entries
-    // matching the current ASID.
+    // Both Observers share L2_ROOT (via L1[0]). Child user L3 goes at
+    // L2 index 1 to avoid collision with root's pages at index 0. The
+    // nG bit + distinct ASIDs prevent cross-Observer TLB aliasing.
     mmu::install_user_l3_in_kernel_l2(1, child_l3_pa);
 
     // Child user VA: L2 index 1 → VA starts at 32 MiB (0x200_0000).
@@ -816,24 +793,11 @@ fn create_boot_field(
 ) -> Result<crate::arena::ObjectId, AllocError> {
     let queue = crate::frame::fields::allocate_field_queue(IPC_FIELD_QUEUE_CAPACITY)
         .ok_or(AllocError::OutOfMemory)?;
-    let mut fields = ks.fields.acquire();
-    let (field_id, field) = fields.allocate()?;
+    let mut value = Field::new(queue, IPC_FIELD_QUEUE_CAPACITY, 0, 0);
+    value.refcount = refcount;
 
-    field.queue = queue;
-    field.queue_capacity = IPC_FIELD_QUEUE_CAPACITY;
-    field.queue_length = 0;
-    field.queue_head = 0;
-    field.waiters_head = None;
-    field.waiters_tail = None;
-    field.routing_table = None;
-    field.pending_head = None;
-    field.pending_kernel_message = None;
-    field.badge_tracking = false;
-    field.back_pointer_head = None;
-    field.backing_va_base = 0;
-    field.backing_size = 0;
-    field.refcount = refcount;
-    field.generation = AtomicU64::new(0);
+    let mut fields = ks.fields.acquire();
+    let (field_id, _) = fields.insert(value)?;
 
     Ok(field_id)
 }
@@ -1026,15 +990,14 @@ fn install_deadline_at_boot(
 /// syscalls (CreateField, CreateObserver, SpaceSplit) consume.
 #[cfg(target_os = "none")]
 fn create_root_space(ks: &KernelState) -> Result<crate::arena::ObjectId, AllocError> {
-    let (va_base, size) = {
+    let (va_base, size, page_size) = {
         let sm = ks.space_manager.acquire();
 
-        (sm.next_va_base, sm.root_pool.free_bytes)
-    };
-    let page_size = {
-        let sm = ks.space_manager.acquire();
-
-        sm.root_pool.page_size
+        (
+            sm.next_va_base,
+            sm.root_pool.free_bytes,
+            sm.root_pool.page_size,
+        )
     };
     let page_count = size / page_size;
     let l3_pa = allocate_space_l3(ks, va_base as u64, page_count)?;
