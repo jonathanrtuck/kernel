@@ -28,6 +28,15 @@ pub const SLOT_SELF: u32 = 2;
 /// First user-available slot index.
 pub const SLOT_USER_START: u32 = 3;
 
+/// Growth slot sentinel (D-3.1a, D40).
+///
+/// Used by the fault handler to target cap table growth via
+/// ObserverInstallCap. Never conflicts with user slots because
+/// u32::MAX is far beyond any realistic table capacity. The kernel
+/// detects this sentinel and extends the faulting Observer's table
+/// instead of performing a normal cap install.
+pub const SLOT_GROWTH: u32 = u32::MAX;
+
 // ── Sentinel values (D49) ───────────────────────────────────────────
 
 /// No cap present in this message register slot (D49).
@@ -1039,6 +1048,23 @@ impl Table {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── D-3.1a: growth slot constant ────────────────────────────────
+
+    /// D-3.1a: SLOT_GROWTH is u32::MAX — never conflicts with user slots.
+    #[test]
+    fn test_d3_1a_growth_slot_is_u32_max() {
+        assert_eq!(SLOT_GROWTH, u32::MAX);
+    }
+
+    /// D-3.1a: SLOT_GROWTH does not overlap with reserved or user slots.
+    #[test]
+    fn test_d3_1a_growth_slot_no_conflict() {
+        assert_ne!(SLOT_GROWTH, SLOT_FAULT_HANDLER);
+        assert_ne!(SLOT_GROWTH, SLOT_REPLY_FIELD);
+        assert_ne!(SLOT_GROWTH, SLOT_SELF);
+        assert!(SLOT_GROWTH > SLOT_USER_START);
+    }
 
     #[test]
     fn shared_rights_bits_are_consistent() {

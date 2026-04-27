@@ -798,6 +798,97 @@ pub fn observer_has_free_slot(observer_ptr: NonNull<Observer>) -> bool {
     unsafe { (*observer_ptr.as_ptr()).cap_table_free_head.is_some() }
 }
 
+// ── Cap table growth protocol helpers (D-3.1a/b/c, D40) ─────────
+
+/// Save a typed operation context on an Observer for replay after cap table
+/// growth (D-3.1b). The Observer's RegisterState already holds the original
+/// arguments; we just record which operation to re-dispatch.
+#[cfg(any(target_os = "none", test))]
+pub fn observer_save_syscall(
+    observer_ptr: NonNull<Observer>,
+    operation: crate::syscall::TypedOperation,
+) {
+    // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy.
+    unsafe {
+        (*observer_ptr.as_ptr()).saved_syscall =
+            crate::observer::SavedSyscallContext::Typed(operation);
+    }
+}
+
+/// Read and clear the saved syscall context from an Observer (D-3.1b).
+///
+/// Returns the saved context and resets the field to None. Called on
+/// resume to determine whether to replay or return to EL0.
+#[cfg(any(target_os = "none", test))]
+pub fn observer_take_saved_syscall(
+    observer_ptr: NonNull<Observer>,
+) -> crate::observer::SavedSyscallContext {
+    // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy.
+    unsafe {
+        let observer = &mut *observer_ptr.as_ptr();
+        let saved = observer.saved_syscall;
+
+        observer.saved_syscall = crate::observer::SavedSyscallContext::None;
+
+        saved
+    }
+}
+
+/// Extend an Observer's cap table by appending new entries from the given
+/// allocation (D-3.1a, D40).
+///
+/// `new_entries` points to a freshly-allocated Entry array of `new_capacity`
+/// total entries (old + new). The old entries have been copied into positions
+/// 0..old_capacity. Positions old_capacity..new_capacity are empty and linked
+/// into a freelist.
+///
+/// Updates the Observer's cap_table pointer, capacity, and free_head.
+///
+/// Returns true on success, false if the new capacity is not larger.
+#[cfg(any(target_os = "none", test))]
+pub fn observer_extend_cap_table(
+    observer_ptr: NonNull<Observer>,
+    new_entries: NonNull<crate::capability::Entry>,
+    new_capacity: u32,
+) -> bool {
+    // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy.
+    // new_entries was allocated and initialized by the caller.
+    unsafe {
+        let observer = &mut *observer_ptr.as_ptr();
+
+        if new_capacity <= observer.cap_table_capacity {
+            return false;
+        }
+
+        let old_capacity = observer.cap_table_capacity;
+
+        observer.cap_table = new_entries;
+        observer.cap_table_capacity = new_capacity;
+
+        // Link new slots into the freelist: new slots point to existing
+        // free_head, and the first new slot becomes the new free_head.
+        // init_freelist sets up old_capacity..new_capacity as a chain
+        // ending with the sentinel. We patch the last new entry to point
+        // to the old free_head instead.
+        crate::frame::capabilities::init_freelist(new_entries, new_capacity, old_capacity);
+
+        // Patch the last new entry's next pointer to the old free_head.
+        let last_new = new_capacity - 1;
+
+        if let Some(e) = crate::frame::capabilities::entry_mut(new_entries, new_capacity, last_new)
+        {
+            e.stored_generation = match observer.cap_table_free_head {
+                Some(head) => head as u64,
+                None => u64::MAX, // FREELIST_END
+            };
+        }
+
+        observer.cap_table_free_head = Some(old_capacity);
+
+        true
+    }
+}
+
 /// Write inline registers to a target Observer (D103).
 ///
 /// Sets PC (ELR_EL1), SP (SP_EL0), x0 (gprs[0]), and PSTATE (SPSR_EL1)

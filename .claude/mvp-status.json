@@ -1,6 +1,6 @@
 {
   "blockers": [],
-  "completed_items": 28,
+  "completed_items": 29,
   "current_phase": 3,
   "items": {
     "0.1": {
@@ -125,8 +125,8 @@
     },
     "3.1": {
       "name": "Cap table growth fault protocol",
-      "note": "Requires D-3.1a/b/c decisions",
-      "status": "pending"
+      "note": "SLOT_GROWTH=u32::MAX; dispatch_table_full_fault saves context + faults; growth install extends table; resume replays; nested failure → destroy (D-3.1c)",
+      "status": "done"
     },
     "3.2": {
       "name": "Badge-closure notifications",

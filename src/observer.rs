@@ -28,6 +28,7 @@
 use crate::arena::ObjectId;
 use crate::capability;
 use crate::field::Field;
+use crate::syscall;
 use core::ptr::NonNull;
 use core::sync::atomic::AtomicU64;
 
@@ -112,6 +113,26 @@ pub enum WaitState {
     None,
     Single(WaitEntry),
     Multi { head: NonNull<WaitEntry> },
+}
+
+// ---------------------------------------------------------------------------
+// Saved syscall context for cap table growth replay (D-3.1b, D40).
+// ---------------------------------------------------------------------------
+
+/// Saved syscall context for transparent retry after cap table growth (D-3.1b).
+///
+/// When an Observer's cap table is full during a syscall that needs a new slot,
+/// the kernel saves the operation context here, delivers a CapTableFull fault
+/// to the handler, and blocks the Observer. After the handler grows the table
+/// and resumes the Observer, the kernel replays the saved operation transparently
+/// -- the Observer never sees the fault.
+#[derive(Clone, Copy)]
+pub enum SavedSyscallContext {
+    /// No pending replay.
+    None,
+    /// A typed operation that was interrupted by cap table full (D-3.1b).
+    /// The Observer's RegisterState still contains the original arguments.
+    Typed(syscall::TypedOperation),
 }
 
 // ---------------------------------------------------------------------------
@@ -215,6 +236,13 @@ pub struct Observer {
 
     /// Wait-state linkage for blocked/pending states (D18/D19).
     pub wait_state: WaitState,
+
+    /// Saved syscall context for cap table growth replay (D-3.1b, D40).
+    ///
+    /// Set when a syscall triggers CapTableFull fault. The Observer's
+    /// RegisterState still contains the original syscall arguments.
+    /// On resume after table growth, the kernel re-dispatches from here.
+    pub saved_syscall: SavedSyscallContext,
 
     /// D32/D98: VA base of the Space consumed at creation.
     /// Used by Destroy to reconstruct the Space cap (reverse type conversion).
@@ -461,6 +489,7 @@ impl Observer {
             throughput: DEFAULT_THROUGHPUT,
             clock_access: false,
             wait_state: WaitState::None,
+            saved_syscall: SavedSyscallContext::None,
             refcount: 1,
             generation: AtomicU64::new(0),
             backing_va_base: 0,
