@@ -1818,7 +1818,17 @@ impl<S: Scheduler> CoreState<S> {
                 };
 
                 match target.merge(&source_snapshot) {
-                    Ok(()) => typed_ok(0),
+                    Ok(()) => {
+                        // D41: free the source Space arena slot (consumed by merge).
+                        spaces.free(source_id);
+                        drop(spaces);
+                        // Close the source cap in the caller's table.
+                        let source_slot = capability::Handle::decode(source_handle).index;
+
+                        crate::frame::cores::observer_close_cap(sender_ptr, source_slot);
+
+                        typed_ok(0)
+                    }
                     Err(crate::space::SpaceError::NotAdjacent) => {
                         typed_error(SyscallError::NotAdjacent)
                     }

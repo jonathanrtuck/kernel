@@ -56,12 +56,12 @@
     "0.6": {
       "name": "ResourceRequest split rollback",
       "note": "",
-      "status": "in_progress"
+      "status": "done"
     },
     "0.7": {
       "name": "SpaceMerge arena slot leak",
       "note": "",
-      "status": "pending"
+      "status": "in_progress"
     },
     "0.8": {
       "name": "Cascade dequeue",
