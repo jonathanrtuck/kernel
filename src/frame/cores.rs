@@ -1329,6 +1329,8 @@ mod tests {
 
         write_ipc_error(obs_ptr, SyscallError::InvalidCap);
 
+        // SAFETY: rs_ptr from alloc_test_register_state() — valid, aligned,
+        // and exclusively ours for the test's lifetime.
         let rs = unsafe {
             &*(rs_ptr.as_ptr() as *const crate::frame::arch::register_state::RegisterState)
         };
@@ -1353,6 +1355,7 @@ mod tests {
 
         write_ipc_error(obs_ptr, SyscallError::QueueFull);
 
+        // SAFETY: rs_ptr from alloc_test_register_state() — valid for reads.
         let rs = unsafe {
             &*(rs_ptr.as_ptr() as *const crate::frame::arch::register_state::RegisterState)
         };
@@ -1361,6 +1364,7 @@ mod tests {
 
         clear_ipc_carry(obs_ptr);
 
+        // SAFETY: rs_ptr from alloc_test_register_state() — valid for reads.
         let rs = unsafe {
             &*(rs_ptr.as_ptr() as *const crate::frame::arch::register_state::RegisterState)
         };
@@ -1380,6 +1384,7 @@ mod tests {
 
         write_typed_result(obs_ptr, 42);
 
+        // SAFETY: rs_ptr from alloc_test_register_state() — valid for reads.
         let rs = unsafe {
             &*(rs_ptr.as_ptr() as *const crate::frame::arch::register_state::RegisterState)
         };
@@ -1396,6 +1401,7 @@ mod tests {
 
         write_typed_result(obs_ptr, error_value);
 
+        // SAFETY: rs_ptr from alloc_test_register_state() — valid for reads.
         let rs = unsafe {
             &*(rs_ptr.as_ptr() as *const crate::frame::arch::register_state::RegisterState)
         };
@@ -1415,6 +1421,7 @@ mod tests {
 
         write_message_to_registers(obs_ptr, &data, 0xABCD, 0x5555, 7, u64::MAX);
 
+        // SAFETY: rs_ptr from alloc_test_register_state() — valid for reads.
         let rs = unsafe {
             &*(rs_ptr.as_ptr() as *const crate::frame::arch::register_state::RegisterState)
         };
@@ -1439,6 +1446,7 @@ mod tests {
         write_message_to_registers(obs_ptr, &sentinel_data, 0, 0, 0, 0);
         write_metadata_to_registers(obs_ptr, 0x1ABE, 0xBAD6E, 3, 5);
 
+        // SAFETY: rs_ptr from alloc_test_register_state() — valid for reads.
         let rs = unsafe {
             &*(rs_ptr.as_ptr() as *const crate::frame::arch::register_state::RegisterState)
         };
@@ -1457,6 +1465,8 @@ mod tests {
     fn test_d76_carry_flag_preserves_other_pstate_bits() {
         let rs_ptr = alloc_test_register_state();
 
+        // SAFETY: rs_ptr from alloc_test_register_state() — valid for writes.
+        // Exclusive access: no other reference exists yet.
         unsafe {
             let rs =
                 &mut *(rs_ptr.as_ptr() as *mut crate::frame::arch::register_state::RegisterState);
@@ -1469,6 +1479,7 @@ mod tests {
 
         write_ipc_error(obs_ptr, SyscallError::NoRight);
 
+        // SAFETY: rs_ptr from alloc_test_register_state() — valid for reads.
         let rs = unsafe {
             &*(rs_ptr.as_ptr() as *const crate::frame::arch::register_state::RegisterState)
         };
@@ -1482,6 +1493,7 @@ mod tests {
 
         clear_ipc_carry(obs_ptr);
 
+        // SAFETY: rs_ptr from alloc_test_register_state() — valid for reads.
         let rs = unsafe {
             &*(rs_ptr.as_ptr() as *const crate::frame::arch::register_state::RegisterState)
         };
@@ -1524,6 +1536,8 @@ mod tests {
 
         // Verify the actual struct layout matches.
         let base = core::ptr::null::<PerCoreData>();
+        // SAFETY: addr_of! on a null pointer is well-defined — no
+        // dereference occurs, only address arithmetic for offset calculation.
         let offset = unsafe { core::ptr::addr_of!((*base).register_state_ptr) as usize };
 
         assert_eq!(offset, 0, "D83: register_state_ptr actual offset must be 0");
@@ -1537,6 +1551,7 @@ mod tests {
         );
 
         let base = core::ptr::null::<PerCoreData>();
+        // SAFETY: addr_of! on a null pointer — no dereference, offset only.
         let offset = unsafe { core::ptr::addr_of!((*base).core_state_ptr) as usize };
 
         assert_eq!(offset, 8, "D83: core_state_ptr actual offset must be 8");
@@ -1555,11 +1570,14 @@ mod tests {
         };
 
         // Write a sentinel via the register_state_ptr.
+        // SAFETY: register_state_ptr points to alloc_test_register_state()
+        // memory — valid, aligned, and exclusively ours.
         unsafe {
             (*per_core.register_state_ptr).gprs[0] = 0xDEAD_BEEF;
         }
 
         // Read it back through the raw pointer.
+        // SAFETY: same valid allocation; written above.
         let read_back = unsafe { (*per_core.register_state_ptr).gprs[0] };
 
         assert_eq!(
@@ -1572,6 +1590,7 @@ mod tests {
 
         per_core.core_state_ptr = &sentinel as *const u64 as *mut u8;
 
+        // SAFETY: core_state_ptr was set to &sentinel which is valid for reads.
         let recovered = unsafe { *(per_core.core_state_ptr as *const u64) };
 
         assert_eq!(
@@ -1594,6 +1613,8 @@ mod tests {
         };
         let base = &per_core as *const PerCoreData as *const u8;
         // Read register_state_ptr at offset 0 as a raw u64.
+        // SAFETY: base points to a live PerCoreData; offset 0 is within
+        // bounds and aligned for u64 (repr(C), 8-byte aligned struct).
         let rs_from_offset = unsafe { *(base.add(0) as *const u64) };
 
         assert_eq!(
@@ -1603,6 +1624,7 @@ mod tests {
         );
 
         // Read core_state_ptr at offset 8 as a raw u64.
+        // SAFETY: offset 8 is within PerCoreData bounds (24 bytes, repr(C)).
         let cs_from_offset = unsafe { *(base.add(8) as *const u64) };
 
         assert_eq!(
@@ -1611,6 +1633,7 @@ mod tests {
         );
 
         // Read kernel_stack_top at offset 16 as a raw u64.
+        // SAFETY: offset 16 is within PerCoreData bounds (24 bytes, repr(C)).
         let kst_from_offset = unsafe { *(base.add(16) as *const u64) };
 
         assert_eq!(
@@ -1653,6 +1676,7 @@ mod tests {
 
         // Raw byte access at offset 16 (what assembly does).
         let base = &per_core as *const PerCoreData as *const u8;
+        // SAFETY: offset 16 is within PerCoreData bounds (24 bytes, repr(C)).
         let raw = unsafe { *(base.add(16) as *const u64) };
 
         assert_eq!(

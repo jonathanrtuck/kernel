@@ -147,6 +147,11 @@ pub fn send_sgi(sgi_number: u32, target_core_id: usize) {
     let intid_field: u64 = (sgi_number as u64 & 0xF) << 24;
     let val = intid_field | target_list;
 
+    // DSB ISH ensures all preceding stores (especially IPI mailbox writes)
+    // are visible to other cores before the SGI is generated. Without this,
+    // the target core could service the SGI before seeing the mailbox data.
+    sysreg::dsb_ish();
+
     // SAFETY: MSR to ICC_SGI1R_EL1 triggers an SGI to the specified target
     // core. This is a GICv3 system register write that generates an interrupt
     // on the target — it affects the memory system (the GIC state machine

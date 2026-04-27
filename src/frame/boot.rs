@@ -282,6 +282,8 @@ static mut BSP_CORE_STATE: CoreState<RoundRobin> = CoreState {
 
 // Linker symbol for the BSP boot stack top (link.ld).
 #[cfg(target_os = "none")]
+// SAFETY: __stack_top is defined in link.ld. We only take its address
+// (never dereference it) to compute the stack base for the BSP.
 unsafe extern "C" {
     static __stack_top: u8;
 }

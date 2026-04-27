@@ -134,7 +134,7 @@ pub fn write_entry(entries: NonNull<Entry>, capacity: u32, index: u32, new_entry
 /// pages from the SpaceManager root pool (identity-mapped PA = VA).
 #[cfg(any(target_os = "none", test))]
 pub fn allocate_cap_table(capacity: u32) -> Option<NonNull<Entry>> {
-    if capacity == 0 {
+    if capacity == 0 || capacity > crate::capability::MAX_HANDLE_INDEX + 1 {
         return None;
     }
 

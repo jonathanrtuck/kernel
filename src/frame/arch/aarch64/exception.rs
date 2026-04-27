@@ -21,6 +21,10 @@ use super::sysreg;
 // entering the idle loop waiting for interrupts.
 
 #[cfg(target_os = "none")]
+// SAFETY: These functions are defined in exception.S with C calling
+// convention. Caller obligations are documented in the # Safety
+// sections below. Misuse causes EL1 faults (bad register state) or
+// hangs (idle without interrupt capability).
 unsafe extern "C" {
     /// Restore an Observer's full register context and eret to EL0.
     ///
@@ -110,6 +114,8 @@ const _: () = {
 
 /// Install the exception vector table by writing VBAR_EL1.
 pub fn init() {
+    // SAFETY: __vectors is defined in exception.S, 2KB-aligned by `.align 11`.
+    // We only take its address for VBAR_EL1; never dereference it.
     unsafe extern "C" {
         static __vectors: u8;
     }

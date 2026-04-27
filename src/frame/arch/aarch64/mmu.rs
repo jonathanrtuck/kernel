@@ -126,6 +126,9 @@ fn l3_index(va: usize) -> usize {
 // Linker symbols (defined in link.ld)
 // ---------------------------------------------------------------------------
 
+// SAFETY: Linker-provided section boundary symbols from link.ld. We only
+// take their addresses (via linker_addr) for page table permission mapping;
+// never dereference them.
 unsafe extern "C" {
     static __text_start: u8;
     static __text_end: u8;
@@ -489,6 +492,8 @@ fn configure_and_enable() {
     sctlr |= 1 << 12; // I: instruction cache enable
     sctlr |= 1 << 19; // WXN: write-implies-XN (hardware W^X)
 
+    // SAFETY: __mmu_enable is defined in mmu.S. It writes SCTLR_EL1 and
+    // returns via the identity-mapped trampoline. C calling convention.
     unsafe extern "C" {
         fn __mmu_enable(sctlr: u64);
     }

@@ -152,6 +152,9 @@ pub fn stack_top_for_core(core_id: usize, stacks_base: usize) -> usize {
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "none")]
+// SAFETY: __secondary_entry is defined in secondary_entry.S with C calling
+// convention. Only passed as the entry point to PSCI CPU_ON, never called
+// directly from Rust.
 unsafe extern "C" {
     fn __secondary_entry();
 }
