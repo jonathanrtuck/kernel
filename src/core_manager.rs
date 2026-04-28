@@ -1962,14 +1962,17 @@ impl<S: Scheduler> CoreState<S> {
 
                                 if refcount_now == 0 {
                                     // D107/D33: Observer auto-destroy — cascade.
-                                    // Revoke generation so stale caps fail.
-                                    {
+                                    // Read backing info, then revoke generation.
+                                    let (backing_va, backing_sz) = {
                                         let observers = kernel_state.observers.acquire();
 
                                         if let Some(obs) = observers.get(closed_id) {
                                             obs.revoke();
+                                            (obs.backing_va_base, obs.backing_size)
+                                        } else {
+                                            (0, 0)
                                         }
-                                    }
+                                    };
 
                                     let obs_ptr = crate::frame::cores::observer_ptr_from_arena(
                                         kernel_state,
@@ -1981,14 +1984,11 @@ impl<S: Scheduler> CoreState<S> {
                                             crate::capability::CascadeContinuation::new();
 
                                         cascade.push(closed_id);
-
-                                        // D107: closer blocked during cascade but
-                                        // backing returns to root (backing_size=0
-                                        // signals no return cap).
                                         cascade.destroyer_ptr = Some(sender_ptr);
-                                        cascade.backing_va = 0;
-                                        cascade.backing_size = 0;
+                                        cascade.backing_va = backing_va;
+                                        cascade.backing_size = backing_sz;
                                         cascade.target_id = closed_id;
+                                        cascade.auto_destroy = true;
 
                                         let done = cascade_batch_with_badge_tracking(
                                             ptr,
@@ -2005,6 +2005,15 @@ impl<S: Scheduler> CoreState<S> {
                                             let mut observers = kernel_state.observers.acquire();
 
                                             observers.free(closed_id);
+
+                                            // D107: return backing to root pool.
+                                            if backing_sz > 0 {
+                                                let mut sm = kernel_state.space_manager.acquire();
+                                                let page_size = sm.root_pool.page_size;
+                                                let page_count = backing_sz / page_size;
+
+                                                sm.return_pages(backing_va, page_count);
+                                            }
                                         } else {
                                             let _ = crate::frame::cores::observer_set_blocked(
                                                 sender_ptr,
@@ -3082,14 +3091,27 @@ impl<S: Scheduler> CoreState<S> {
                 }
 
                 if let Some(dptr) = destroyer_ptr {
-                    let return_handle = return_backing_space(
-                        kernel_state,
-                        dptr,
-                        cascade.backing_va,
-                        cascade.backing_size,
-                    );
+                    if cascade.auto_destroy {
+                        // D107: backing returns to root pool, not closer.
+                        if cascade.backing_size > 0 {
+                            let mut sm = kernel_state.space_manager.acquire();
+                            let page_size = sm.root_pool.page_size;
+                            let page_count = cascade.backing_size / page_size;
 
-                    crate::frame::cores::write_typed_result(dptr, return_handle);
+                            sm.return_pages(cascade.backing_va, page_count);
+                        }
+
+                        crate::frame::cores::write_typed_result(dptr, 0);
+                    } else {
+                        let return_handle = return_backing_space(
+                            kernel_state,
+                            dptr,
+                            cascade.backing_va,
+                            cascade.backing_size,
+                        );
+
+                        crate::frame::cores::write_typed_result(dptr, return_handle);
+                    }
 
                     let _ = crate::frame::cores::observer_unblock(dptr);
 
