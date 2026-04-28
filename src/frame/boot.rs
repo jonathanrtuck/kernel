@@ -1034,6 +1034,13 @@ pub fn enter_first_observer(ks: &KernelState) -> ! {
         obs.clock_access = true;
     }
 
+    // PMU cycle counter: enable_pmu_el0() would give EL0 access to
+    // PMCCNTR_EL0 (~0.33ns resolution vs CNTVCT's ~42ns). Currently
+    // blocked: HVF doesn't support MDCR_EL2.TPM trapping, so guest
+    // PMU access faults. Uncomment when HVF adds TPM support or when
+    // running on bare metal.
+    // crate::frame::arch::enable_pmu_el0();
+
     crate::println!(
         "boot: cap_table capacity={} installed=6 (self+space+ipc+handler+timer+child)",
         root_cap_capacity,

@@ -323,6 +323,14 @@ sysreg_write!(set_icc_igrpen1_el1, "icc_igrpen1_el1");
 sysreg_write!(set_icc_eoir1_el1, "icc_eoir1_el1");
 
 // ---------------------------------------------------------------------------
+// Performance Monitors (PMU)
+// ---------------------------------------------------------------------------
+
+sysreg_write!(set_pmcr_el0, "pmcr_el0");
+sysreg_write!(set_pmcntenset_el0, "pmcntenset_el0");
+sysreg_write!(set_pmuserenr_el0, "pmuserenr_el0");
+
+// ---------------------------------------------------------------------------
 // Per-CPU data
 // ---------------------------------------------------------------------------
 

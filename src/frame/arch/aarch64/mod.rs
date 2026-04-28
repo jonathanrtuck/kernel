@@ -92,6 +92,25 @@ pub fn cntvct_el0() -> u64 {
     sysreg::cntvct_el0()
 }
 
+/// Enable the PMU cycle counter for EL0 access.
+///
+/// Configures the Performance Monitors:
+/// - PMCR_EL0.E = 1 (enable counting)
+/// - PMCNTENSET_EL0 bit 31 (enable cycle counter)
+/// - PMUSERENR_EL0.EN = 1 (allow EL0 access)
+///
+/// On the hypervisor, each of these traps to EL2 where the PMU is
+/// emulated. PMCCNTR_EL0 reads return clock_gettime_nsec * 3 (~3 GHz
+/// virtual cycles). On bare metal, this enables the real CPU cycle counter.
+pub fn enable_pmu_el0() {
+    // SAFETY: MSR to PMU control registers. All three writes configure
+    // the PMU to enable the cycle counter and allow EL0 read access.
+    // On the hypervisor these trap to EL2 for emulation.
+    sysreg::set_pmcr_el0(1);
+    sysreg::set_pmcntenset_el0(1 << 31);
+    sysreg::set_pmuserenr_el0(1);
+}
+
 /// Read the per-core data pointer (TPIDR_EL1).
 ///
 /// D83: each core stores a pointer to its `PerCoreData` in this register
