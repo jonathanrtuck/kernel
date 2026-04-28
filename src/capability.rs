@@ -1445,21 +1445,30 @@ mod tests {
         assert_eq!(result.unwrap_err(), CapError::TableFull);
     }
 
-    // ── D17: Badge closure (deferred) ────────────────────────────
+    // ── D17: Badge closure ─────────────────────────────────────────
 
-    /// D17: closing the last send cap with a given badge on a tracked Field
-    /// should produce ClosedWithBadgeClosure. Deferred — the badge tracking
-    /// map data structure does not exist yet.
+    /// D17: Table::close always returns Closed, never ClosedWithBadgeClosure.
+    /// Badge tracking lives in the dispatch layer (core_manager) because
+    /// Table has no access to the Field arena.
     #[test]
-    #[ignore]
-    fn test_d17_close_tracked_field_last_badge() {
-        // Badge tracking map is not yet implemented.
-        // When it exists, this test should:
-        // 1. Create a Field with badge_tracking = true
-        // 2. Install a send cap with a specific badge
-        // 3. Close that cap (the last with that badge)
-        // 4. Assert CloseResult::ClosedWithBadgeClosure
-        unimplemented!("badge tracking map deferred — see design/spec.md D17");
+    fn test_d17_table_close_returns_closed_for_field() {
+        let mut table = test_table(8);
+        let entry = field_entry(0xCAFE, 0);
+
+        table.install_at(0, entry);
+
+        let result = table.close(0);
+
+        assert!(
+            matches!(
+                result,
+                CloseResult::Closed {
+                    object_type: ObjectType::Field,
+                    ..
+                }
+            ),
+            "D17: Table::close returns Closed (badge tracking in dispatch layer)"
+        );
     }
 
     // ── D33: Preemptible cascade ─────────────────────────────────

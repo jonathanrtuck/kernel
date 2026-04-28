@@ -203,6 +203,7 @@ impl TraceEntry {
     }
 }
 
+#[cfg(any(target_os = "none", test))]
 macro_rules! trace_point {
     ($self:expr, $stage:expr) => {
         if $self.trace_active {
@@ -1243,7 +1244,18 @@ impl<S: Scheduler> CoreState<S> {
                     target_ptr,
                     &transferred,
                 ) {
-                    Ok(encoded_handle) => typed_ok(encoded_handle),
+                    Ok(encoded_handle) => {
+                        // D17: badge increment on tracked Fields.
+                        if source_type == ObjectType::Field {
+                            let mut fields = kernel_state.fields.acquire();
+
+                            if let Some(field) = fields.get_mut(source_id) {
+                                field.badge_increment(source_entry.badge);
+                            }
+                        }
+
+                        typed_ok(encoded_handle)
+                    }
                     Err(_) => typed_error(SyscallError::TableFull),
                 }
             }
@@ -1617,46 +1629,69 @@ impl<S: Scheduler> CoreState<S> {
                     sender_ptr,
                     &transferred,
                 ) {
-                    Ok(encoded_handle) => typed_ok(encoded_handle),
+                    Ok(encoded_handle) => {
+                        // D17: badge increment on tracked Fields.
+                        if object_type == ObjectType::Field {
+                            let mut fields = kernel_state.fields.acquire();
+
+                            if let Some(field) = fields.get_mut(object_id) {
+                                field.badge_increment(entry.badge);
+                            }
+                        }
+
+                        typed_ok(encoded_handle)
+                    }
                     Err(_) => typed_error(SyscallError::TableFull),
                 }
             }
             TypedOperation::Close => {
                 // D97: free slot in caller's cap table.
                 let handle = capability::Handle::decode(regs.target_handle);
+                // D17: save badge before close frees the entry.
+                let entry_badge = entry.badge;
                 let close_result =
                     crate::frame::cores::observer_close_cap(sender_ptr, handle.index);
 
                 match close_result {
                     capability::CloseResult::Closed {
-                        object_type: _closed_type,
-                        object_id: _closed_id,
+                        object_type: closed_type,
+                        object_id: closed_id,
                         ..
                     } => {
                         // D26 (bare-metal): when closing a Space cap, check
                         // whether the Observer still holds another cap to the
                         // same Space. If not, unwire the page table mapping.
                         #[cfg(target_os = "none")]
-                        if _closed_type == ObjectType::Space {
+                        if closed_type == ObjectType::Space {
                             let still_has = crate::frame::cores::observer_has_cap_to_object(
                                 sender_ptr,
                                 ObjectType::Space,
-                                _closed_id,
+                                closed_id,
                                 u32::MAX,
                             );
 
                             if !still_has {
-                                unwire_space_for_observer(sender_ptr, _closed_id, kernel_state);
+                                unwire_space_for_observer(sender_ptr, closed_id, kernel_state);
+                            }
+                        }
+
+                        // D17: badge decrement on tracked Fields.
+                        if closed_type == ObjectType::Field {
+                            let mut fields = kernel_state.fields.acquire();
+
+                            if let Some(field) = fields.get_mut(closed_id)
+                                && field.badge_decrement(entry_badge)
+                            {
+                                field.enqueue_badge_closure(entry_badge);
                             }
                         }
 
                         typed_ok(0)
                     }
                     capability::CloseResult::ClosedWithBadgeClosure { .. } => {
-                        // D17: badge-closure tracking map not yet built.
-                        // The close succeeded; badge-closure delivery is
-                        // deferred.
-                        typed_ok(0)
+                        // Table::close never returns this variant — badge
+                        // tracking is handled in the Closed arm above.
+                        unreachable!("Table::close does not return ClosedWithBadgeClosure")
                     }
                     capability::CloseResult::AlreadyEmpty => typed_error(SyscallError::InvalidCap),
                 }
@@ -1685,7 +1720,18 @@ impl<S: Scheduler> CoreState<S> {
                     sender_ptr,
                     &transferred,
                 ) {
-                    Ok(encoded_handle) => typed_ok(encoded_handle),
+                    Ok(encoded_handle) => {
+                        // D17: badge increment on tracked Fields.
+                        if object_type == ObjectType::Field {
+                            let mut fields = kernel_state.fields.acquire();
+
+                            if let Some(field) = fields.get_mut(object_id) {
+                                field.badge_increment(badge);
+                            }
+                        }
+
+                        typed_ok(encoded_handle)
+                    }
                     Err(_) => typed_error(SyscallError::TableFull),
                 }
             }
@@ -1878,6 +1924,8 @@ impl<S: Scheduler> CoreState<S> {
                         None => return typed_error(SyscallError::InsufficientResource),
                     };
 
+                let badge_tracking_requested = (regs.args[0] & 1) != 0;
+
                 let field_id = {
                     let mut fields = kernel_state.fields.acquire();
                     let (id, new_field) = match fields.allocate() {
@@ -1891,6 +1939,11 @@ impl<S: Scheduler> CoreState<S> {
                         backing_va,
                         space_size,
                     );
+
+                    // D17: opt-in badge tracking.
+                    if badge_tracking_requested {
+                        new_field.enable_badge_tracking();
+                    }
 
                     id
                 };
@@ -6375,6 +6428,22 @@ mod tests {
         id
     }
 
+    fn make_tracked_field_in_arena(ks: &KernelState, capacity: u32) -> ObjectId {
+        let mut fields = ks.fields.acquire();
+        let (id, field) = fields.allocate().expect("allocate field");
+
+        *field = crate::field::Field::new(
+            crate::frame::fields::alloc_test_queue(capacity),
+            capacity,
+            0,
+            0,
+        );
+
+        field.enable_badge_tracking();
+
+        id
+    }
+
     fn make_space_in_arena(ks: &KernelState, va_base: usize, size: usize) -> ObjectId {
         let mut spaces = ks.spaces.acquire();
         let (id, space) = spaces.allocate().expect("allocate space");
@@ -8626,6 +8695,416 @@ mod tests {
             x0,
             crate::syscall::SyscallError::NoRight.error_code() as i64,
             "D97: Mint without MINT right must return NoRight"
+        );
+    }
+
+    // ── D17: Badge tracking wiring ────────────────────────────────────
+
+    /// D17 Close: closing a cap on a tracked Field decrements the badge
+    /// refcount. When it's the last cap with that badge, a closure message
+    /// is enqueued.
+    #[test]
+    fn test_d17_close_decrements_badge_and_enqueues_closure() {
+        let ks = make_kernel_state();
+        let field_id = make_tracked_field_in_arena(&ks, 8);
+
+        // Pre-populate badge map: one cap with badge 0xCAFE.
+        {
+            let mut fields = ks.fields.acquire();
+            let field = fields.get_mut(field_id).unwrap();
+
+            field.badge_increment(Badge(0xCAFE));
+        }
+
+        let (mut sender, _entries) = make_sender_with_cap(
+            ObjectType::Field,
+            field_id,
+            Rights::FIELD_ALL,
+            Badge(0xCAFE),
+            0,
+        );
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        setup_typed_regs(sender_ptr, TypedOperation::Close as u16, handle, [0; 4]);
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::Close, &ks);
+
+        let x0 = read_typed_result(sender_ptr);
+
+        assert_eq!(x0, 0, "D17: Close must succeed");
+
+        // The badge was the last reference — closure message must be in the queue.
+        let mut fields = ks.fields.acquire();
+        let field = fields.get_mut(field_id).unwrap();
+
+        assert!(
+            !field.is_empty(),
+            "D17: badge-closure message must be enqueued"
+        );
+
+        let msg = field.dequeue().unwrap();
+
+        assert_eq!(
+            msg.label,
+            crate::field::LABEL_CLOSURE,
+            "D17: message must be a closure notification"
+        );
+        assert_eq!(
+            msg.badge,
+            Badge(0xCAFE),
+            "D17: closure badge must match closed cap"
+        );
+    }
+
+    /// D17 Close: closing one of two caps with the same badge does NOT
+    /// trigger a closure notification (refcount goes from 2→1, not to 0).
+    #[test]
+    fn test_d17_close_no_closure_when_not_last_badge() {
+        let ks = make_kernel_state();
+        let field_id = make_tracked_field_in_arena(&ks, 8);
+
+        // Pre-populate badge map: two caps with badge 0xBEEF.
+        {
+            let mut fields = ks.fields.acquire();
+            let field = fields.get_mut(field_id).unwrap();
+
+            field.badge_increment(Badge(0xBEEF));
+            field.badge_increment(Badge(0xBEEF));
+        }
+
+        let (mut sender, _entries) = make_sender_with_cap(
+            ObjectType::Field,
+            field_id,
+            Rights::FIELD_ALL,
+            Badge(0xBEEF),
+            0,
+        );
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        setup_typed_regs(sender_ptr, TypedOperation::Close as u16, handle, [0; 4]);
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::Close, &ks);
+
+        let x0 = read_typed_result(sender_ptr);
+
+        assert_eq!(x0, 0, "D17: Close must succeed");
+
+        let fields = ks.fields.acquire();
+        let field = fields.get(field_id).unwrap();
+
+        assert!(
+            field.is_empty(),
+            "D17: no closure message when refcount > 0"
+        );
+    }
+
+    /// D17 Close: closing a cap on a non-tracked Field does no badge work
+    /// (no crash, no notification).
+    #[test]
+    fn test_d17_close_non_tracked_field_no_badge_work() {
+        let ks = make_kernel_state();
+        let field_id = make_field_in_arena(&ks, 8);
+        let (mut sender, _entries) =
+            make_sender_with_cap(ObjectType::Field, field_id, Rights::FIELD_ALL, Badge(42), 0);
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        setup_typed_regs(sender_ptr, TypedOperation::Close as u16, handle, [0; 4]);
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::Close, &ks);
+
+        let x0 = read_typed_result(sender_ptr);
+
+        assert_eq!(x0, 0, "D17: Close on non-tracked Field must succeed");
+
+        let fields = ks.fields.acquire();
+        let field = fields.get(field_id).unwrap();
+
+        assert!(
+            field.is_empty(),
+            "D17: non-tracked Field must have no closure messages"
+        );
+    }
+
+    /// D17 Mint: minting a cap on a tracked Field increments the badge
+    /// refcount. Verified by closing the original → no closure (two refs),
+    /// then closing the minted → closure (last ref).
+    #[test]
+    fn test_d17_mint_increments_badge_on_tracked_field() {
+        let ks = make_kernel_state();
+        let field_id = make_tracked_field_in_arena(&ks, 8);
+
+        // Pre-populate badge map: one cap with badge 0xAA (the source).
+        {
+            let mut fields = ks.fields.acquire();
+            let field = fields.get_mut(field_id).unwrap();
+
+            field.badge_increment(Badge(0xAA));
+        }
+
+        let (mut sender, entries) = make_sender_with_cap(
+            ObjectType::Field,
+            field_id,
+            Rights::FIELD_ALL,
+            Badge(0xAA),
+            0,
+        );
+        let sender_ptr = NonNull::from(&mut sender);
+        let source_handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        // Mint a new cap with badge 0xBB.
+        setup_typed_regs(
+            sender_ptr,
+            TypedOperation::Mint as u16,
+            source_handle,
+            [Rights::SEND.bits() as u64, 0xBB, 0, 0],
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::Mint, &ks);
+
+        let x0 = read_typed_result(sender_ptr);
+
+        assert!((x0 as i64) >= 0, "D17: Mint must succeed");
+
+        // Now close the minted cap — should trigger badge closure for 0xBB.
+        let minted_handle = x0;
+
+        setup_typed_regs(
+            sender_ptr,
+            TypedOperation::Close as u16,
+            minted_handle,
+            [0; 4],
+        );
+        core.dispatch_typed(TypedOperation::Close, &ks);
+
+        let x0_close = read_typed_result(sender_ptr);
+
+        assert_eq!(x0_close, 0, "D17: Close of minted cap must succeed");
+
+        let mut fields = ks.fields.acquire();
+        let field = fields.get_mut(field_id).unwrap();
+
+        assert!(
+            !field.is_empty(),
+            "D17: closing last cap with badge 0xBB must enqueue closure"
+        );
+
+        let msg = field.dequeue().unwrap();
+
+        assert_eq!(msg.badge, Badge(0xBB));
+        assert_eq!(msg.label, crate::field::LABEL_CLOSURE);
+    }
+
+    /// D17 Mint: minting on a non-tracked Field does no badge work.
+    #[test]
+    fn test_d17_mint_no_badge_work_on_non_tracked_field() {
+        let ks = make_kernel_state();
+        let field_id = make_field_in_arena(&ks, 8);
+        let (mut sender, _entries) =
+            make_sender_with_cap(ObjectType::Field, field_id, Rights::FIELD_ALL, Badge(0), 0);
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        setup_typed_regs(
+            sender_ptr,
+            TypedOperation::Mint as u16,
+            handle,
+            [Rights::SEND.bits() as u64, 0xDEAD, 0, 0],
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::Mint, &ks);
+
+        let x0 = read_typed_result(sender_ptr);
+
+        assert!((x0 as i64) >= 0, "D17: Mint on non-tracked must succeed");
+
+        // Close the minted cap — no closure message expected.
+        setup_typed_regs(sender_ptr, TypedOperation::Close as u16, x0, [0; 4]);
+        core.dispatch_typed(TypedOperation::Close, &ks);
+
+        let fields = ks.fields.acquire();
+        let field = fields.get(field_id).unwrap();
+
+        assert!(
+            field.is_empty(),
+            "D17: non-tracked Field must have no closure messages"
+        );
+    }
+
+    /// D17 Clone: cloning a cap on a tracked Field increments the badge
+    /// refcount. Closing one clone does not trigger closure; closing both does.
+    #[test]
+    fn test_d17_clone_increments_badge_on_tracked_field() {
+        let ks = make_kernel_state();
+        let field_id = make_tracked_field_in_arena(&ks, 8);
+
+        // Pre-populate badge map: one cap with badge 0x11 (the source).
+        {
+            let mut fields = ks.fields.acquire();
+            let field = fields.get_mut(field_id).unwrap();
+
+            field.badge_increment(Badge(0x11));
+        }
+
+        let (mut sender, _entries) = make_sender_with_cap(
+            ObjectType::Field,
+            field_id,
+            Rights::FIELD_ALL,
+            Badge(0x11),
+            0,
+        );
+        let sender_ptr = NonNull::from(&mut sender);
+        let source_handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        // Clone the cap (same badge).
+        setup_typed_regs(
+            sender_ptr,
+            TypedOperation::Clone as u16,
+            source_handle,
+            [0; 4],
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::Clone, &ks);
+
+        let x0 = read_typed_result(sender_ptr);
+
+        assert!((x0 as i64) >= 0, "D17: Clone must succeed");
+
+        // Close the clone — refcount goes 2→1, no closure.
+        setup_typed_regs(sender_ptr, TypedOperation::Close as u16, x0, [0; 4]);
+        core.dispatch_typed(TypedOperation::Close, &ks);
+
+        {
+            let fields = ks.fields.acquire();
+            let field = fields.get(field_id).unwrap();
+
+            assert!(
+                field.is_empty(),
+                "D17: closing clone with remaining original must not trigger closure"
+            );
+        }
+
+        // Close the original — refcount goes 1→0, closure enqueued.
+        setup_typed_regs(
+            sender_ptr,
+            TypedOperation::Close as u16,
+            source_handle,
+            [0; 4],
+        );
+        core.dispatch_typed(TypedOperation::Close, &ks);
+
+        let mut fields = ks.fields.acquire();
+        let field = fields.get_mut(field_id).unwrap();
+
+        assert!(
+            !field.is_empty(),
+            "D17: closing last cap must enqueue closure"
+        );
+
+        let msg = field.dequeue().unwrap();
+
+        assert_eq!(msg.badge, Badge(0x11));
+        assert_eq!(msg.label, crate::field::LABEL_CLOSURE);
+    }
+
+    /// D17 CreateField: args[0] bit 0 opts into badge tracking.
+    #[test]
+    fn test_d17_create_field_with_badge_tracking() {
+        let ks = make_kernel_state();
+        let space_id = make_space_in_arena(&ks, 0x10000, 0x1000);
+        let (mut sender, _entries) =
+            make_sender_with_cap(ObjectType::Space, space_id, Rights::SPACE_ALL, Badge(0), 0);
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        // args[0] bit 0 = badge tracking enabled
+        setup_typed_regs(
+            sender_ptr,
+            TypedOperation::CreateField as u16,
+            handle,
+            [1, 0, 0, 0],
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::CreateField, &ks);
+
+        let x0 = read_typed_result(sender_ptr);
+
+        assert_eq!(x0, 0, "D17: CreateField with badge tracking must succeed");
+
+        // The cap entry at slot 0 was overwritten with the new Field.
+        let entry = crate::frame::capabilities::entry_ref(sender.cap_table, 16, 0).unwrap();
+        let (obj_type, field_id) = entry.object.unwrap();
+
+        assert_eq!(obj_type, ObjectType::Field);
+
+        let fields = ks.fields.acquire();
+        let field = fields.get(field_id).unwrap();
+
+        assert!(
+            field.badge_tracking,
+            "D17: Field must have badge_tracking=true"
+        );
+        assert!(
+            field.badge_map.is_some(),
+            "D17: badge_map must be allocated"
         );
     }
 
