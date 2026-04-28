@@ -75,12 +75,39 @@ Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
+| PROP-01 | Phase 1 | Pending |
+| PROP-02 | Phase 1 | Pending |
+| PROP-03 | Phase 1 | Pending |
+| PROP-04 | Phase 1 | Pending |
+| PROP-05 | Phase 1 | Pending |
+| PROP-06 | Phase 1 | Pending |
+| SAFE-01 | Phase 2 | Pending |
+| SAFE-02 | Phase 2 | Pending |
+| SAFE-03 | Phase 2 | Pending |
+| SAFE-04 | Phase 2 | Pending |
+| SAFE-05 | Phase 2 | Pending |
+| SAFE-06 | Phase 2 | Pending |
+| COV-01 | Phase 3 | Pending |
+| COV-02 | Phase 3 | Pending |
+| COV-03 | Phase 3 | Pending |
+| COV-04 | Phase 3 | Pending |
+| FUZZ-01 | Phase 4 | Pending |
+| FUZZ-02 | Phase 4 | Pending |
+| FUZZ-03 | Phase 4 | Pending |
+| FUZZ-04 | Phase 4 | Pending |
+| FUZZ-05 | Phase 4 | Pending |
+| FUZZ-06 | Phase 4 | Pending |
+| CONC-01 | Phase 5 | Pending |
+| CONC-02 | Phase 5 | Pending |
+| CONC-03 | Phase 5 | Pending |
+| CONC-04 | Phase 5 | Pending |
+| CONC-05 | Phase 5 | Pending |
 
 **Coverage:**
 - v1 requirements: 27 total
-- Mapped to phases: 0
-- Unmapped: 27
+- Mapped to phases: 27
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-04-28*
-*Last updated: 2026-04-28 after initial definition*
+*Last updated: 2026-04-28 after roadmap creation*
