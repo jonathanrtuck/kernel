@@ -369,9 +369,9 @@ for elf in "$RUST_TARGET"/bench_*; do
                 avg_t=$(ticks_to_time "$mean_val")
 
                 med_delta=""
-                bkey="${name}:${group_idx}:med"
-                if [ -n "${BASELINE[$bkey]+x}" ]; then
-                    med_delta=" $(format_delta "${BASELINE[$bkey]}" "$median_val")"
+                local bmed
+                if bmed=$(baseline_lookup "$name" "$group_idx" "med"); then
+                    med_delta=" $(format_delta "$bmed" "$median_val")"
                 fi
 
                 if ! $displayed; then
