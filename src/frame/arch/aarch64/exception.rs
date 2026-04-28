@@ -206,16 +206,8 @@ fn handle_el0_sync<S: crate::time_manager::Scheduler + 'static>(
     let ec = esr_ec(esr);
 
     match ec {
-        0x07 => {
-            // FP/SIMD access trapped by CPACR_EL1.FPEN=0b01 (lazy FP).
-            // Save previous owner's FP state, load current Observer's,
-            // set FPEN=0b11 to allow subsequent FP access without trapping.
-            handle_fp_trap();
-
-            let core = core_manager::current_core_mut::<S>();
-
-            DispatchResult::Resume(core.current.unwrap())
-        }
+        // EC 0x07 (FP/SIMD trap) is handled entirely in assembly via
+        // __fp_trap_fast — it never reaches the Rust handler.
         0x15 => {
             let imm = esr_svc_imm(esr);
             let core = core_manager::current_core_mut::<S>();
@@ -281,90 +273,6 @@ fn handle_el0_sync<S: crate::time_manager::Scheduler + 'static>(
         // EC 0x20 = Instruction abort, EC 0x24 = Data abort, plus
         // alignment faults, FP exceptions, etc.
         _ => handle_el0_fault::<S>(esr, far),
-    }
-}
-
-/// Handle an FP/SIMD access trap from EL0 (lazy FP restore).
-///
-/// CPACR_EL1.FPEN is set to 0b01 on context switch to a different
-/// Observer. When that Observer first touches an FP register, this trap
-/// fires. We load the Observer's FP state from RegisterState (which was
-/// saved on the previous EL0 entry — entry always saves FP eagerly
-/// because the kernel uses NEON for memset/memcpy), update fp_owner,
-/// and set FPEN=0b11. Subsequent FP accesses proceed without trapping
-/// until the next context switch to a different Observer.
-#[cfg(target_os = "none")]
-fn handle_fp_trap() {
-    // SAFETY: TPIDR_EL1 was set during boot to a valid PerCoreData.
-    // register_state_ptr points to the current Observer's RegisterState
-    // (updated by update_register_state_ptr before __restore_observer).
-    // A4 non-reentrancy guarantees exclusive access.
-    let current_rs_ptr = unsafe {
-        let pcd = sysreg::tpidr_el1() as *mut crate::frame::cores::PerCoreData;
-
-        (*pcd).register_state_ptr
-    };
-
-    // SAFETY: current_rs_ptr points to the current Observer's valid
-    // RegisterState. Load the saved FP state into hardware.
-    unsafe { load_fp_state(current_rs_ptr) }
-
-    // SAFETY: Update fp_owner so __restore_observer can detect same-
-    // Observer restore and skip the FPEN=0b01 trap next time.
-    unsafe {
-        let pcd = sysreg::tpidr_el1() as *mut crate::frame::cores::PerCoreData;
-
-        (*pcd).fp_owner = current_rs_ptr;
-    }
-
-    // SAFETY: CPACR_EL1 is a per-core system register. Setting FPEN=0b11
-    // enables FP/SIMD for EL0. ISB ensures the pipeline sees the change
-    // before eret re-executes the trapping instruction.
-    unsafe {
-        let mut cpacr: u64;
-
-        core::arch::asm!("mrs {0}, cpacr_el1", out(reg) cpacr);
-
-        cpacr |= 0b11 << 20;
-
-        core::arch::asm!("msr cpacr_el1, {0}", "isb", in(reg) cpacr);
-    }
-}
-
-/// Load FP/SIMD state from a RegisterState into hardware.
-///
-/// # Safety
-/// `rs` must point to a valid, readable RegisterState.
-#[cfg(target_os = "none")]
-unsafe fn load_fp_state(rs: *mut crate::frame::arch::register_state::RegisterState) {
-    // SAFETY: Caller guarantees rs is valid. The ldp instructions load
-    // 128-bit q-register pairs from the RegisterState's fp_regs offsets.
-    unsafe {
-        core::arch::asm!(
-            "ldr {tmp}, [{rs}, #800]",
-            "msr fpcr, {tmp}",
-            "ldr {tmp}, [{rs}, #808]",
-            "msr fpsr, {tmp}",
-            "ldp q0, q1, [{rs}, #288]",
-            "ldp q2, q3, [{rs}, #320]",
-            "ldp q4, q5, [{rs}, #352]",
-            "ldp q6, q7, [{rs}, #384]",
-            "ldp q8, q9, [{rs}, #416]",
-            "ldp q10, q11, [{rs}, #448]",
-            "ldp q12, q13, [{rs}, #480]",
-            "ldp q14, q15, [{rs}, #512]",
-            "ldp q16, q17, [{rs}, #544]",
-            "ldp q18, q19, [{rs}, #576]",
-            "ldp q20, q21, [{rs}, #608]",
-            "ldp q22, q23, [{rs}, #640]",
-            "ldp q24, q25, [{rs}, #672]",
-            "ldp q26, q27, [{rs}, #704]",
-            "ldp q28, q29, [{rs}, #736]",
-            "ldp q30, q31, [{rs}, #768]",
-            rs = in(reg) rs,
-            tmp = out(reg) _,
-            options(nostack),
-        );
     }
 }
 

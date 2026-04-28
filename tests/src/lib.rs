@@ -116,6 +116,37 @@ pub fn send(handle: u64, label: u64, data: [u64; 4]) -> bool {
     (result & (1 << 29)) == 0
 }
 
+/// Send a message with a capability transfer to a Field (SVC #1).
+///
+/// Like `send`, but transfers the capability at `user_cap` to the receiver.
+/// D96 move semantics: the sender's cap is consumed on success.
+/// Returns true on success (carry clear), false on error (carry set).
+pub fn send_with_cap(handle: u64, label: u64, data: [u64; 4], user_cap: u64) -> bool {
+    let result: u64;
+
+    // SAFETY: SVC #1 = Send (D48). Register layout per D47:
+    //   x0-x3 = data words, x4 = label, x5 = handle,
+    //   x6 = user cap handle, x7 = reply info (0).
+    // On return: carry clear = success, carry set = error (x0 = code).
+    unsafe {
+        asm!(
+            "svc #1",
+            "mrs {result}, NZCV",
+            result = out(reg) result,
+            in("x0") data[0],
+            in("x1") data[1],
+            in("x2") data[2],
+            in("x3") data[3],
+            in("x4") label,
+            in("x5") handle,
+            in("x6") user_cap,
+            in("x7") 0u64,
+        );
+    }
+
+    (result & (1 << 29)) == 0
+}
+
 /// Receive a message from a Field (SVC #2).
 ///
 /// Blocks until a message is available. Returns the received message.

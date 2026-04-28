@@ -571,27 +571,11 @@ impl<S: Scheduler> CoreState<S> {
                         return DispatchResult::Resume(sender_ptr);
                     }
                 };
-                // D107: extract removed cap from sender's table — decrement refcount.
-                if let Some(ref tc) = user_cap
-                    && !tc.send_once
-                {
-                    decrement_refcount(kernel_state, tc.object_type, tc.object_id);
-                }
-
-                // D30: sender extracted a Time cap — update their compute_aggregate.
-                if let Some(ref tc) = user_cap
-                    && tc.object_type == crate::capability::ObjectType::Time
-                {
-                    let times = kernel_state.times.acquire();
-
-                    if let Some(time) = times.get(tc.object_id) {
-                        crate::frame::cores::observer_remove_compute(
-                            sender_ptr,
-                            time.compute_units,
-                        );
-                    }
-                }
-
+                // Save cap metadata for post-lock refcount/compute updates.
+                // The user_cap will be moved into the Message below.
+                let extracted_type = user_cap
+                    .as_ref()
+                    .map(|tc| (tc.object_type, tc.object_id, tc.send_once));
                 // Step 6: construct Message from IPC registers.
                 let message = crate::field::Message {
                     data: ipc_regs.data,
@@ -626,6 +610,29 @@ impl<S: Scheduler> CoreState<S> {
                 };
 
                 drop(fields_guard);
+
+                // D107: cap was extracted from sender's table — decrement
+                // refcount. Must be AFTER fields_guard is dropped because
+                // decrement_refcount acquires arena locks (D53 ordering).
+                if let Some((obj_type, obj_id, send_once)) = extracted_type
+                    && !send_once
+                {
+                    decrement_refcount(kernel_state, obj_type, obj_id);
+                }
+
+                // D30: sender extracted a Time cap — update compute_aggregate.
+                if let Some((obj_type, obj_id, _)) = extracted_type
+                    && obj_type == crate::capability::ObjectType::Time
+                {
+                    let times = kernel_state.times.acquire();
+
+                    if let Some(time) = times.get(obj_id) {
+                        crate::frame::cores::observer_remove_compute(
+                            sender_ptr,
+                            time.compute_units,
+                        );
+                    }
+                }
 
                 // D51: consume send-once cap after successful Send.
                 if is_send_once {
@@ -969,9 +976,9 @@ impl<S: Scheduler> CoreState<S> {
             Ok(crate::communication::SendOutcome::WokeReceiver(receiver_ptr, msg)) => {
                 Self::deliver_message(receiver_ptr, &msg, kernel_state);
 
-                let _ = crate::frame::cores::observer_unblock(receiver_ptr);
-
-                self.scheduler.enqueue(receiver_ptr);
+                if let Ok(true) = crate::frame::cores::observer_unblock(receiver_ptr) {
+                    self.scheduler.enqueue(receiver_ptr);
+                }
 
                 Ok(())
             }
@@ -1008,9 +1015,12 @@ impl<S: Scheduler> CoreState<S> {
                 crate::frame::cores::clear_ipc_carry(sender_ptr);
                 Self::deliver_message(receiver_ptr, &message, kernel_state);
 
-                let _ = crate::frame::cores::observer_unblock(receiver_ptr);
-
-                self.scheduler.enqueue(receiver_ptr);
+                // D39: unblock returns false if the Observer is suspended —
+                // the blocking condition is resolved but the Observer stays
+                // off the run queue until explicitly resumed.
+                if let Ok(true) = crate::frame::cores::observer_unblock(receiver_ptr) {
+                    self.scheduler.enqueue(receiver_ptr);
+                }
 
                 // D50: Send is NOT fast-path eligible. Sender always continues.
                 DispatchResult::Resume(sender_ptr)
@@ -1116,13 +1126,19 @@ impl<S: Scheduler> CoreState<S> {
 
                     self.scheduler.dequeue(sender_ptr);
 
-                    let _ = crate::frame::cores::observer_unblock(receiver_ptr);
+                    if let Ok(true) = crate::frame::cores::observer_unblock(receiver_ptr) {
+                        trace_point!(self, 4); // scheduler done
 
-                    trace_point!(self, 4); // scheduler done
+                        self.current = Some(receiver_ptr);
 
-                    self.current = Some(receiver_ptr);
+                        DispatchResult::ResumeFastPath(receiver_ptr)
+                    } else {
+                        // D39: receiver is suspended — can't direct-switch.
+                        let _ = crate::frame::cores::observer_set_blocked(sender_ptr);
 
-                    DispatchResult::ResumeFastPath(receiver_ptr)
+                        self.scheduler.dequeue(sender_ptr);
+                        self.schedule_next()
+                    }
                 } else {
                     // D96: DirectSwitch denied — fall back to slow path.
                     // Read sender's data words; label and badge are already
@@ -1138,28 +1154,26 @@ impl<S: Scheduler> CoreState<S> {
                     let _ = crate::frame::cores::observer_set_blocked(sender_ptr);
 
                     self.scheduler.dequeue(sender_ptr);
-                    // Deliver via slow path (installs reply cap in receiver's table).
                     Self::deliver_message(receiver_ptr, &denial_message, kernel_state);
 
-                    // Unblock receiver and enqueue it.
-                    let _ = crate::frame::cores::observer_unblock(receiver_ptr);
+                    if let Ok(true) = crate::frame::cores::observer_unblock(receiver_ptr) {
+                        self.scheduler.enqueue(receiver_ptr);
+                    }
 
-                    self.scheduler.enqueue(receiver_ptr);
                     self.schedule_next()
                 }
             }
             crate::communication::CallOutcome::WokeReceiverSlowPath(receiver_ptr, message) => {
                 // Row 7: waiter found but user cap forces slow path.
-                // Message already carries user_cap and reply_cap.
                 let _ = crate::frame::cores::observer_set_blocked(sender_ptr);
 
                 self.scheduler.dequeue(sender_ptr);
                 Self::deliver_message(receiver_ptr, &message, kernel_state);
 
-                // Unblock receiver and enqueue it.
-                let _ = crate::frame::cores::observer_unblock(receiver_ptr);
+                if let Ok(true) = crate::frame::cores::observer_unblock(receiver_ptr) {
+                    self.scheduler.enqueue(receiver_ptr);
+                }
 
-                self.scheduler.enqueue(receiver_ptr);
                 self.schedule_next()
             }
         }
@@ -1184,9 +1198,9 @@ impl<S: Scheduler> CoreState<S> {
         if let Some(delivery) = outcome.reply_delivery {
             Self::deliver_message(delivery.client, &delivery.message, kernel_state);
 
-            let _ = crate::frame::cores::observer_unblock(delivery.client);
-
-            self.scheduler.enqueue(delivery.client);
+            if let Ok(true) = crate::frame::cores::observer_unblock(delivery.client) {
+                self.scheduler.enqueue(delivery.client);
+            }
         }
 
         // ── Receive phase ────────────────────────────────────────────
@@ -1293,17 +1307,27 @@ impl<S: Scheduler> CoreState<S> {
                     return typed_error(SyscallError::InvalidState);
                 }
 
-                self.scheduler.enqueue(obs_ptr);
+                // Enqueue only if the Observer is now Runnable (not if it
+                // was Blocked+suspended → Blocked after clearing the flag).
+                if crate::frame::cores::observer_is_runnable(obs_ptr) {
+                    self.scheduler.enqueue(obs_ptr);
+                }
 
                 typed_ok(0)
             }
             TypedOperation::ObserverSuspend => {
-                match with_validated_observer_mut(kernel_state, object_id, entry, |observer| {
-                    observer.suspend();
-                }) {
-                    Ok(()) => typed_ok(0),
-                    Err(e) => typed_error(e),
-                }
+                let obs_ptr = match validated_observer_ptr(kernel_state, object_id, entry) {
+                    Ok(ptr) => ptr,
+                    Err(e) => return typed_error(e),
+                };
+
+                crate::frame::cores::observer_suspend(obs_ptr);
+
+                // D39: remove from scheduler if Runnable. The Observer stays
+                // in Runnable state with suspended=true — resume will re-enqueue.
+                self.scheduler.dequeue(obs_ptr);
+
+                typed_ok(0)
             }
             TypedOperation::ObserverSetScheduling => {
                 let responsiveness = regs.args[0] as u8;
@@ -3113,9 +3137,9 @@ impl<S: Scheduler> CoreState<S> {
                         crate::frame::cores::write_typed_result(dptr, return_handle);
                     }
 
-                    let _ = crate::frame::cores::observer_unblock(dptr);
-
-                    self.scheduler.enqueue(dptr);
+                    if let Ok(true) = crate::frame::cores::observer_unblock(dptr) {
+                        self.scheduler.enqueue(dptr);
+                    }
                 }
             }
         }
@@ -3369,9 +3393,10 @@ impl<S: Scheduler> CoreState<S> {
             crate::fault::FaultDeliveryOutcome::WokeReceiver(receiver_ptr, message) => {
                 Self::deliver_message(receiver_ptr, &message, kernel_state);
 
-                let _ = crate::frame::cores::observer_unblock(receiver_ptr);
+                if let Ok(true) = crate::frame::cores::observer_unblock(receiver_ptr) {
+                    self.scheduler.enqueue(receiver_ptr);
+                }
 
-                self.scheduler.enqueue(receiver_ptr);
                 self.schedule_next()
             }
             crate::fault::FaultDeliveryOutcome::Deferred(message) => {
@@ -5104,6 +5129,9 @@ mod tests {
         let mut core = make_core_state();
         let mut sender = make_observer_with_registers();
         let mut receiver = make_observer_with_registers();
+
+        receiver.state = crate::observer::PrimaryState::Blocked;
+
         let sender_ptr = NonNull::from(&mut sender);
         let receiver_ptr = NonNull::from(&mut receiver);
 
@@ -5335,6 +5363,9 @@ mod tests {
         let mut core = make_core_state();
         let mut sender = make_observer_with_registers();
         let mut receiver = make_observer_with_registers();
+
+        receiver.state = crate::observer::PrimaryState::Blocked;
+
         let sender_ptr = NonNull::from(&mut sender);
         let receiver_ptr = NonNull::from(&mut receiver);
 
@@ -5379,6 +5410,9 @@ mod tests {
         let mut core = make_core_state();
         let mut sender = make_observer_with_registers();
         let mut receiver = make_observer_with_registers();
+
+        receiver.state = crate::observer::PrimaryState::Blocked;
+
         let sender_ptr = NonNull::from(&mut sender);
         let receiver_ptr = NonNull::from(&mut receiver);
 
@@ -5444,6 +5478,9 @@ mod tests {
         let mut core = make_core_state();
         let mut sender = make_observer_with_registers();
         let mut receiver = make_observer_with_registers();
+
+        receiver.state = crate::observer::PrimaryState::Blocked;
+
         let sender_ptr = NonNull::from(&mut sender);
         let receiver_ptr = NonNull::from(&mut receiver);
 
@@ -5520,6 +5557,9 @@ mod tests {
         let mut core = make_core_state();
         let mut server = make_observer_with_registers();
         let mut client = make_observer_with_registers();
+
+        client.state = crate::observer::PrimaryState::Blocked;
+
         let server_ptr = NonNull::from(&mut server);
         let client_ptr = NonNull::from(&mut client);
 
@@ -5642,6 +5682,9 @@ mod tests {
         let mut core = make_core_state();
         let mut server = make_observer_with_registers();
         let mut client = make_observer_with_registers();
+
+        client.state = crate::observer::PrimaryState::Blocked;
+
         let server_ptr = NonNull::from(&mut server);
         let client_ptr = NonNull::from(&mut client);
 
@@ -5805,6 +5848,9 @@ mod tests {
         let mut core = make_core_state();
         let mut sender = make_observer_with_registers();
         let mut receiver = make_observer_with_registers();
+
+        receiver.state = crate::observer::PrimaryState::Blocked;
+
         let sender_ptr = NonNull::from(&mut sender);
         let receiver_ptr = NonNull::from(&mut receiver);
 
@@ -7773,6 +7819,8 @@ mod tests {
         // Create a waiter Observer with a real RegisterState (needed for
         // unblock which calls observer_unblock on the waiter).
         let mut waiter = make_observer_with_registers();
+
+        waiter.state = crate::observer::PrimaryState::Blocked;
 
         // Install the waiter into the Field's waiters list so Call finds it.
         // communication::call checks pop_waiter() — if it finds one, it

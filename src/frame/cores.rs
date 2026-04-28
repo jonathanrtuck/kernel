@@ -71,13 +71,6 @@ pub struct PerCoreData {
     /// `__restore_observer` or `__enter_idle` instead of returning).
     /// Set once during boot, stable afterward.
     pub kernel_stack_top: *mut u8,
-
-    /// Offset 24: pointer to the RegisterState whose FP/SIMD registers
-    /// are currently live in hardware on this core (lazy FP save/restore).
-    /// Null if no FP state is live (boot, after idle). On FP trap from EL0,
-    /// the handler saves hardware FP state to this address before loading
-    /// the current Observer's FP state.
-    pub fp_owner: *mut RegisterState,
 }
 
 /// Byte offset of `register_state_ptr` within `PerCoreData`.
@@ -95,16 +88,10 @@ pub const PER_CORE_DATA_CORE_STATE_OFFSET: usize = 8;
 #[cfg(any(target_os = "none", test))]
 pub const PER_CORE_DATA_KERNEL_STACK_TOP_OFFSET: usize = 16;
 
-/// Byte offset of `fp_owner` within `PerCoreData`.
-/// Assembly reads this during FP trap to find the previous FP owner's
-/// RegisterState for lazy save.
-#[cfg(any(target_os = "none", test))]
-pub const PER_CORE_DATA_FP_OWNER_OFFSET: usize = 24;
-
 // Compile-time layout assertions — these MUST match the assembly offsets.
 #[cfg(any(target_os = "none", test))]
 const _: () = {
-    assert!(core::mem::size_of::<PerCoreData>() == 32);
+    assert!(core::mem::size_of::<PerCoreData>() == 24);
     assert!(core::mem::align_of::<PerCoreData>() == 8);
 };
 
@@ -121,7 +108,6 @@ const _: () = {
         core::mem::offset_of!(PerCoreData, kernel_stack_top)
             == PER_CORE_DATA_KERNEL_STACK_TOP_OFFSET
     );
-    assert!(core::mem::offset_of!(PerCoreData, fp_owner) == PER_CORE_DATA_FP_OWNER_OFFSET);
 };
 
 /// Read the current core's PerCoreData from TPIDR_EL1 (D83).
@@ -903,6 +889,20 @@ pub fn observer_resume(
     unsafe { (*observer_ptr.as_ptr()).resume() }
 }
 
+/// Set the external suspension overlay on an Observer (D39).
+#[cfg(any(target_os = "none", test))]
+pub fn observer_suspend(observer_ptr: NonNull<Observer>) {
+    // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy.
+    unsafe { (*observer_ptr.as_ptr()).suspend() }
+}
+
+/// Check if an Observer is in the Runnable primary state.
+#[cfg(any(target_os = "none", test))]
+pub fn observer_is_runnable(observer_ptr: NonNull<Observer>) -> bool {
+    // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy.
+    unsafe { (*observer_ptr.as_ptr()).state == crate::observer::PrimaryState::Runnable }
+}
+
 /// Read the faulting Observer's saved PC (D100 diagnostic output).
 ///
 /// Returns the ELR_EL1 value saved in RegisterState — the instruction
@@ -1665,8 +1665,8 @@ mod tests {
     fn test_d83_per_core_data_size() {
         assert_eq!(
             core::mem::size_of::<PerCoreData>(),
-            32,
-            "D83: PerCoreData must be exactly 32 bytes (four pointers)"
+            24,
+            "D83: PerCoreData must be exactly 24 bytes (three pointers)"
         );
     }
 
@@ -1721,7 +1721,6 @@ mod tests {
                 as *mut crate::frame::arch::register_state::RegisterState,
             core_state_ptr: core::ptr::null_mut(),
             kernel_stack_top: core::ptr::null_mut(),
-            fp_owner: core::ptr::null_mut(),
         };
 
         // Write a sentinel via the register_state_ptr.
@@ -1765,7 +1764,6 @@ mod tests {
                 as *mut crate::frame::arch::register_state::RegisterState,
             core_state_ptr: &sentinel_core_state as *const u64 as *mut u8,
             kernel_stack_top: core::ptr::null_mut(),
-            fp_owner: core::ptr::null_mut(),
         };
         let base = &per_core as *const PerCoreData as *const u8;
         // Read register_state_ptr at offset 0 as a raw u64.
@@ -1822,7 +1820,6 @@ mod tests {
                 as *mut crate::frame::arch::register_state::RegisterState,
             core_state_ptr: core::ptr::null_mut(),
             kernel_stack_top: stack_sentinel as *mut u8,
-            fp_owner: core::ptr::null_mut(),
         };
 
         // Field access.

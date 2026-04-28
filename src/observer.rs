@@ -82,6 +82,7 @@ impl RegisterStateHandle {
 /// - Faulted → Runnable: resume (after handler resolves, D12)
 ///
 /// Suspension (D39) is orthogonal — tracked by [`Observer::suspended`].
+#[derive(PartialEq)]
 pub enum PrimaryState {
     Inert,
     Runnable,
@@ -327,6 +328,11 @@ impl Observer {
         match self.state {
             PrimaryState::Inert | PrimaryState::Faulted => {
                 self.state = PrimaryState::Runnable;
+                self.suspended = false;
+
+                Ok(())
+            }
+            PrimaryState::Runnable | PrimaryState::Blocked if self.suspended => {
                 self.suspended = false;
 
                 Ok(())

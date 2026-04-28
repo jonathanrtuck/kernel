@@ -275,6 +275,15 @@ __exception_common:
 // ---------------------------------------------------------------------------
 __el0_trampoline_8:             // EL0/64 Synchronous
     str     x19, [x0, #152]         // Save user x19 BEFORE clobbering
+    // Fast-path: FP/SIMD trap (EC=0x07). Handled entirely in assembly —
+    // loads FP from RegisterState, sets FPEN=0b11, ERETs directly without
+    // the full register save or Rust dispatch. This avoids the trap loop
+    // that would occur if __restore_observer (which sets FPEN=0b01) ran
+    // after the Rust handler set FPEN=0b11.
+    mrs     x1, esr_el1
+    lsr     x1, x1, #26             // EC = ESR_EL1[31:26]
+    cmp     x1, #0x07               // SVE/SIMD/FP trap?
+    b.eq    __fp_trap_fast
     mov     x19, #8
     b       __el0_exception_common
 
@@ -292,6 +301,57 @@ __el0_trampoline_11:            // EL0/64 SError
     str     x19, [x0, #152]         // Save user x19 BEFORE clobbering
     mov     x19, #11
     b       __el0_exception_common
+
+// ---------------------------------------------------------------------------
+// FP/SIMD trap fast-path (EC=0x07).
+//
+// On entry from __el0_trampoline_8:
+//   x0 = register_state_ptr (RegisterState has FP saved from the PREVIOUS
+//        exception entry — always correct because entry saves eagerly)
+//   x1 = clobbered (scratch)
+//   x19 = user x19 (saved to RegisterState[19] by trampoline)
+//   ELR_EL1 = trapping instruction PC (ARM re-executes after eret)
+//   SPSR_EL1 = saved EL0 PSTATE
+//
+// Loads FP/SIMD state from RegisterState, sets FPEN=0b11, restores the
+// three clobbered GPRs (x0, x1, x19), and erets back to the trapping
+// instruction. No full register save, no Rust handler, no
+// __restore_observer. ~20 instructions, ~30-50 cycles.
+// ---------------------------------------------------------------------------
+__fp_trap_fast:
+    // Load FPCR/FPSR.
+    ldr     x1, [x0, #800]
+    msr     fpcr, x1
+    ldr     x1, [x0, #808]
+    msr     fpsr, x1
+    // Load q0-q31 from RegisterState.
+    ldp     q0, q1, [x0, #288]
+    ldp     q2, q3, [x0, #320]
+    ldp     q4, q5, [x0, #352]
+    ldp     q6, q7, [x0, #384]
+    ldp     q8, q9, [x0, #416]
+    ldp     q10, q11, [x0, #448]
+    ldp     q12, q13, [x0, #480]
+    ldp     q14, q15, [x0, #512]
+    ldp     q16, q17, [x0, #544]
+    ldp     q18, q19, [x0, #576]
+    ldp     q20, q21, [x0, #608]
+    ldp     q22, q23, [x0, #640]
+    ldp     q24, q25, [x0, #672]
+    ldp     q26, q27, [x0, #704]
+    ldp     q28, q29, [x0, #736]
+    ldp     q30, q31, [x0, #768]
+    // FPEN=0b11: allow EL0 FP access until the next exception entry
+    // (which will eagerly save and __restore_observer will re-arm the trap).
+    mrs     x1, cpacr_el1
+    orr     x1, x1, #(3 << 20)
+    msr     cpacr_el1, x1
+    isb
+    // Restore the three GPRs clobbered by VECTOR_ENTRY_EL0 + trampoline.
+    ldr     x19, [x0, #152]
+    ldr     x1, [x0, #8]
+    ldr     x0, [x0, #0]
+    eret
 
 // ---------------------------------------------------------------------------
 // EL0 common exception handler (D74).
@@ -407,13 +467,13 @@ __el0_exception_common:
 // Performs:
 //   1. Conditional TTBR0 switch (skip if unchanged)
 //   2. CNTKCTL_EL1 update (branchless — BFI inserts clock_access bit)
-//   3. Lazy FP: compare fp_owner against register_state_ptr.
-//      Same Observer: FPEN=0b11 (FP already correct from last load).
-//      Different Observer: FPEN=0b01 (trap EL0 FP, load on first use).
-//      EL0 entry always saves FP to RegisterState, so the saved state is
-//      always correct. Kernel code uses NEON (memset/memcpy), so hardware
-//      FP state is stale after kernel execution. The FP trap handler
-//      (EC=0x07) loads from RegisterState when the Observer first touches FP.
+//   3. FP: always set FPEN=0b01 (trap EL0 FP access on first use).
+//      EL0 entry eagerly saves FP to RegisterState. The kernel may use
+//      NEON between entry and exit (Rust/LLVM auto-vectorization,
+//      memset/memcpy), so hardware FP state is stale. The FP trap
+//      handler (EC=0x07) loads from RegisterState when the Observer
+//      first touches FP. This costs one synchronous exception per
+//      Observer resume that uses FP — correct and simple.
 //   4. System register restore (SP_EL0, ELR_EL1, SPSR_EL1, TPIDR_EL0)
 //   5. GPR restore (x0 loaded last — it is the base pointer)
 //   6. eret to EL0
@@ -433,25 +493,14 @@ __restore_observer:
     bfi     x9, x2, #1, #1         // CNTKCTL[1] = clock_access[0]
     msr     cntkctl_el1, x9
 
-    // 3. Lazy FP — check if this Observer's FP was already loaded.
-    //    TPIDR_EL1 → PerCoreData; fp_owner at offset 24.
-    mrs     x9, tpidr_el1
-    ldr     x10, [x9, #24]         // x10 = fp_owner
-    cmp     x10, x0                // Same Observer?
-    b.eq    .Lfp_same
-    // Different Observer — trap EL0 FP access (FPEN=0b01).
-    // Don't update fp_owner yet; the FP trap handler will.
+    // 3. FP: always trap EL0 FP access. Entry saved FP eagerly, but the
+    //    kernel may have used NEON since then — hardware FP is stale.
+    //    The FP trap handler (handle_fp_trap) loads from RegisterState
+    //    and sets FPEN=0b11 on first EL0 FP access.
     mrs     x10, cpacr_el1
     bic     x10, x10, #(3 << 20)   // Clear FPEN bits
     orr     x10, x10, #(1 << 20)   // FPEN = 0b01 (EL0 traps, EL1 ok)
     msr     cpacr_el1, x10
-    b       .Lfp_done
-.Lfp_same:
-    // Same Observer — FP was loaded last time it trapped. Enable access.
-    mrs     x10, cpacr_el1
-    orr     x10, x10, #(3 << 20)   // FPEN = 0b11 (no traps)
-    msr     cpacr_el1, x10
-.Lfp_done:
 
     // 4. System registers from RegisterState.
     ldr     x9, [x0, #248]         // SP_EL0

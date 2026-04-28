@@ -63,7 +63,6 @@ static mut SECONDARY_PER_CORE_DATA: [PerCoreData; config::MAX_CORES - 1] = [cons
         register_state_ptr: core::ptr::null_mut(),
         core_state_ptr: core::ptr::null_mut(),
         kernel_stack_top: core::ptr::null_mut(),
-        fp_owner: core::ptr::null_mut(),
     }
 };
     config::MAX_CORES - 1];
@@ -129,7 +128,6 @@ fn init_secondary_per_core_data(core_id: usize) {
                 register_state_ptr: core::ptr::null_mut(),
                 core_state_ptr: cs as *mut u8,
                 kernel_stack_top: stack_top as *mut u8,
-                fp_owner: core::ptr::null_mut(),
             },
         );
 
