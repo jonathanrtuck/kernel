@@ -1427,10 +1427,11 @@ impl<S: Scheduler> CoreState<S> {
                             );
 
                             if let Some(ptr) = target_ptr {
-                                let done = crate::frame::cores::observer_cascade_step(
+                                let done = cascade_batch_with_badge_tracking(
                                     ptr,
                                     &mut cascade,
                                     16,
+                                    kernel_state,
                                 );
 
                                 if done {
@@ -2625,7 +2626,7 @@ impl<S: Scheduler> CoreState<S> {
             let target_ptr = crate::frame::cores::observer_ptr_from_arena(kernel_state, target_id);
 
             if let Some(ptr) = target_ptr {
-                let done = crate::frame::cores::observer_cascade_step(ptr, cascade, 16);
+                let done = cascade_batch_with_badge_tracking(ptr, cascade, 16, kernel_state);
 
                 if done {
                     cascade.pop();
@@ -3131,6 +3132,59 @@ fn consume_space(kernel_state: &KernelState, space_id: ObjectId) {
     }
 
     spaces.free(space_id);
+}
+
+/// D17/D98: run one cascade batch with badge tracking.
+///
+/// Pre-reads entries in the batch range to collect Field-type (id, badge)
+/// pairs, then delegates to observer_cascade_step for the close pass,
+/// then decrements badge refcounts and enqueues closure notifications.
+/// Returns true when the cascade level is complete.
+#[cfg(any(target_os = "none", test))]
+fn cascade_batch_with_badge_tracking(
+    observer_ptr: core::ptr::NonNull<crate::observer::Observer>,
+    cascade: &mut crate::capability::CascadeContinuation,
+    batch_size: u32,
+    kernel_state: &KernelState,
+) -> bool {
+    use crate::capability::ObjectType;
+
+    let cursor = match cascade.current_mut() {
+        Some(level) => level.slot_cursor,
+        None => return true,
+    };
+
+    // Pre-read: collect (field_id, badge) for Field-type entries in this batch.
+    let mut badge_events: [(ObjectId, crate::capability::Badge); 16] =
+        [(ObjectId(0), crate::capability::Badge(0)); 16];
+    let mut badge_count = 0usize;
+
+    for slot in cursor..cursor.saturating_add(batch_size) {
+        if let Some(entry) = crate::frame::cores::observer_read_full_cap_entry(observer_ptr, slot)
+            && let Some((ObjectType::Field, fid)) = entry.object
+        {
+            badge_events[badge_count] = (fid, entry.badge);
+            badge_count += 1;
+        }
+    }
+
+    // Close pass.
+    let done = crate::frame::cores::observer_cascade_step(observer_ptr, cascade, batch_size);
+
+    // D17: badge decrement pass.
+    if badge_count > 0 {
+        let mut fields = kernel_state.fields.acquire();
+
+        for &(fid, badge) in &badge_events[..badge_count] {
+            if let Some(field) = fields.get_mut(fid)
+                && field.badge_decrement(badge)
+            {
+                field.enqueue_badge_closure(badge);
+            }
+        }
+    }
+
+    done
 }
 
 /// D98 reverse type conversion: allocate a Space from the freed backing
@@ -8868,7 +8922,7 @@ mod tests {
             field.badge_increment(Badge(0xAA));
         }
 
-        let (mut sender, entries) = make_sender_with_cap(
+        let (mut sender, _entries) = make_sender_with_cap(
             ObjectType::Field,
             field_id,
             Rights::FIELD_ALL,
@@ -9105,6 +9159,121 @@ mod tests {
         assert!(
             field.badge_map.is_some(),
             "D17: badge_map must be allocated"
+        );
+    }
+
+    /// D17/D98: Observer Destroy cascade decrements badges and enqueues
+    /// closure notifications for tracked Field caps in the destroyed
+    /// Observer's cap table.
+    #[test]
+    fn test_d17_cascade_decrements_badges_on_destroy() {
+        let ks = make_kernel_state();
+        let field_id = make_tracked_field_in_arena(&ks, 8);
+
+        // Pre-populate badge map: one cap with badge 0xDD.
+        {
+            let mut fields = ks.fields.acquire();
+            let field = fields.get_mut(field_id).unwrap();
+
+            field.badge_increment(Badge(0xDD));
+        }
+
+        // Create a target Observer with a Field cap at slot 3.
+        let target_id = {
+            let mut observers = ks.observers.acquire();
+            let (id, obs) = observers.allocate().expect("allocate target");
+            let rs = crate::frame::cores::alloc_test_register_state();
+            let entries = crate::frame::capabilities::alloc_test_entries(8);
+
+            crate::frame::capabilities::init_freelist(
+                entries,
+                8,
+                crate::capability::SLOT_USER_START,
+            );
+
+            obs.object_id = id;
+            obs.asid = 0;
+            obs.asid_generation = 0;
+            obs.register_state = crate::observer::RegisterStateHandle::new(rs);
+            obs.page_table_root = 0;
+            obs.cap_table = entries;
+            obs.cap_table_capacity = 8;
+            obs.cap_table_free_head = Some(crate::capability::SLOT_USER_START + 1);
+            obs.cap_table_count = 1;
+            obs.state = crate::observer::PrimaryState::Inert;
+            obs.suspended = false;
+            obs.compute_aggregate = 0;
+            obs.responsiveness = crate::observer::DEFAULT_RESPONSIVENESS;
+            obs.throughput = crate::observer::DEFAULT_THROUGHPUT;
+            obs.clock_access = false;
+            obs.wait_state = crate::observer::WaitState::None;
+            obs.deferred_fault_message = None;
+            obs.saved_syscall = crate::observer::SavedSyscallContext::None;
+            obs.backing_va_base = 0x2000;
+            obs.backing_size = 0x4000;
+            obs.refcount = 1;
+            obs.generation = core::sync::atomic::AtomicU64::new(0);
+
+            crate::frame::capabilities::write_entry(
+                entries,
+                8,
+                crate::capability::SLOT_USER_START,
+                crate::capability::Entry {
+                    object: Some((ObjectType::Field, field_id)),
+                    rights: Rights::SEND,
+                    badge: Badge(0xDD),
+                    slot_tag: crate::capability::SlotTag(0),
+                    send_once: false,
+                    stored_generation: 0,
+                },
+            );
+
+            id
+        };
+
+        // Sender holds a Destroy cap to the target Observer.
+        let (mut sender, _entries) = make_sender_with_cap(
+            ObjectType::Observer,
+            target_id,
+            Rights::DESTROY,
+            Badge(0),
+            0,
+        );
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        setup_typed_regs(sender_ptr, TypedOperation::Destroy as u16, handle, [0; 4]);
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::Destroy, &ks);
+
+        // The cascade closed the target's Field cap → badge closure.
+        let mut fields = ks.fields.acquire();
+        let field = fields.get_mut(field_id).unwrap();
+
+        assert!(
+            !field.is_empty(),
+            "D17/D98: cascade must enqueue badge-closure for tracked Field"
+        );
+
+        let msg = field.dequeue().unwrap();
+
+        assert_eq!(
+            msg.label,
+            crate::field::LABEL_CLOSURE,
+            "D17/D98: message must be a closure notification"
+        );
+        assert_eq!(
+            msg.badge,
+            Badge(0xDD),
+            "D17/D98: badge must match the cascaded cap"
         );
     }
 
