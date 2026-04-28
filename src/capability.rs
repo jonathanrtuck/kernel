@@ -900,8 +900,8 @@ impl Table {
     /// deferred — the internal map data structure does not exist yet.
     ///
     /// The caller is responsible for: decrementing the target object's
-    /// refcount, handling badge-closure delivery, and initiating destroy
-    /// cascade (D33) if the refcount reached zero.
+    /// refcount, handling badge-closure delivery, and initiating
+    /// auto-destroy (D107) if the refcount reached zero.
     pub fn close(&mut self, index: u32) -> CloseResult {
         if index >= self.capacity {
             return CloseResult::AlreadyEmpty;
@@ -927,10 +927,10 @@ impl Table {
         self.free_head = Some(index);
         self.count = self.count.saturating_sub(1);
 
-        // was_last_reference is always false here — Table cannot determine
-        // refcount status (the refcount lives on the target object in its
-        // arena). The caller must check the object's refcount after this
-        // returns and act accordingly (D11/D33).
+        // D107: was_last_reference is always false here — Table cannot
+        // determine refcount (lives on the target object in its arena).
+        // The caller checks the object's refcount and auto-destroys if
+        // zero; backing returns to root Space, not to the closer.
         CloseResult::Closed {
             object_type,
             object_id,

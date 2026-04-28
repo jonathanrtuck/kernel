@@ -558,10 +558,13 @@ add-ons before the IPC model is settled would either skip a level or overspend
 on features whose alternatives may be free.
 
 Does NOT settle: mass invalidation (deferred with IPC), selective revocation
-(deferred with IPC), who authorizes destroy, cross-core prompt-effect policy
-(strong vs. weak), destroy cleanup protocol (inline vs. preemptible), ABA tag
-size and encoding, memory reclamation of freed slots, table-full fault ↔
-revocation interaction.
+(deferred with IPC), ~~who authorizes destroy~~ (settled: DESTROY right in D8's
+per-cap rights mask, enforced on every Destroy operation), ~~cross-core
+prompt-effect policy~~ (settled: weak/lazy — D67 generation counters checked at
+use-site; no IPI for revocation), ~~destroy cleanup protocol (inline vs.
+preemptible)~~ (settled by D33: preemptible cascade), ABA tag size and encoding,
+~~memory reclamation of freed slots~~ (settled by D107: auto-destroy on zero
+refcount), table-full fault ↔ revocation interaction.
 
 - **Rests on:** A5 (close-only alone forces terminate-by-force into userspace
   for kernel-owned resources — O4 (a) violation), D4 (revocation preserves
@@ -672,7 +675,8 @@ journal/013 so it is not rediscovered.
 Queue memory drawn from the creator's Spaces (D8 pattern). Fixed capacity at
 creation. Memory per queued message ~48 bytes (register-sized).
 
-Does NOT settle: ~~message format~~ (settled by D28), queue capacity policy,
+Does NOT settle: ~~message format~~ (settled by D28), ~~queue capacity policy~~
+(settled: queue capacity derived from consumed Space size at Field creation),
 ~~IPC fast-path conditions~~ (settled by D50), D12 fault delivery specifics.
 (Field shape settled by D15. Overflow policy settled by D18. Coalescing
 dissolved by D18. Reply routing settled by D16. Badge semantics settled by D17.
@@ -1803,10 +1807,12 @@ closure during cascade is best-effort (D18 applies unchanged). Pending fault
 list cleanup is O(1) per linkage (D18 intrusive list).
 
 Does NOT settle: cap table close ordering (whether ordering within the table
-matters), cross-core prompt-effect policy (strong vs. weak — D11 deferred), TLB
-shootdown batching (optimization, deferred), ~~Observer "extract" operation
-(pulling caps from child's table before destroy)~~ (evaluated and excluded by
-D39 — proactive cap sharing via D23 + D28 covers the use cases; deferred).
+matters), ~~cross-core prompt-effect policy~~ (settled: weak/lazy — D67
+generation counters checked at use-site; routing cleanup synchronous under
+lock), TLB shootdown batching (optimization, deferred), ~~Observer "extract"
+operation (pulling caps from child's table before destroy)~~ (evaluated and
+excluded by D39 — proactive cap sharing via D23 + D28 covers the use cases;
+deferred).
 
 - **Rests on:** D11 (base revocation — close-only + destroy provides the
   mechanism; dead-handle semantics ensure no visible intermediate state; ABA
@@ -2590,11 +2596,11 @@ message content layout~~ (settled by D63: badge + LABEL_TIMER_FIRE + fire_time +
 overrun_count + reserved + empty cap), ~~duration vs. absolute deadline API~~
 (settled by D72: relative duration in nanoseconds; absolute mode not
 foreclosed), ~~clock access mechanism~~ (settled by D66: per-Observer bool,
-CNTKCTL_EL1.EL0VCTEN on context switch), clock access authority mechanism and
-default policy (genuine choices, decoupled from G09 by D72), ~~badge-filtered
-receive~~ (closed by D71: not needed — D45 routing serves the use case;
-receive-time filtering tensions D13 queue semantics, D18 overflow, and D50
-fast-path).
+CNTKCTL_EL1.EL0VCTEN on context switch), ~~clock access authority mechanism and
+default policy~~ (settled: ClockRead typed operation grants access; default
+deny, any Observer may request), ~~badge-filtered receive~~ (closed by D71: not
+needed — D45 routing serves the use case; receive-time filtering tensions D13
+queue semantics, D18 overflow, and D50 fast-path).
 
 - **Rests on:** D4 (capability-based authority — Pulsar caps in cap table,
   cancel = destroy via D11), D7 (split model — timer operations are typed kernel
@@ -3609,8 +3615,9 @@ Prior art unanimous: every 64-bit capability system (seL4/64, L4/Fiasco.OC,
 Zircon) uses the full machine word. No benefit from narrowing — no entry-size
 budget, no value-space ceiling, immeasurable fast-path cost difference.
 
-Does NOT settle: whether badge value zero is reserved as "unbadged" (downstream
-convention question — should be settled alongside M10).
+Does NOT settle: ~~whether badge value zero is reserved as "unbadged"~~
+(settled: badge 0 is a valid, unreserved value — no special-case handling in the
+kernel).
 
 - **Rests on:** D47 (IPC-optimized register convention — badge in x5; primary
   forcing constraint), D49 (confirmed register assignments), A2 (ARM64 — 64-bit
@@ -3835,8 +3842,9 @@ namespace) are independent — no correlation.
 Downstream: Call()'s syscall encoding (D49) needs a `reply_badge` register
 parameter.
 
-Does NOT settle: reply_badge register assignment in D49, zero-badge reservation
-policy (connects to D58's adjacent question).
+Does NOT settle: reply_badge register assignment in D49, ~~zero-badge
+reservation policy~~ (settled: badge 0 is a valid, unreserved value — D58
+settled).
 
 - **Rests on:** D16 (single reply field, send-once reply caps), D17
   (receiver-controls-badge, kernel-auto-assigned rejected), D14 (Call = Send +
@@ -3912,9 +3920,10 @@ standard microkernel workload pattern). Generation counters close this gap.
 
 Does NOT settle: cap entry layout (generation field placement relative to
 existing fields), revocation syscall surface (new typed operation vs. modifier),
-cross-core prompt-effect policy (strong vs. weak — generation counters are
-naturally lazy/weak; prompt revocation requires IPI), stale slot reclamation
-(slots occupied by stale caps until next access; sweep mechanism deferred).
+~~cross-core prompt-effect policy~~ (settled: weak/lazy — generation counters
+checked at use-site; no IPI for revocation), ~~stale slot reclamation~~
+(settled: lazy — stale slots discovered via generation mismatch on resolve; no
+sweep).
 
 - **Rests on:** D11 (base primitive — generation counters extend, not replace),
   D8 (flat table — generation field in cap entry), A3 (non-IPC cap gap is a
@@ -3966,14 +3975,16 @@ Kernel-autonomous destroy is justified here: the kernel IS the final authority
 as root pager. Parking in error-faulted state is not viable — no higher-level
 supervisor exists to act.
 
-Supervision Field is a creation-time configuration parameter (optional). The
-escalation message format is standard D28 IPC — forwarding is a userspace
-convention, not a kernel-enforced protocol.
+Supervision Field is a creation-time configuration parameter (mandatory — D95
+requires a valid handler Field cap at CreateObserver). The escalation message
+format is standard D28 IPC — forwarding is a userspace convention, not a
+kernel-enforced protocol.
 
-Does NOT settle: supervision Field mandatory vs. optional at creation (Observer
-creation API refinement), escalation protocol standardization (userspace
-convention vs. kernel-defined format), error-faulted sub-state encoding in D39's
-state machine.
+Does NOT settle: ~~supervision Field mandatory vs. optional at creation~~
+(settled: mandatory — CreateObserver requires valid handler Field cap with SEND
+right; creation fails if absent or stale), escalation protocol standardization
+(userspace convention vs. kernel-defined format), error-faulted sub-state
+encoding in D39's state machine.
 
 - **Rests on:** D31 (fault handler chains — forecloses standalone let-it-hang
   and standalone double-fault-kill), D33 (Field destroy cascade — Case A hook
@@ -4681,6 +4692,56 @@ memory for unused regions).
 
 ---
 
+## Open questions
+
+Architectural items that remain unsettled — each could affect interfaces or
+other derivations. Implementation details (run queue structure, label numeric
+values, ABA tag encoding, scoring weights) are intentionally excluded; those are
+resolved at coding time and tracked inline via "Does NOT settle" annotations.
+
+### Authority and revocation
+
+- **Revocation syscall surface.** New typed operation vs. modifier on existing
+  operations. D67 settles generation counters as the mechanism but not the API.
+  Internal `revoke()` methods exist on all types but are only called from the
+  Destroy path — no userspace-facing revoke-without-destroy. (D67)
+
+### Space and memory
+
+- **COW/clone for Spaces.** Kernel mechanism vs. userspace pager policy.
+  Mentioned as open in D9, D27, D41, D52. Would add operations and rights to the
+  Space type. CLONE right exists in SPACE_ALL bitmask but no operation
+  implements it. Landscape §2.5 surveys the design space (Mach shadow objects,
+  Zircon VMO cloning, seL4 exclusion).
+
+- **Power state, thermal, and shared cache components.** Per-physical-core
+  concerns acknowledged as "not yet derived" and orthogonal to D1/D2's
+  per-logical-core structure. PSCI interface implements CPU_ON and SYSTEM_OFF
+  only — no runtime power management. (D1 preamble)
+
+### IPC and Fields
+
+- **Split-to-existing.** Routing traffic from one Field into an existing Field
+  (vs. split-to-new only). Deferred pending authority coherence exploration
+  (journal 071). Would enable single-Field IRQ+IPC patterns. FieldSplit
+  currently always creates a new Field from a consumed Space. (D45)
+
+### Scheduling and time
+
+- **Admission control on RT cores.** How Time precision, Time quantity, and
+  Pulsar period compose for the EDF schedulability test. CreatePulsar currently
+  checks only per-core capacity (MAX_DEADLINES_PER_CORE = 32), not
+  schedulability. (D42, D44)
+
+### Supervision and faults
+
+- **Fault handler liveness.** Handlers that perpetually fault consume arena
+  capacity without triggering D68's cap-invalidation detection. Kernel-level
+  timeout vs. userspace supervision policy not settled. No watchdog or timeout
+  mechanism implemented. Possible Pulsar watchdog (D44, D68 pattern). (D105)
+
+---
+
 ## Journal index
 
 - `001-per-core-hot-path.md` — reasoning for D1: hot/cold split, IPI
@@ -5226,6 +5287,10 @@ memory for unused regions).
 - `106-reply-field-allocation-policy.md` — settles D106: reply Field is
   userspace-created, installed via SetReplyField typed operation. Settles the
   allocation timing deferred by D16, D36, D73.
+- `107-auto-destroy-on-zero-refcount.md` — settles D107: auto-destroy on zero
+  refcount. When any Close brings refcount to zero, the kernel destroys the
+  object inline; backing to root Space. Settles D11's deferred "memory
+  reclamation of freed slots."
 
 ### D93 — Boot memory and multi-core initialization
 
@@ -5457,6 +5522,61 @@ spec entries continued to list the timing as unsettled.
   model), if sub-page allocation is introduced (reduces the page-granularity
   waste), if D16 is revised (changes reply mechanism).
 - **Journal:** `journal/106-reply-field-allocation-policy.md`.
+
+### D107 — Auto-destroy on zero refcount
+
+When any Close operation brings an object's refcount to zero, the kernel
+destroys the object inline on the close path. Structural backing returns to the
+kernel's root Space (D31), not to the closer. Explicit Destroy remains for
+force-killing objects with live references (refcount > 0), where the destroyer
+receives the backing Space cap (D98).
+
+Five convergent arguments: (1) zero-refcount objects are permanently unreachable
+and unrecoverable under A4 (no sweeper); (2) D38 Time non-clonability makes the
+leak unavoidable under explicit-only — every Time close orphans; (3) D24 and D33
+establish precedent (kernel acts on last-reference events: unmap for Spaces,
+auto-destroy in cascades); (4) D4 authority semantics are preserved (DESTROY
+right meaningful for refcount > 0; at zero refcount, no authority is violated —
+reclamation, not revocation); (5) internal consistency — D33 cascade already
+auto-destroys at zero refcount; extending to all close paths eliminates an
+arbitrary scope boundary.
+
+Auto-destroying a non-Observer type is O(1). Auto-destroying an Observer
+triggers a preemptible cascade (D33) — the closer bears the cascade cost but
+D33's preemptibility bounds per-step latency. Users wanting direct resource
+reclamation (backing Space cap returned) call Destroy instead of Close.
+
+CloseResult does not report whether auto-destroy fired. The closer gave up their
+last cap — they can't interact with the object regardless.
+
+Settles D11's deferred "memory reclamation of freed slots." Extends D33's
+zero-refcount auto-destroy from cascade-only to all close paths.
+
+Does NOT settle: cascade accounting for auto-destroy (closer's Time charged for
+cascade work), close ordering within auto-destroy cascade (same as D33's
+deferred cap table close ordering).
+
+- **Rests on:** D11 (close-only + authoritative destroy — D107 settles D11's
+  deferred "memory reclamation of freed slots"), D33 (preemptible cascade —
+  already auto-destroys at zero refcount within cascades; D107 extends scope),
+  D98 (cascade mechanics — auto-destroy backing follows cascade-freed
+  destination: root Space), D38 (Time non-clonable — close always sets refcount
+  to zero; explicit-only leaks permanently), D24 (cap-mapping invariant —
+  precedent for kernel action on last-reference removal), D32 (type conversion —
+  backing returned to root Space for auto-destroy, to destroyer for explicit
+  Destroy), D31 (root Space — neutral destination for auto-destroy backing), A4
+  (purely reactive — no background sweeper; inline auto-destroy is the only
+  A4-compliant cleanup), A5 (kernel absorbs lifecycle complexity; userspace need
+  not track refcounts), D4 (designation = authority — DESTROY right for force-
+  kill; auto-destroy at zero refcount is reclamation, not revocation),
+  `design/research/destroy-cascade-protocol.md` (Zircon auto-destroys on last
+  handle close; landscape survey).
+- **Status:** settled — revisit if D11 is revised (changes close/destroy base
+  primitive), if D33 is revised (changes cascade behavior), if a downstream
+  derivation reveals a legitimate use case for zero-refcount objects, or if
+  close-path cascade latency proves unacceptable for a workload class that
+  cannot use Destroy instead.
+- **Journal:** `journal/107-auto-destroy-on-zero-refcount.md`.
 
 ---
 

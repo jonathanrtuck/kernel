@@ -673,6 +673,7 @@ impl<S: Scheduler> CoreState<S> {
                         return DispatchResult::Resume(sender_ptr);
                     }
                 };
+
                 // D30: sender extracted a Time cap — update their compute_aggregate.
                 if let Some(ref tc) = user_cap
                     && tc.object_type == crate::capability::ObjectType::Time
@@ -1849,6 +1850,8 @@ impl<S: Scheduler> CoreState<S> {
                         }
 
                         // D11: decrement refcount and handle type-specific cleanup.
+                        // D107: if refcount reaches zero, auto-destroy inline
+                        // (backing → root Space). Not yet implemented.
                         // D73: send-once caps are not counted in refcount.
                         match closed_type {
                             ObjectType::Field => {
