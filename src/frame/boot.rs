@@ -270,6 +270,7 @@ static mut BSP_PER_CORE_DATA: PerCoreData = PerCoreData {
     register_state_ptr: core::ptr::null_mut(),
     core_state_ptr: core::ptr::null_mut(),
     kernel_stack_top: core::ptr::null_mut(),
+    fp_owner: core::ptr::null_mut(),
 };
 
 #[cfg(target_os = "none")]
@@ -330,6 +331,7 @@ fn init_bsp_per_core_data(rs_ptr: *mut RegisterState) {
                 register_state_ptr: rs_ptr,
                 core_state_ptr: cs as *mut u8,
                 kernel_stack_top: &raw const __stack_top as *mut u8,
+                fp_owner: core::ptr::null_mut(),
             },
         );
 

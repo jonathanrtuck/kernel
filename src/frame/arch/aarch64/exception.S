@@ -405,23 +405,22 @@ __el0_exception_common:
 //   x2 = clock_access        (0 or 1 — CNTKCTL_EL1 bit 1)
 //
 // Performs:
-//   1. Conditional TTBR0 switch (skip if unchanged; no TLB flush needed
-//      because epoch-based ASID allocation guarantees no aliasing —
-//      refresh_observer_asid runs before this, nG=1 on all user pages)
+//   1. Conditional TTBR0 switch (skip if unchanged)
 //   2. CNTKCTL_EL1 update (branchless — BFI inserts clock_access bit)
-//   3. System register restore (SP_EL0, ELR_EL1, SPSR_EL1, TPIDR_EL0)
-//   4. FP/SIMD restore (FPCR, FPSR, q0-q31)
+//   3. Lazy FP: compare fp_owner against register_state_ptr.
+//      Same Observer: FPEN=0b11 (FP already correct from last load).
+//      Different Observer: FPEN=0b01 (trap EL0 FP, load on first use).
+//      EL0 entry always saves FP to RegisterState, so the saved state is
+//      always correct. Kernel code uses NEON (memset/memcpy), so hardware
+//      FP state is stale after kernel execution. The FP trap handler
+//      (EC=0x07) loads from RegisterState when the Observer first touches FP.
+//   4. System register restore (SP_EL0, ELR_EL1, SPSR_EL1, TPIDR_EL0)
 //   5. GPR restore (x0 loaded last — it is the base pointer)
 //   6. eret to EL0
 // ---------------------------------------------------------------------------
 .global __restore_observer
 __restore_observer:
     // 1. TTBR0 switch — skip if the page table root is unchanged.
-    //    No TLB flush: epoch-based ASID allocation (D101) ensures no
-    //    two live Observers share a hardware ASID. All user pages are
-    //    nG=1 (ASID-tagged), so stale entries from other Observers
-    //    cannot be served. refresh_observer_asid (called before this
-    //    function) re-allocates stale ASIDs; the wrap path flushes.
     mrs     x9, ttbr0_el1
     cmp     x9, x1
     b.eq    .Lskip_ttbr
@@ -434,7 +433,27 @@ __restore_observer:
     bfi     x9, x2, #1, #1         // CNTKCTL[1] = clock_access[0]
     msr     cntkctl_el1, x9
 
-    // 3. System registers from RegisterState.
+    // 3. Lazy FP — check if this Observer's FP was already loaded.
+    //    TPIDR_EL1 → PerCoreData; fp_owner at offset 24.
+    mrs     x9, tpidr_el1
+    ldr     x10, [x9, #24]         // x10 = fp_owner
+    cmp     x10, x0                // Same Observer?
+    b.eq    .Lfp_same
+    // Different Observer — trap EL0 FP access (FPEN=0b01).
+    // Don't update fp_owner yet; the FP trap handler will.
+    mrs     x10, cpacr_el1
+    bic     x10, x10, #(3 << 20)   // Clear FPEN bits
+    orr     x10, x10, #(1 << 20)   // FPEN = 0b01 (EL0 traps, EL1 ok)
+    msr     cpacr_el1, x10
+    b       .Lfp_done
+.Lfp_same:
+    // Same Observer — FP was loaded last time it trapped. Enable access.
+    mrs     x10, cpacr_el1
+    orr     x10, x10, #(3 << 20)   // FPEN = 0b11 (no traps)
+    msr     cpacr_el1, x10
+.Lfp_done:
+
+    // 4. System registers from RegisterState.
     ldr     x9, [x0, #248]         // SP_EL0
     msr     sp_el0, x9
     ldr     x9, [x0, #256]         // PC → ELR_EL1
@@ -443,28 +462,6 @@ __restore_observer:
     msr     spsr_el1, x9
     ldr     x9, [x0, #272]         // TPIDR_EL0
     msr     tpidr_el0, x9
-
-    // 4. FP/SIMD — FPCR/FPSR first, then q0-q31.
-    ldr     x9, [x0, #800]
-    msr     fpcr, x9
-    ldr     x9, [x0, #808]
-    msr     fpsr, x9
-    ldp     q0, q1, [x0, #288]
-    ldp     q2, q3, [x0, #320]
-    ldp     q4, q5, [x0, #352]
-    ldp     q6, q7, [x0, #384]
-    ldp     q8, q9, [x0, #416]
-    ldp     q10, q11, [x0, #448]
-    ldp     q12, q13, [x0, #480]
-    ldp     q14, q15, [x0, #512]
-    ldp     q16, q17, [x0, #544]
-    ldp     q18, q19, [x0, #576]
-    ldp     q20, q21, [x0, #608]
-    ldp     q22, q23, [x0, #640]
-    ldp     q24, q25, [x0, #672]
-    ldp     q26, q27, [x0, #704]
-    ldp     q28, q29, [x0, #736]
-    ldp     q30, q31, [x0, #768]
 
     // 5. GPRs — x0 loaded last (it is the base pointer).
     ldp     x2, x3, [x0, #16]
