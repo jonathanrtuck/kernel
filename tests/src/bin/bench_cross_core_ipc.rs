@@ -3,6 +3,16 @@
 //! Ping-pong between two Observers with scheduling hints for different
 //! cores. Compare against same-core bench_pingpong to quantify the
 //! cross-core tax (D56 mailbox + IPI path).
+//!
+//! NOTE: currently measures same-core fast-path because:
+//! (1) DirectSwitch (D50) has no same-core check — fires regardless
+//!     of which core the receiver is on (communication.rs)
+//! (2) ObserverResume always enqueues to the local core's scheduler —
+//!     the Placement trait (D56) is defined but not wired into dispatch
+//! (3) observer_set_scheduling only updates profile, doesn't trigger
+//!     placement
+//! Until placement is wired in and DirectSwitch gains a same-core
+//! guard, this benchmark reports the same latency as bench_pingpong.
 
 #![no_std]
 #![no_main]

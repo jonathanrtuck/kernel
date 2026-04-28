@@ -123,7 +123,7 @@ for elf in "$RUST_TARGET"/bench_*; do
     if ! echo "$output" | grep -q "TEST PASSED"; then
         # Show the failure reason
         fault=$(echo "$output" | grep -m1 "FATAL FAULT" || true)
-        timeout=$(echo "$output" | grep -m1 "timeout" || true)
+        timeout=$(echo "$output" | grep -m1 "timeout after" || true)
         if [ -n "$fault" ]; then
             printf "%-35s  ${RED}ERROR${RESET} (%s)\n" "$name" "$fault"
         elif [ -n "$timeout" ]; then
@@ -164,8 +164,54 @@ for elf in "$RUST_TARGET"/bench_*; do
     while [ $i -lt $n ]; do
         remaining=$((n - i))
 
+        # Try 7-value group first (new format: min, median, p99, trimmed_mean, iqr, mean, count)
+        if [ $remaining -ge 7 ]; then
+            base_tag=$((16#${tags[$i]}))
+            is_group=true
+
+            for offset in 1 2 3 4 5 6; do
+                idx=$((i + offset))
+                expected_tag=$((base_tag + offset))
+                actual_tag=$((16#${tags[$idx]}))
+
+                if [ "$actual_tag" -ne "$expected_tag" ]; then
+                    is_group=false
+                    break
+                fi
+            done
+
+            if $is_group; then
+                min_val=$((16#${values[$i]}))
+                median_val=$((16#${values[$((i+1))]}))
+                p99_val=$((16#${values[$((i+2))]}))
+                tavg_val=$((16#${values[$((i+3))]}))
+                iqr_val=$((16#${values[$((i+4))]}))
+                mean_val=$((16#${values[$((i+5))]}))
+                count_val=$((16#${values[$((i+6))]}))
+
+                min_t=$(ticks_to_time "$min_val")
+                med_t=$(ticks_to_time "$median_val")
+                p99_t=$(ticks_to_time "$p99_val")
+                tavg_t=$(ticks_to_time "$tavg_val")
+                iqr_t=$(ticks_to_time "$iqr_val")
+
+                if ! $displayed; then
+                    printf "%-35s  " "$name"
+                else
+                    printf "%-35s  " ""
+                fi
+
+                printf "min=%-10s  med=%-10s  p99=%-10s  tavg=%-9s  iqr=%-9s  (%d iters)\n" \
+                    "$min_t" "$med_t" "$p99_t" "$tavg_t" "$iqr_t" "$count_val"
+
+                displayed=true
+                i=$((i + 7))
+                continue
+            fi
+        fi
+
+        # Fall back to 5-value group (legacy format)
         if [ $remaining -ge 5 ]; then
-            # Check if these 5 form a Stats group (consecutive tags)
             base_tag=$((16#${tags[$i]}))
             is_group=true
 

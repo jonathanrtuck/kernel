@@ -178,7 +178,53 @@ impl Stats {
         self.samples[n * 99 / 100]
     }
 
-    /// Emit 5 BENCH lines: tag+0=min, tag+1=median, tag+2=p99, tag+3=mean, tag+4=count.
+    /// Interquartile range (p75 - p25). Measures the spread of the
+    /// "clean" middle 50% of the distribution, ignoring outliers from
+    /// host interference or cold-start effects.
+    pub fn iqr(&mut self) -> u64 {
+        let n = self.sample_count();
+
+        if n < 4 {
+            return 0;
+        }
+
+        self.sort();
+        self.samples[n * 3 / 4] - self.samples[n / 4]
+    }
+
+    /// Mean of samples with the top and bottom 1% trimmed. Resistant
+    /// to outliers from host OS scheduling pauses — represents the
+    /// steady-state cost rather than the contaminated average.
+    pub fn trimmed_mean(&mut self) -> u64 {
+        let n = self.sample_count();
+
+        if n < 4 {
+            return self.mean();
+        }
+
+        self.sort();
+
+        let trim = n / 100;
+        let lo = if trim == 0 { 1 } else { trim };
+        let hi = n - lo;
+        let trimmed_count = (hi - lo) as u64;
+
+        if trimmed_count == 0 {
+            return self.mean();
+        }
+
+        let mut sum = 0u64;
+
+        for i in lo..hi {
+            sum += self.samples[i];
+        }
+
+        sum / trimmed_count
+    }
+
+    /// Emit 7 BENCH lines per group:
+    /// tag+0=min, tag+1=median, tag+2=p99, tag+3=trimmed_mean,
+    /// tag+4=iqr, tag+5=mean, tag+6=count.
     pub fn emit(&mut self, tag: u64) {
         self.sort();
         let n = self.sample_count();
@@ -188,8 +234,10 @@ impl Stats {
         bench_emit(tag, self.min, 0, 0);
         bench_emit(tag + 1, median, 0, 0);
         bench_emit(tag + 2, p99, 0, 0);
-        bench_emit(tag + 3, self.mean(), 0, 0);
-        bench_emit(tag + 4, self.count as u64, 0, 0);
+        bench_emit(tag + 3, self.trimmed_mean(), 0, 0);
+        bench_emit(tag + 4, self.iqr(), 0, 0);
+        bench_emit(tag + 5, self.mean(), 0, 0);
+        bench_emit(tag + 6, self.count as u64, 0, 0);
     }
 
     fn sample_count(&self) -> usize {
@@ -446,5 +494,67 @@ mod tests {
         // 2*10 warmup + 5*10 measure = 70 total calls
         assert_eq!(call_count, 70);
         assert_eq!(stats.count, 5);
+    }
+
+    #[test]
+    fn iqr_basic() {
+        let mut s = Stats::new();
+
+        // Quartiles: p25=25, p75=75 → iqr=50
+        for i in 0..100 {
+            s.record(i);
+        }
+
+        assert_eq!(s.iqr(), 50);
+    }
+
+    #[test]
+    fn iqr_tight_distribution() {
+        let mut s = Stats::new();
+
+        for _ in 0..100 {
+            s.record(42);
+        }
+
+        assert_eq!(s.iqr(), 0);
+    }
+
+    #[test]
+    fn iqr_too_few_samples() {
+        let mut s = Stats::new();
+
+        s.record(1);
+        s.record(2);
+
+        assert_eq!(s.iqr(), 0);
+    }
+
+    #[test]
+    fn trimmed_mean_removes_outliers() {
+        let mut s = Stats::new();
+
+        // 198 values of 100, plus extreme outliers at both ends
+        for _ in 0..198 {
+            s.record(100);
+        }
+
+        s.record(0);
+        s.record(100_000);
+
+        // Raw mean is pulled up by the 100k outlier
+        assert!(s.mean() > 500);
+        // Trimmed mean should be close to 100
+        assert!(s.trimmed_mean() <= 105);
+    }
+
+    #[test]
+    fn trimmed_mean_small_sample() {
+        let mut s = Stats::new();
+
+        s.record(10);
+        s.record(20);
+
+        // Too few samples to trim — falls back to raw mean
+        assert_eq!(s.trimmed_mean(), 15);
     }
 }
