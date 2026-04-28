@@ -2,12 +2,31 @@
 //!
 //! Timing, statistics, and workload calibration for benchmark binaries.
 //! All timing functions require clock_access=true (root Observer only).
+//!
+//! ## Measurement accuracy
+//!
+//! - ISB before every counter read serializes the pipeline, preventing
+//!   speculative reads from skewing measurements.
+//! - Stopwatch automatically subtracts the overhead of the two counter
+//!   reads (ISB+MRS pair) from each measurement.
+//! - `benchmark_batched()` amortizes counter overhead across many
+//!   operations, enabling sub-tick precision for fast operations.
+//!
+//! ## Bare-metal constraint
+//!
+//! No writable statics — benchmark binaries are flat binaries where the
+//! code page is mapped execute-only at EL0. All mutable state lives on
+//! the stack.
 
 use core::arch::asm;
 
 // ── Counter read ────────────────────────────────────────────────
 
-/// Read the virtual counter (CNTVCT_EL0) directly.
+/// Read the virtual counter (CNTVCT_EL0) with pipeline serialization.
+///
+/// ISB before the read ensures all prior instructions complete before
+/// the counter is sampled, preventing speculative/out-of-order reads
+/// that would skew measurements.
 ///
 /// Requires EL0 access enabled (CNTKCTL_EL1.EL0VCTEN=1), which the
 /// kernel sets for root Observer via clock_access=true (D66).
@@ -16,22 +35,51 @@ use core::arch::asm;
 pub fn cycles() -> u64 {
     let val: u64;
 
-    // SAFETY: MRS CNTVCT_EL0 reads the virtual count register.
-    // Requires EL0 access enabled (CNTKCTL_EL1.EL0VCTEN=1, which D66
-    // sets for root Observer via clock_access=true). This will fault
-    // at EL0 for child Observers without clock_access.
-    // nomem is safe: CNTVCT_EL0 is a read-only counter register (ARM ARM
-    // D13.11.5), the MRS does not access memory and has no side effects
-    // beyond reading the counter value.
+    // SAFETY: ISB serializes the pipeline so the counter read reflects
+    // the true completion point of all prior instructions. MRS reads
+    // the virtual counter. Together they provide a precise timestamp.
+    //
+    // nomem is NOT used: ISB acts as a completion barrier for prior
+    // memory operations — the compiler must not reorder loads/stores
+    // past this block.
     unsafe {
         asm!(
+            "isb",
             "mrs {val}, CNTVCT_EL0",
             val = out(reg) val,
-            options(nomem, nostack, preserves_flags),
+            options(nostack, preserves_flags),
         );
     }
 
     val
+}
+
+// ── Measurement overhead ───────────────────────────────────────
+
+/// Measure the overhead of a back-to-back cycles() pair.
+///
+/// Takes 8 consecutive counter reads and returns the minimum of the
+/// 7 intervals. The minimum is the best estimate of the true fixed
+/// cost (ISB+MRS+ISB+MRS); higher observations include interference.
+///
+/// No statics — result lives on the caller's stack.
+pub fn measure_overhead() -> u64 {
+    let t0 = cycles();
+    let t1 = cycles();
+    let t2 = cycles();
+    let t3 = cycles();
+    let t4 = cycles();
+    let t5 = cycles();
+    let t6 = cycles();
+    let t7 = cycles();
+
+    (t1 - t0)
+        .min(t2 - t1)
+        .min(t3 - t2)
+        .min(t4 - t3)
+        .min(t5 - t4)
+        .min(t6 - t5)
+        .min(t7 - t6)
 }
 
 // ── Benchmark emission ──────────────────────────────────────────
@@ -177,42 +225,101 @@ impl Stats {
 
 pub struct Stopwatch {
     start: u64,
+    overhead: u64,
 }
 
 impl Stopwatch {
+    /// Start timing. Measures the overhead of the counter-read pair
+    /// inline (8 reads, ~300 ns) and stores it for compensation.
     pub fn start() -> Self {
-        Self { start: cycles() }
+        let overhead = measure_overhead();
+
+        Self {
+            start: cycles(),
+            overhead,
+        }
     }
 
+    /// Start timing with a pre-measured overhead value. Use when the
+    /// harness has already calibrated (avoids redundant calibration
+    /// per iteration).
+    fn start_precalibrated(overhead: u64) -> Self {
+        Self {
+            start: cycles(),
+            overhead,
+        }
+    }
+
+    /// Elapsed ticks with measurement overhead subtracted.
     pub fn elapsed(&self) -> u64 {
-        cycles() - self.start
+        let raw = cycles() - self.start;
+
+        raw.saturating_sub(self.overhead)
     }
 
+    /// Elapsed ticks (compensated), then reset the start point.
     pub fn lap(&mut self) -> u64 {
         let now = cycles();
-        let elapsed = now - self.start;
+        let elapsed = (now - self.start).saturating_sub(self.overhead);
+
         self.start = now;
+
         elapsed
     }
 }
 
-// ── Benchmark harness ───────────────────────────────────────────
+// ── Benchmark harnesses ────────────────────────────────────────
 
 /// Run a benchmark: discard `warmup` iterations, then measure `measure`
-/// iterations, returning collected Stats.
+/// iterations, returning collected Stats. Calibrates once before the
+/// measurement loop.
 pub fn benchmark<F: FnMut()>(warmup: u32, measure: u32, mut body: F) -> Stats {
     for _ in 0..warmup {
         body();
     }
 
+    let overhead = measure_overhead();
     let mut stats = Stats::new();
 
     for _ in 0..measure {
-        let sw = Stopwatch::start();
+        let sw = Stopwatch::start_precalibrated(overhead);
 
         body();
 
         stats.record(sw.elapsed());
+    }
+
+    stats
+}
+
+/// Run a benchmark with batched timing for sub-tick operations.
+///
+/// Each measurement iteration runs `batch_size` calls of `body` in a
+/// single timed window, then records the per-call cost (total /
+/// batch_size). This amortizes the counter read overhead across many
+/// operations, enabling measurement of operations faster than one
+/// counter tick (~42 ns at 24 MHz).
+pub fn benchmark_batched<F: FnMut()>(
+    warmup: u32,
+    measure: u32,
+    batch_size: u32,
+    mut body: F,
+) -> Stats {
+    for _ in 0..warmup.saturating_mul(batch_size) {
+        body();
+    }
+
+    let overhead = measure_overhead();
+    let mut stats = Stats::new();
+
+    for _ in 0..measure {
+        let sw = Stopwatch::start_precalibrated(overhead);
+
+        for _ in 0..batch_size {
+            body();
+        }
+
+        stats.record(sw.elapsed() / batch_size as u64);
     }
 
     stats
@@ -327,5 +434,17 @@ mod tests {
         // 5 warmup + 10 measure = 15 total calls
         assert_eq!(call_count, 15);
         assert_eq!(stats.count, 10);
+    }
+
+    #[test]
+    fn benchmark_batched_harness() {
+        let mut call_count = 0u32;
+        let stats = benchmark_batched(2, 5, 10, || {
+            call_count += 1;
+        });
+
+        // 2*10 warmup + 5*10 measure = 70 total calls
+        assert_eq!(call_count, 70);
+        assert_eq!(stats.count, 5);
     }
 }

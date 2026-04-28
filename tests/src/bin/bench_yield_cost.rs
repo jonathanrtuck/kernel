@@ -1,7 +1,11 @@
 //! Voluntary preemption (Yield) overhead.
 //!
-//! Tight yield loop measuring the cost of a no-op reschedule when the
-//! yielding Observer is the only runnable one.
+//! Batched timing: each measurement runs BATCH yields in one timed
+//! window, divides by BATCH. This amortizes counter-read overhead,
+//! enabling sub-tick precision for this very fast syscall.
+//!
+//! Inlined (not using benchmark_batched harness) to avoid an extra
+//! call frame — Stats is ~8 KiB and the stack page is only 16 KiB.
 
 #![no_std]
 #![no_main]
@@ -11,13 +15,14 @@ use userspace_rs::bench::*;
 use userspace_rs::*;
 
 const WARMUP: u32 = 100;
-const MEASURE: u32 = 10_000;
+const MEASURE: u32 = 1_000;
+const BATCH: u32 = 100;
 const TAG: u64 = 0x200;
 
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.start")]
 extern "C" fn _start() -> ! {
-    for _ in 0..WARMUP {
+    for _ in 0..WARMUP * BATCH {
         yield_cpu();
     }
 
@@ -26,9 +31,11 @@ extern "C" fn _start() -> ! {
     for _ in 0..MEASURE {
         let sw = Stopwatch::start();
 
-        yield_cpu();
+        for _ in 0..BATCH {
+            yield_cpu();
+        }
 
-        stats.record(sw.elapsed());
+        stats.record(sw.elapsed() / BATCH as u64);
     }
 
     stats.emit(TAG);

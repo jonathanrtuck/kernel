@@ -3,7 +3,7 @@
 #
 # Builds the kernel and all bench_*.rs binaries, runs each under the
 # hypervisor, collects BENCH lines from serial output, and formats a
-# results table.
+# results table with human-readable time units.
 #
 # ── Benchmark protocol ──────────────────────────────────────────────
 #
@@ -32,6 +32,34 @@ KERNEL="$PROJECT_DIR/target/aarch64-unknown-none/debug/kernel"
 HYPERVISOR="$HOME/.local/bin/hypervisor"
 LLVM_OBJCOPY="$(find "$(rustc --print sysroot)/lib/rustlib" -name 'llvm-objcopy' 2>/dev/null | head -1)"
 TIMEOUT=30
+
+# ── Counter frequency ─────────────────────────────────────────────
+
+FREQ=$(sysctl -n hw.tbfrequency 2>/dev/null || echo 24000000)
+
+ticks_to_time() {
+    local ticks=$1
+    local ns=$(( ticks * 1000000000 / FREQ ))
+
+    if [ "$ns" -ge 1000000000 ]; then
+        # >= 1s: show as seconds with 3 decimal places
+        local s=$((ns / 1000000000))
+        local ms=$(( (ns / 1000000) % 1000 ))
+        printf "%d.%03ds" "$s" "$ms"
+    elif [ "$ns" -ge 1000000 ]; then
+        # >= 1ms: show as milliseconds with 2 decimal places
+        local ms=$((ns / 1000000))
+        local us=$(( (ns / 1000) % 1000 ))
+        printf "%d.%02dms" "$ms" "$((us / 10))"
+    elif [ "$ns" -ge 1000 ]; then
+        # >= 1µs: show as microseconds with 2 decimal places
+        local us=$((ns / 1000))
+        local frac=$((ns % 1000))
+        printf "%d.%02dµs" "$us" "$((frac / 10))"
+    else
+        printf "%dns" "$ns"
+    fi
+}
 
 # ── Preflight checks ──────────────────────────────────────────────
 
@@ -69,6 +97,8 @@ BENCH_COUNT=0
 ERROR_COUNT=0
 
 echo ""
+info "counter frequency: $(printf "%'d" $FREQ) Hz ($(( FREQ / 1000000 )) MHz, 1 tick = $((1000000000 / FREQ))ns)"
+echo ""
 printf "${BOLD}%-35s  %s${RESET}\n" "benchmark" "results"
 printf "%-35s  %s\n" "-----------------------------------" "-------"
 
@@ -91,7 +121,16 @@ for elf in "$RUST_TARGET"/bench_*; do
 
     # Check for clean exit
     if ! echo "$output" | grep -q "TEST PASSED"; then
-        printf "%-35s  ${RED}ERROR${RESET} (no TEST PASSED)\n" "$name"
+        # Show the failure reason
+        fault=$(echo "$output" | grep -m1 "FATAL FAULT" || true)
+        timeout=$(echo "$output" | grep -m1 "timeout" || true)
+        if [ -n "$fault" ]; then
+            printf "%-35s  ${RED}ERROR${RESET} (%s)\n" "$name" "$fault"
+        elif [ -n "$timeout" ]; then
+            printf "%-35s  ${RED}ERROR${RESET} (timeout)\n" "$name"
+        else
+            printf "%-35s  ${RED}ERROR${RESET} (no TEST PASSED)\n" "$name"
+        fi
         ERROR_COUNT=$((ERROR_COUNT + 1))
         continue
     fi
@@ -148,14 +187,19 @@ for elf in "$RUST_TARGET"/bench_*; do
                 mean_val=$((16#${values[$((i+3))]}))
                 count_val=$((16#${values[$((i+4))]}))
 
+                min_t=$(ticks_to_time "$min_val")
+                med_t=$(ticks_to_time "$median_val")
+                p99_t=$(ticks_to_time "$p99_val")
+                avg_t=$(ticks_to_time "$mean_val")
+
                 if ! $displayed; then
                     printf "%-35s  " "$name"
                 else
                     printf "%-35s  " ""
                 fi
 
-                printf "min=%-8d  median=%-8d  p99=%-8d  mean=%-8d  (%d iters)\n" \
-                    "$min_val" "$median_val" "$p99_val" "$mean_val" "$count_val"
+                printf "min=%-10s  med=%-10s  p99=%-10s  avg=%-10s  (%d iters)\n" \
+                    "$min_t" "$med_t" "$p99_t" "$avg_t" "$count_val"
 
                 displayed=true
                 i=$((i + 5))
@@ -166,6 +210,7 @@ for elf in "$RUST_TARGET"/bench_*; do
         # Not part of a Stats group — display raw
         tag_dec=$((16#${tags[$i]}))
         val_dec=$((16#${values[$i]}))
+        val_t=$(ticks_to_time "$val_dec")
 
         if ! $displayed; then
             printf "%-35s  " "$name"
@@ -173,7 +218,7 @@ for elf in "$RUST_TARGET"/bench_*; do
             printf "%-35s  " ""
         fi
 
-        printf "tag=0x%x  value=%d\n" "$tag_dec" "$val_dec"
+        printf "tag=0x%x  value=%d (%s)\n" "$tag_dec" "$val_dec" "$val_t"
 
         displayed=true
         i=$((i + 1))
