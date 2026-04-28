@@ -319,9 +319,25 @@ impl<S: Scheduler> CoreState<S> {
     /// written to x6/x7. If the receiver's table is full, the cap slot is
     /// written as CAP_ABSENT (D40 fault delivery is wired in D100).
     #[cfg(any(target_os = "none", test))]
-    fn deliver_message(observer_ptr: NonNull<Observer>, message: &field::Message) {
+    fn deliver_message(
+        observer_ptr: NonNull<Observer>,
+        message: &field::Message,
+        kernel_state: &KernelState,
+    ) {
         let user_cap_slot = Self::install_cap_or_absent(observer_ptr, message.user_cap.as_ref());
         let reply_cap_slot = Self::install_cap_or_absent(observer_ptr, message.reply_cap.as_ref());
+
+        // D30: update receiver's compute_aggregate if a Time cap was installed.
+        if user_cap_slot != crate::capability::CAP_ABSENT
+            && let Some(tc) = &message.user_cap
+            && tc.object_type == crate::capability::ObjectType::Time
+        {
+            let times = kernel_state.times.acquire();
+
+            if let Some(time) = times.get(tc.object_id) {
+                crate::frame::cores::observer_add_compute(observer_ptr, time.compute_units);
+            }
+        }
 
         crate::frame::cores::write_message_to_registers(
             observer_ptr,
@@ -546,6 +562,20 @@ impl<S: Scheduler> CoreState<S> {
                         return DispatchResult::Resume(sender_ptr);
                     }
                 };
+                // D30: sender extracted a Time cap — update their compute_aggregate.
+                if let Some(ref tc) = user_cap
+                    && tc.object_type == crate::capability::ObjectType::Time
+                {
+                    let times = kernel_state.times.acquire();
+
+                    if let Some(time) = times.get(tc.object_id) {
+                        crate::frame::cores::observer_remove_compute(
+                            sender_ptr,
+                            time.compute_units,
+                        );
+                    }
+                }
+
                 // Step 6: construct Message from IPC registers.
                 let message = crate::field::Message {
                     data: ipc_regs.data,
@@ -587,7 +617,7 @@ impl<S: Scheduler> CoreState<S> {
                 }
 
                 // Step 8: dispatch outcome per D79 matrix.
-                self.dispatch_send_outcome(sender_ptr, outcome)
+                self.dispatch_send_outcome(sender_ptr, outcome, kernel_state)
             }
             crate::syscall::IpcOperation::Receive => {
                 // Get a NonNull<Field> for the WaitEntry.
@@ -607,7 +637,7 @@ impl<S: Scheduler> CoreState<S> {
                 drop(fields_guard);
 
                 // Dispatch outcome per D79 matrix.
-                self.dispatch_receive_outcome(sender_ptr, outcome)
+                self.dispatch_receive_outcome(sender_ptr, outcome, kernel_state)
             }
             crate::syscall::IpcOperation::Call => {
                 // D106: check reply field BEFORE extracting user cap (move
@@ -643,6 +673,20 @@ impl<S: Scheduler> CoreState<S> {
                         return DispatchResult::Resume(sender_ptr);
                     }
                 };
+                // D30: sender extracted a Time cap — update their compute_aggregate.
+                if let Some(ref tc) = user_cap
+                    && tc.object_type == crate::capability::ObjectType::Time
+                {
+                    let times = kernel_state.times.acquire();
+
+                    if let Some(time) = times.get(tc.object_id) {
+                        crate::frame::cores::observer_remove_compute(
+                            sender_ptr,
+                            time.compute_units,
+                        );
+                    }
+                }
+
                 let reply_cap = reply_info.map(|(object_type, object_id, stored_generation)| {
                     crate::capability::TransferredCap {
                         object_type,
@@ -713,6 +757,7 @@ impl<S: Scheduler> CoreState<S> {
                     ipc_regs.label,
                     badge.0,
                     reply_cap,
+                    kernel_state,
                 )
             }
             crate::syscall::IpcOperation::ReplyRecv => {
@@ -867,7 +912,7 @@ impl<S: Scheduler> CoreState<S> {
                     crate::frame::cores::observer_free_cap_slot(sender_ptr, handle_index);
                 }
 
-                self.dispatch_reply_recv_outcome(sender_ptr, outcome)
+                self.dispatch_reply_recv_outcome(sender_ptr, outcome, kernel_state)
             }
             crate::syscall::IpcOperation::Yield => unreachable!("Yield handled above"),
         }
@@ -877,6 +922,7 @@ impl<S: Scheduler> CoreState<S> {
         &mut self,
         field: &mut field::Field,
         message: field::Message,
+        kernel_state: &KernelState,
     ) -> Result<(), field::FieldError> {
         if field.is_full() && field.waiters_head.is_none() {
             field.pending_kernel_message = Some(message);
@@ -884,7 +930,7 @@ impl<S: Scheduler> CoreState<S> {
             return Ok(());
         }
 
-        self.deliver_kernel_message_inner(field, message)
+        self.deliver_kernel_message_inner(field, message, kernel_state)
     }
 
     #[cfg(any(target_os = "none", test))]
@@ -892,11 +938,12 @@ impl<S: Scheduler> CoreState<S> {
         &mut self,
         field: &mut field::Field,
         message: field::Message,
+        kernel_state: &KernelState,
     ) -> Result<(), field::FieldError> {
         match crate::communication::send(field, message) {
             Ok(crate::communication::SendOutcome::Enqueued) => Ok(()),
             Ok(crate::communication::SendOutcome::WokeReceiver(receiver_ptr, msg)) => {
-                Self::deliver_message(receiver_ptr, &msg);
+                Self::deliver_message(receiver_ptr, &msg, kernel_state);
 
                 let _ = crate::frame::cores::observer_unblock(receiver_ptr);
 
@@ -913,6 +960,7 @@ impl<S: Scheduler> CoreState<S> {
         &mut self,
         field: &mut field::Field,
         message: field::Message,
+        _kernel_state: &KernelState,
     ) -> Result<(), field::FieldError> {
         field.enqueue(message)
     }
@@ -922,6 +970,7 @@ impl<S: Scheduler> CoreState<S> {
         &mut self,
         sender_ptr: NonNull<Observer>,
         outcome: crate::communication::SendOutcome,
+        kernel_state: &KernelState,
     ) -> DispatchResult {
         match outcome {
             crate::communication::SendOutcome::Enqueued => {
@@ -933,7 +982,7 @@ impl<S: Scheduler> CoreState<S> {
             crate::communication::SendOutcome::WokeReceiver(receiver_ptr, message) => {
                 // Row 2: deliver message to receiver's registers, enqueue receiver.
                 crate::frame::cores::clear_ipc_carry(sender_ptr);
-                Self::deliver_message(receiver_ptr, &message);
+                Self::deliver_message(receiver_ptr, &message, kernel_state);
 
                 let _ = crate::frame::cores::observer_unblock(receiver_ptr);
 
@@ -954,11 +1003,12 @@ impl<S: Scheduler> CoreState<S> {
         &mut self,
         receiver_ptr: NonNull<Observer>,
         outcome: crate::communication::ReceiveOutcome,
+        kernel_state: &KernelState,
     ) -> DispatchResult {
         match outcome {
             crate::communication::ReceiveOutcome::Received(message) => {
                 // Row 3: message available, deliver to receiver's registers.
-                Self::deliver_message(receiver_ptr, &message);
+                Self::deliver_message(receiver_ptr, &message, kernel_state);
 
                 DispatchResult::Resume(receiver_ptr)
             }
@@ -982,8 +1032,9 @@ impl<S: Scheduler> CoreState<S> {
         &mut self,
         sender_ptr: NonNull<Observer>,
         outcome: crate::communication::CallOutcome,
+        kernel_state: &KernelState,
     ) -> DispatchResult {
-        self.dispatch_call_outcome_with_metadata(sender_ptr, outcome, 0, 0, None)
+        self.dispatch_call_outcome_with_metadata(sender_ptr, outcome, 0, 0, None, kernel_state)
     }
 
     #[cfg(any(target_os = "none", test))]
@@ -1002,6 +1053,7 @@ impl<S: Scheduler> CoreState<S> {
         label: u64,
         badge: u64,
         reply_cap: Option<crate::capability::TransferredCap>,
+        kernel_state: &KernelState,
     ) -> DispatchResult {
         // D16: caller always blocks on Call, regardless of outcome.
 
@@ -1063,7 +1115,7 @@ impl<S: Scheduler> CoreState<S> {
 
                     self.scheduler.dequeue(sender_ptr);
                     // Deliver via slow path (installs reply cap in receiver's table).
-                    Self::deliver_message(receiver_ptr, &denial_message);
+                    Self::deliver_message(receiver_ptr, &denial_message, kernel_state);
 
                     // Unblock receiver and enqueue it.
                     let _ = crate::frame::cores::observer_unblock(receiver_ptr);
@@ -1078,7 +1130,7 @@ impl<S: Scheduler> CoreState<S> {
                 let _ = crate::frame::cores::observer_set_blocked(sender_ptr);
 
                 self.scheduler.dequeue(sender_ptr);
-                Self::deliver_message(receiver_ptr, &message);
+                Self::deliver_message(receiver_ptr, &message, kernel_state);
 
                 // Unblock receiver and enqueue it.
                 let _ = crate::frame::cores::observer_unblock(receiver_ptr);
@@ -1102,10 +1154,11 @@ impl<S: Scheduler> CoreState<S> {
         &mut self,
         server_ptr: NonNull<Observer>,
         outcome: crate::communication::ReplyRecvOutcome,
+        kernel_state: &KernelState,
     ) -> DispatchResult {
         // ── Reply phase: deliver reply to client if waiting ──────────
         if let Some(delivery) = outcome.reply_delivery {
-            Self::deliver_message(delivery.client, &delivery.message);
+            Self::deliver_message(delivery.client, &delivery.message, kernel_state);
 
             let _ = crate::frame::cores::observer_unblock(delivery.client);
 
@@ -1116,7 +1169,7 @@ impl<S: Scheduler> CoreState<S> {
         match outcome.receive_outcome {
             crate::communication::ReceiveOutcome::Received(message) => {
                 // Row 8: new message available, server continues.
-                Self::deliver_message(server_ptr, &message);
+                Self::deliver_message(server_ptr, &message, kernel_state);
 
                 DispatchResult::Resume(server_ptr)
             }
@@ -1870,6 +1923,11 @@ impl<S: Scheduler> CoreState<S> {
                 }
             }
             TypedOperation::Mint => {
+                // D38: Time is linear — Mint forbidden (same constraint as Clone).
+                if object_type == ObjectType::Time {
+                    return typed_error(SyscallError::CloneForbidden);
+                }
+
                 // D97: create attenuated cap with optional badge.
                 // args[0] = requested rights mask, args[1] = badge value.
                 // If badge == CAP_ABSENT, keep the source badge.
@@ -2789,7 +2847,9 @@ impl<S: Scheduler> CoreState<S> {
                     let message = pulsar.fire_message(current_ticks);
 
                     if let Some(target_field) = fields.get_mut(entry.field_id)
-                        && self.deliver_kernel_message(target_field, message).is_err()
+                        && self
+                            .deliver_kernel_message(target_field, message, kernel_state)
+                            .is_err()
                     {
                         pulsar.record_overrun();
                     }
@@ -2919,7 +2979,7 @@ impl<S: Scheduler> CoreState<S> {
                     // receiver (via communication::send). D18: if the queue
                     // is full and no waiter, the message is dropped — IRQ
                     // messages are edge-triggered notifications.
-                    let _ = self.deliver_kernel_message_inner(target_field, message);
+                    let _ = self.deliver_kernel_message_inner(target_field, message, kernel_state);
                 }
                 // else: stale route — generation mismatch, silently ignore.
             }
@@ -3122,7 +3182,7 @@ impl<S: Scheduler> CoreState<S> {
         match outcome {
             crate::fault::FaultDeliveryOutcome::Enqueued => self.schedule_next(),
             crate::fault::FaultDeliveryOutcome::WokeReceiver(receiver_ptr, message) => {
-                Self::deliver_message(receiver_ptr, &message);
+                Self::deliver_message(receiver_ptr, &message, kernel_state);
 
                 let _ = crate::frame::cores::observer_unblock(receiver_ptr);
 
@@ -4722,6 +4782,7 @@ mod tests {
     /// scheduling change.
     #[test]
     fn test_d79_send_enqueued_sender_continues() {
+        let ks = make_kernel_state();
         let mut core = make_core_state();
         let mut sender = make_observer_with_registers();
         let sender_ptr = NonNull::from(&mut sender);
@@ -4731,7 +4792,7 @@ mod tests {
         core.scheduler.enqueue(sender_ptr);
 
         let outcome = crate::communication::SendOutcome::Enqueued;
-        let result = core.dispatch_send_outcome(sender_ptr, outcome);
+        let result = core.dispatch_send_outcome(sender_ptr, outcome, &ks);
 
         match result {
             DispatchResult::Resume(resumed) => {
@@ -4756,6 +4817,7 @@ mod tests {
     /// enqueued, message written to receiver's registers.
     #[test]
     fn test_d79_send_woke_receiver_enqueues_receiver() {
+        let ks = make_kernel_state();
         let mut core = make_core_state();
         let mut sender = make_observer_with_registers();
         let mut receiver = make_observer_with_registers();
@@ -4768,7 +4830,7 @@ mod tests {
 
         let message = make_message(42, 0xBEEF);
         let outcome = crate::communication::SendOutcome::WokeReceiver(receiver_ptr, message);
-        let result = core.dispatch_send_outcome(sender_ptr, outcome);
+        let result = core.dispatch_send_outcome(sender_ptr, outcome, &ks);
 
         // Sender continues.
         match result {
@@ -4796,6 +4858,7 @@ mod tests {
     /// D79 Row 2: Verify message is written to receiver's registers.
     #[test]
     fn test_d79_send_woke_receiver_writes_registers() {
+        let ks = make_kernel_state();
         let mut core = make_core_state();
         let mut sender = make_observer_with_registers();
         let mut receiver = make_observer_with_registers();
@@ -4813,7 +4876,7 @@ mod tests {
         };
         let outcome = crate::communication::SendOutcome::WokeReceiver(receiver_ptr, message);
 
-        core.dispatch_send_outcome(sender_ptr, outcome);
+        core.dispatch_send_outcome(sender_ptr, outcome, &ks);
 
         // Read the receiver's registers to verify the message was written.
         let regs = crate::frame::cores::read_ipc_registers(receiver_ptr);
@@ -4831,6 +4894,7 @@ mod tests {
     /// D79 Row 3: Receive with Received — receiver continues with message.
     #[test]
     fn test_d79_receive_received_continues() {
+        let ks = make_kernel_state();
         let mut core = make_core_state();
         let mut receiver = make_observer_with_registers();
         let receiver_ptr = NonNull::from(&mut receiver);
@@ -4841,7 +4905,7 @@ mod tests {
 
         let message = make_message(99, 0x42);
         let outcome = crate::communication::ReceiveOutcome::Received(message);
-        let result = core.dispatch_receive_outcome(receiver_ptr, outcome);
+        let result = core.dispatch_receive_outcome(receiver_ptr, outcome, &ks);
 
         match result {
             DispatchResult::Resume(resumed) => {
@@ -4857,6 +4921,7 @@ mod tests {
     /// D79 Row 3: Verify message written to receiver's registers.
     #[test]
     fn test_d79_receive_received_writes_registers() {
+        let ks = make_kernel_state();
         let mut core = make_core_state();
         let mut receiver = make_observer_with_registers();
         let receiver_ptr = NonNull::from(&mut receiver);
@@ -4872,7 +4937,7 @@ mod tests {
         };
         let outcome = crate::communication::ReceiveOutcome::Received(message);
 
-        core.dispatch_receive_outcome(receiver_ptr, outcome);
+        core.dispatch_receive_outcome(receiver_ptr, outcome, &ks);
 
         let regs = crate::frame::cores::read_ipc_registers(receiver_ptr);
 
@@ -4886,6 +4951,7 @@ mod tests {
     /// D79 Row 4: Receive with Blocked — receiver dequeued, schedule_next.
     #[test]
     fn test_d79_receive_blocked_dequeues_receiver() {
+        let ks = make_kernel_state();
         let mut core = make_core_state();
         let mut receiver = make_observer_with_registers();
         let mut next = make_observer();
@@ -4898,7 +4964,7 @@ mod tests {
         core.scheduler.enqueue(next_ptr);
 
         let outcome = crate::communication::ReceiveOutcome::Blocked;
-        let result = core.dispatch_receive_outcome(receiver_ptr, outcome);
+        let result = core.dispatch_receive_outcome(receiver_ptr, outcome, &ks);
 
         // Receiver must be dequeued.
         assert!(
@@ -4921,6 +4987,7 @@ mod tests {
     /// D79 Row 4: Receive Blocked with no other runnable — Idle.
     #[test]
     fn test_d79_receive_blocked_no_runnable_returns_idle() {
+        let ks = make_kernel_state();
         let mut core = make_core_state();
         let mut receiver = make_observer_with_registers();
         let receiver_ptr = NonNull::from(&mut receiver);
@@ -4930,7 +4997,7 @@ mod tests {
         core.scheduler.enqueue(receiver_ptr);
 
         let outcome = crate::communication::ReceiveOutcome::Blocked;
-        let result = core.dispatch_receive_outcome(receiver_ptr, outcome);
+        let result = core.dispatch_receive_outcome(receiver_ptr, outcome, &ks);
 
         assert!(
             matches!(result, DispatchResult::Idle),
@@ -4943,6 +5010,7 @@ mod tests {
     /// D79 Row 5: Call with Enqueued — sender dequeued (blocks on reply).
     #[test]
     fn test_d79_call_enqueued_dequeues_sender() {
+        let ks = make_kernel_state();
         let mut core = make_core_state();
         let mut sender = make_observer_with_registers();
         let mut next = make_observer();
@@ -4955,7 +5023,7 @@ mod tests {
         core.scheduler.enqueue(next_ptr);
 
         let outcome = crate::communication::CallOutcome::Enqueued;
-        let result = core.dispatch_call_outcome(sender_ptr, outcome);
+        let result = core.dispatch_call_outcome(sender_ptr, outcome, &ks);
 
         // Sender must be dequeued (blocking on reply field).
         assert!(
@@ -4980,6 +5048,7 @@ mod tests {
     /// direct-switched to with ResumeFastPath.
     #[test]
     fn test_d79_call_direct_switch_approved() {
+        let ks = make_kernel_state();
         let mut core = make_core_state();
         let mut sender = make_observer_with_registers();
         let mut receiver = make_observer_with_registers();
@@ -4992,7 +5061,7 @@ mod tests {
 
         // RoundRobin always approves should_switch_to.
         let outcome = crate::communication::CallOutcome::DirectSwitch(receiver_ptr);
-        let result = core.dispatch_call_outcome(sender_ptr, outcome);
+        let result = core.dispatch_call_outcome(sender_ptr, outcome, &ks);
 
         // Must be ResumeFastPath (x0-x3 pass through).
         match result {
@@ -5023,6 +5092,7 @@ mod tests {
     /// on the second Call in a Call+ReplyRecv loop.
     #[test]
     fn test_d79_call_direct_switch_writes_data_to_receiver() {
+        let ks = make_kernel_state();
         let mut core = make_core_state();
         let mut sender = make_observer_with_registers();
         let mut receiver = make_observer_with_registers();
@@ -5056,6 +5126,7 @@ mod tests {
             sender_ptr, outcome, 7,    // label
             0x42, // badge
             None, // no reply cap
+            &ks,
         );
 
         assert!(
@@ -5086,6 +5157,7 @@ mod tests {
     /// message written to receiver registers.
     #[test]
     fn test_d79_call_woke_receiver_slow_path() {
+        let ks = make_kernel_state();
         let mut core = make_core_state();
         let mut sender = make_observer_with_registers();
         let mut receiver = make_observer_with_registers();
@@ -5099,7 +5171,7 @@ mod tests {
         let message = make_message(77, 0xCAFE);
         let outcome =
             crate::communication::CallOutcome::WokeReceiverSlowPath(receiver_ptr, message);
-        let result = core.dispatch_call_outcome(sender_ptr, outcome);
+        let result = core.dispatch_call_outcome(sender_ptr, outcome, &ks);
 
         // Sender must be dequeued.
         assert!(
@@ -5127,6 +5199,7 @@ mod tests {
     /// D79 Row 7: Verify message written to receiver registers on slow path.
     #[test]
     fn test_d79_call_woke_receiver_slow_path_writes_registers() {
+        let ks = make_kernel_state();
         let mut core = make_core_state();
         let mut sender = make_observer_with_registers();
         let mut receiver = make_observer_with_registers();
@@ -5145,7 +5218,7 @@ mod tests {
         let outcome =
             crate::communication::CallOutcome::WokeReceiverSlowPath(receiver_ptr, message);
 
-        core.dispatch_call_outcome(sender_ptr, outcome);
+        core.dispatch_call_outcome(sender_ptr, outcome, &ks);
 
         let regs = crate::frame::cores::read_ipc_registers(receiver_ptr);
 
@@ -5160,6 +5233,7 @@ mod tests {
     /// enqueued if reply was delivered.
     #[test]
     fn test_d79_reply_recv_received_server_continues() {
+        let ks = make_kernel_state();
         let mut core = make_core_state();
         let mut server = make_observer_with_registers();
         let mut client = make_observer_with_registers();
@@ -5179,7 +5253,7 @@ mod tests {
             }),
             receive_outcome: crate::communication::ReceiveOutcome::Received(recv_message),
         };
-        let result = core.dispatch_reply_recv_outcome(server_ptr, outcome);
+        let result = core.dispatch_reply_recv_outcome(server_ptr, outcome, &ks);
 
         // Server continues with the new message.
         match result {
@@ -5202,6 +5276,7 @@ mod tests {
     /// D79 Row 8: ReplyRecv with Received but no client waiting.
     #[test]
     fn test_d79_reply_recv_received_no_client() {
+        let ks = make_kernel_state();
         let mut core = make_core_state();
         let mut server = make_observer_with_registers();
         let server_ptr = NonNull::from(&mut server);
@@ -5215,7 +5290,7 @@ mod tests {
             reply_delivery: None,
             receive_outcome: crate::communication::ReceiveOutcome::Received(recv_message),
         };
-        let result = core.dispatch_reply_recv_outcome(server_ptr, outcome);
+        let result = core.dispatch_reply_recv_outcome(server_ptr, outcome, &ks);
 
         match result {
             DispatchResult::Resume(resumed) => {
@@ -5231,6 +5306,7 @@ mod tests {
     /// D79 Row 8: Verify both reply and receive messages written correctly.
     #[test]
     fn test_d79_reply_recv_received_writes_registers() {
+        let ks = make_kernel_state();
         let mut core = make_core_state();
         let mut server = make_observer_with_registers();
         let mut client = make_observer_with_registers();
@@ -5261,7 +5337,7 @@ mod tests {
             receive_outcome: crate::communication::ReceiveOutcome::Received(recv_message),
         };
 
-        core.dispatch_reply_recv_outcome(server_ptr, outcome);
+        core.dispatch_reply_recv_outcome(server_ptr, outcome, &ks);
 
         // Client gets reply message.
         let client_regs = crate::frame::cores::read_ipc_registers(client_ptr);
@@ -5279,6 +5355,7 @@ mod tests {
     /// D79 Row 9: ReplyRecv with Blocked — server dequeued, client enqueued.
     #[test]
     fn test_d79_reply_recv_blocked_server_dequeued() {
+        let ks = make_kernel_state();
         let mut core = make_core_state();
         let mut server = make_observer_with_registers();
         let mut client = make_observer_with_registers();
@@ -5297,7 +5374,7 @@ mod tests {
             }),
             receive_outcome: crate::communication::ReceiveOutcome::Blocked,
         };
-        let result = core.dispatch_reply_recv_outcome(server_ptr, outcome);
+        let result = core.dispatch_reply_recv_outcome(server_ptr, outcome, &ks);
 
         // Server must be dequeued (blocked).
         assert!(
@@ -5325,6 +5402,7 @@ mod tests {
     /// D79 Row 9: ReplyRecv Blocked with no client — server dequeued, Idle.
     #[test]
     fn test_d79_reply_recv_blocked_no_client_idle() {
+        let ks = make_kernel_state();
         let mut core = make_core_state();
         let mut server = make_observer_with_registers();
         let server_ptr = NonNull::from(&mut server);
@@ -5337,7 +5415,7 @@ mod tests {
             reply_delivery: None,
             receive_outcome: crate::communication::ReceiveOutcome::Blocked,
         };
-        let result = core.dispatch_reply_recv_outcome(server_ptr, outcome);
+        let result = core.dispatch_reply_recv_outcome(server_ptr, outcome, &ks);
 
         assert!(
             !core.scheduler.contains(server_ptr),
@@ -5418,6 +5496,7 @@ mod tests {
     /// D79: Send x WokeReceiver must NOT use ResumeFastPath (D50 excludes Send).
     #[test]
     fn test_d79_send_woke_receiver_never_fast_path() {
+        let ks = make_kernel_state();
         let mut core = make_core_state();
         let mut sender = make_observer_with_registers();
         let mut receiver = make_observer_with_registers();
@@ -5428,7 +5507,7 @@ mod tests {
 
         let message = make_message(1, 0);
         let outcome = crate::communication::SendOutcome::WokeReceiver(receiver_ptr, message);
-        let result = core.dispatch_send_outcome(sender_ptr, outcome);
+        let result = core.dispatch_send_outcome(sender_ptr, outcome, &ks);
 
         assert!(
             !matches!(result, DispatchResult::ResumeFastPath(_)),
@@ -5439,6 +5518,7 @@ mod tests {
     /// D79: Call x DirectSwitch approved must return ResumeFastPath.
     #[test]
     fn test_d79_call_direct_switch_uses_fast_path() {
+        let ks = make_kernel_state();
         let mut core = make_core_state();
         let mut sender = make_observer_with_registers();
         let mut receiver = make_observer_with_registers();
@@ -5450,7 +5530,7 @@ mod tests {
         core.scheduler.enqueue(sender_ptr);
 
         let outcome = crate::communication::CallOutcome::DirectSwitch(receiver_ptr);
-        let result = core.dispatch_call_outcome(sender_ptr, outcome);
+        let result = core.dispatch_call_outcome(sender_ptr, outcome, &ks);
 
         assert!(
             matches!(result, DispatchResult::ResumeFastPath(_)),
@@ -5461,6 +5541,7 @@ mod tests {
     /// D79: Call x WokeReceiverSlowPath must NOT use ResumeFastPath.
     #[test]
     fn test_d79_call_slow_path_never_fast_path() {
+        let ks = make_kernel_state();
         let mut core = make_core_state();
         let mut sender = make_observer_with_registers();
         let mut receiver = make_observer_with_registers();
@@ -5474,7 +5555,7 @@ mod tests {
         let message = make_message(1, 0);
         let outcome =
             crate::communication::CallOutcome::WokeReceiverSlowPath(receiver_ptr, message);
-        let result = core.dispatch_call_outcome(sender_ptr, outcome);
+        let result = core.dispatch_call_outcome(sender_ptr, outcome, &ks);
 
         assert!(
             !matches!(result, DispatchResult::ResumeFastPath(_)),
@@ -5485,6 +5566,7 @@ mod tests {
     /// D79: Call x Enqueued with no other runnable — Idle.
     #[test]
     fn test_d79_call_enqueued_no_runnable_idle() {
+        let ks = make_kernel_state();
         let mut core = make_core_state();
         let mut sender = make_observer_with_registers();
         let sender_ptr = NonNull::from(&mut sender);
@@ -5494,7 +5576,7 @@ mod tests {
         core.scheduler.enqueue(sender_ptr);
 
         let outcome = crate::communication::CallOutcome::Enqueued;
-        let result = core.dispatch_call_outcome(sender_ptr, outcome);
+        let result = core.dispatch_call_outcome(sender_ptr, outcome, &ks);
 
         assert!(
             matches!(result, DispatchResult::Idle),
@@ -5505,6 +5587,7 @@ mod tests {
     /// D79: ReplyRecv delivers reply message to client registers.
     #[test]
     fn test_d79_reply_recv_delivers_reply_to_client() {
+        let ks = make_kernel_state();
         let mut core = make_core_state();
         let mut server = make_observer_with_registers();
         let mut client = make_observer_with_registers();
@@ -5530,7 +5613,7 @@ mod tests {
             receive_outcome: crate::communication::ReceiveOutcome::Blocked,
         };
 
-        core.dispatch_reply_recv_outcome(server_ptr, outcome);
+        core.dispatch_reply_recv_outcome(server_ptr, outcome, &ks);
 
         let client_regs = crate::frame::cores::read_ipc_registers(client_ptr);
 
@@ -8242,6 +8325,7 @@ mod tests {
     /// table. Registers x6 and x7 carry the encoded handles.
     #[test]
     fn test_d96_deliver_message_installs_caps() {
+        let ks = make_kernel_state();
         let mut receiver = crate::observer::Observer::test_with_cap_table(16);
         let entries = receiver.cap_table;
         let receiver_ptr = NonNull::from(&mut receiver);
@@ -8267,7 +8351,7 @@ mod tests {
             }),
         };
 
-        CoreState::<RoundRobin>::deliver_message(receiver_ptr, &message);
+        CoreState::<RoundRobin>::deliver_message(receiver_ptr, &message, &ks);
 
         // Read receiver's registers to check x6 and x7.
         let regs = crate::frame::cores::read_ipc_registers(receiver_ptr);
@@ -8323,6 +8407,7 @@ mod tests {
     /// D96: deliver_message with no caps writes CAP_ABSENT to x6 and x7.
     #[test]
     fn test_d96_deliver_message_no_caps_writes_absent() {
+        let ks = make_kernel_state();
         let mut receiver = crate::observer::Observer::test_with_registers();
 
         receiver.compute_aggregate = 0;
@@ -8336,7 +8421,7 @@ mod tests {
             reply_cap: None,
         };
 
-        CoreState::<RoundRobin>::deliver_message(receiver_ptr, &message);
+        CoreState::<RoundRobin>::deliver_message(receiver_ptr, &message, &ks);
 
         let regs = crate::frame::cores::read_ipc_registers(receiver_ptr);
 
@@ -8397,6 +8482,7 @@ mod tests {
     /// RoundRobin always approves, so this tests the fast-path cap install.
     #[test]
     fn test_d96_direct_switch_approved_installs_reply_cap() {
+        let ks = make_kernel_state();
         let mut receiver = crate::observer::Observer::test_with_cap_table(16);
         let receiver_entries = receiver.cap_table;
 
@@ -8420,8 +8506,9 @@ mod tests {
             send_once: true,
             stored_generation: 0,
         });
-        let result = core
-            .dispatch_call_outcome_with_metadata(sender_ptr, outcome, 0x1ABE, 0xBAD6E, reply_cap);
+        let result = core.dispatch_call_outcome_with_metadata(
+            sender_ptr, outcome, 0x1ABE, 0xBAD6E, reply_cap, &ks,
+        );
 
         // RoundRobin approves → fast path.
         assert!(
@@ -8468,6 +8555,7 @@ mod tests {
     /// Uses WokeReceiverSlowPath as a proxy since RoundRobin always approves.
     #[test]
     fn test_d96_slow_path_delivers_reply_cap() {
+        let ks = make_kernel_state();
         let mut receiver = crate::observer::Observer::test_with_cap_table(16);
         let receiver_entries = receiver.cap_table;
 
@@ -8506,7 +8594,8 @@ mod tests {
         };
         let outcome =
             crate::communication::CallOutcome::WokeReceiverSlowPath(receiver_ptr, message);
-        let _result = core.dispatch_call_outcome_with_metadata(sender_ptr, outcome, 0, 0, None);
+        let _result =
+            core.dispatch_call_outcome_with_metadata(sender_ptr, outcome, 0, 0, None, &ks);
         // Receiver must have both caps installed.
         let recv_regs = crate::frame::cores::read_ipc_registers(receiver_ptr);
 
