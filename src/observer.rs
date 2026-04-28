@@ -241,6 +241,11 @@ pub struct Observer {
     /// Wait-state linkage for blocked/pending states (D18/D19).
     pub wait_state: WaitState,
 
+    /// D18: fault message stored when the handler Field's queue was full.
+    /// Set in the Deferred path of handle_fault, consumed by the receive
+    /// drain when a slot opens and the pending entry is processed.
+    pub deferred_fault_message: Option<crate::field::Message>,
+
     /// Saved syscall context for cap table growth replay (D-3.1b, D40).
     ///
     /// Set when a syscall triggers CapTableFull fault. The Observer's
@@ -494,6 +499,7 @@ impl Observer {
             throughput: DEFAULT_THROUGHPUT,
             clock_access: false,
             wait_state: WaitState::None,
+            deferred_fault_message: None,
             saved_syscall: SavedSyscallContext::None,
             refcount: 1,
             generation: AtomicU64::new(0),
@@ -537,7 +543,7 @@ mod tests {
 
     #[test]
     fn observer_layout() {
-        assert_eq!(core::mem::size_of::<Observer>(), 136);
+        assert_eq!(core::mem::size_of::<Observer>(), 232);
     }
 
     #[test]

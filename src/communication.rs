@@ -175,19 +175,15 @@ pub fn receive(field: &mut Field, receiver: &mut WaitEntry) -> ReceiveOutcome {
 
             field.pending_head = next;
 
-            // Re-enqueue a placeholder message into the freed slot. The actual
-            // pending message content will be resolved by Wave 3 (Observer
-            // context). Zero-filled placeholder satisfies the queue_length
-            // invariant: the slot freed by dequeue is immediately refilled.
-            let placeholder = Message {
-                data: [0; 4],
-                label: 0,
-                badge: Badge(0),
-                user_cap: None,
-                reply_cap: None,
-            };
-            // The slot was just freed by dequeue, so enqueue cannot fail.
-            let _ = field.enqueue(placeholder);
+            // D18: retrieve the deferred fault message stored on the
+            // pending Observer and enqueue it into the freed slot.
+            let observer_ptr = crate::frame::fields::waiter_observer(pending_ptr);
+
+            if let Some(deferred_msg) =
+                crate::frame::cores::observer_take_deferred_message(observer_ptr)
+            {
+                let _ = field.enqueue(deferred_msg);
+            }
         }
 
         if field.badge_tracking {
@@ -643,13 +639,26 @@ mod tests {
 
         assert!(field.is_full(), "precondition: queue must be full");
 
-        // Simulate a pending entry (kernel-as-sender deferred message).
-        let mut pending_entry = make_wait_entry();
+        // Simulate a pending entry with a real Observer holding the
+        // deferred fault message (D18: the message is stored on the
+        // Observer, not in the WaitEntry).
+        let mut pending_observer = crate::observer::Observer::test_default();
+
+        pending_observer.deferred_fault_message = Some(make_message(99, 0));
+
+        let pending_observer_ptr = NonNull::from(&mut pending_observer);
+        let field_ptr = NonNull::from(&field);
+        let mut pending_entry = WaitEntry {
+            observer: pending_observer_ptr,
+            field: field_ptr,
+            prev: None,
+            next: None,
+        };
 
         field.pending_head = Some(NonNull::from(&mut pending_entry));
 
         // Receive dequeues message 10, freeing one slot. The pending entry
-        // should be consumed and its message delivered into the freed slot.
+        // should be consumed and its deferred message enqueued.
         let mut receiver = make_wait_entry();
         let outcome = receive(&mut field, &mut receiver);
 
@@ -670,10 +679,15 @@ mod tests {
             field.pending_head.is_none(),
             "D18: pending_head must be None after receive drains the pending entry"
         );
-        // The freed slot must be filled by the pending message — queue stays full.
+        // The freed slot must be filled by the deferred message — queue stays full.
         assert_eq!(
             field.queue_length, 2,
             "D18: queue must be refilled from pending after dequeue"
+        );
+        // The Observer's deferred message must have been consumed.
+        assert!(
+            pending_observer.deferred_fault_message.is_none(),
+            "D18: deferred message must be taken from Observer"
         );
     }
 

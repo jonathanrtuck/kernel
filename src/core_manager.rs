@@ -2863,11 +2863,26 @@ impl<S: Scheduler> CoreState<S> {
                 self.scheduler.enqueue(receiver_ptr);
                 self.schedule_next()
             }
-            crate::fault::FaultDeliveryOutcome::Deferred => {
-                // D18: the faulting Observer should be linked into the
-                // handler Field's pending list. Pending list linkage is
-                // not yet wired — the fault stays deferred until the
-                // handler Field drains a slot.
+            crate::fault::FaultDeliveryOutcome::Deferred(message) => {
+                // D18: link the faulting Observer into the handler
+                // Field's pending list. The message is stored on the
+                // Observer and delivered when the next receive() frees
+                // a slot.
+                let mut fields = kernel_state.fields.acquire();
+
+                if let Some(handler_field) = fields.get_mut(handler_field_id) {
+                    let field_ptr = core::ptr::NonNull::from(&*handler_field);
+                    let entry = crate::frame::cores::observer_prepare_pending(
+                        observer_ptr,
+                        field_ptr,
+                        message,
+                    );
+
+                    entry.next = handler_field.pending_head;
+                    handler_field.pending_head = Some(core::ptr::NonNull::from(&*entry));
+                }
+
+                drop(fields);
                 self.schedule_next()
             }
             crate::fault::FaultDeliveryOutcome::HandlerUnavailable => {
@@ -5251,6 +5266,7 @@ mod tests {
             throughput: crate::observer::DEFAULT_THROUGHPUT,
             clock_access: false,
             wait_state: crate::observer::WaitState::None,
+            deferred_fault_message: None,
             saved_syscall: crate::observer::SavedSyscallContext::None,
             backing_va_base: 0,
             backing_size: 0,
@@ -9702,6 +9718,99 @@ mod tests {
             matches!(result, DispatchResult::Idle),
             "D100: deferred delivery returns schedule_next result"
         );
+
+        // Verify the Observer was linked into the handler Field's pending list.
+        {
+            let fields = ks.fields.acquire();
+            let handler = fields.get(field_id).unwrap();
+
+            assert!(
+                handler.pending_head.is_some(),
+                "D18: deferred fault must link Observer into pending list"
+            );
+        }
+
+        // Verify the deferred message was stored on the Observer.
+        assert!(
+            obs.deferred_fault_message.is_some(),
+            "D18: deferred fault message must be stored on Observer"
+        );
+    }
+
+    /// D18/D100: full deferred fault lifecycle — defer, then drain on receive.
+    #[test]
+    fn test_d18_deferred_fault_delivered_on_receive() {
+        let ks = make_kernel_state();
+        let field_id = make_field_in_arena(&ks, 1);
+
+        // Fill the handler Field's queue.
+        {
+            let mut fields = ks.fields.acquire();
+
+            fields
+                .get_mut(field_id)
+                .unwrap()
+                .enqueue(crate::field::Message::timer_fire(Badge(0), 0, 0))
+                .unwrap();
+        }
+
+        // Dispatch a fault — handler Field is full, so it defers.
+        let mut core = make_core_state();
+        let mut obs = make_observer_with_handler(Some((field_id, 0)));
+        let ptr = NonNull::from(&mut obs);
+
+        core.current = Some(ptr);
+
+        let fault = crate::fault::FaultType::VmFault {
+            space_slot: 3,
+            byte_offset: 0,
+            access: crate::fault::AccessType::Read,
+        };
+
+        core.dispatch_fault(fault, &ks);
+
+        // Now receive from the handler Field — this drains the first message
+        // and should enqueue the deferred fault message.
+        let mut fields = ks.fields.acquire();
+        let handler = fields.get_mut(field_id).unwrap();
+        let mut receiver_entry = crate::observer::WaitEntry {
+            observer: NonNull::dangling(),
+            field: NonNull::from(&*handler),
+            prev: None,
+            next: None,
+        };
+        let outcome = crate::communication::receive(handler, &mut receiver_entry);
+
+        // First receive gets the original timer_fire message.
+        assert!(
+            matches!(outcome, crate::communication::ReceiveOutcome::Received(_)),
+            "D18: first receive must return the queued message"
+        );
+
+        // The pending entry should be consumed and the deferred fault
+        // message enqueued — the queue should still have 1 message.
+        assert!(
+            handler.pending_head.is_none(),
+            "D18: pending list must be drained after receive"
+        );
+        assert_eq!(
+            handler.queue_length, 1,
+            "D18: deferred fault message must be enqueued after drain"
+        );
+
+        // Second receive gets the deferred fault message.
+        let outcome2 = crate::communication::receive(handler, &mut receiver_entry);
+
+        match outcome2 {
+            crate::communication::ReceiveOutcome::Received(msg) => {
+                assert_eq!(
+                    msg.label,
+                    crate::field::LABEL_VM_FAULT,
+                    "D18: drained message must be the deferred VM fault"
+                );
+            }
+            _ => panic!("D18: second receive must return the deferred fault message"),
+        }
     }
 
     /// D100: all four fault types deliver through dispatch_fault.
@@ -10058,6 +10167,7 @@ mod tests {
             throughput: crate::observer::DEFAULT_THROUGHPUT,
             clock_access: false,
             wait_state: crate::observer::WaitState::None,
+            deferred_fault_message: None,
             saved_syscall: crate::observer::SavedSyscallContext::None,
             backing_va_base: 0,
             backing_size: 0,
@@ -10231,6 +10341,7 @@ mod tests {
             throughput: crate::observer::DEFAULT_THROUGHPUT,
             clock_access: false,
             wait_state: crate::observer::WaitState::None,
+            deferred_fault_message: None,
             saved_syscall: crate::observer::SavedSyscallContext::None,
             backing_va_base: 0,
             backing_size: 0,
@@ -10485,6 +10596,7 @@ mod tests {
             throughput: crate::observer::DEFAULT_THROUGHPUT,
             clock_access: false,
             wait_state: crate::observer::WaitState::None,
+            deferred_fault_message: None,
             saved_syscall: crate::observer::SavedSyscallContext::None,
             backing_va_base: 0,
             backing_size: 0,

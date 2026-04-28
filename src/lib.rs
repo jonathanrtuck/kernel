@@ -886,14 +886,25 @@ mod integration_tests {
 
         assert!(field.is_full(), "precondition: field queue must be full");
 
-        // 2. Set a pending_head simulating a deferred kernel-as-sender message
-        //    (fault or interrupt) that could not deliver because the queue was full.
-        let mut pending_entry = make_wait_entry();
+        // 2. Set a pending_head with a real Observer holding a deferred
+        //    fault message (D18: message stored on the Observer).
+        let mut pending_observer = crate::observer::Observer::test_default();
+
+        pending_observer.deferred_fault_message = Some(make_message(99, 0));
+
+        let pending_observer_ptr = NonNull::from(&mut pending_observer);
+        let field_ptr = NonNull::from(&field);
+        let mut pending_entry = WaitEntry {
+            observer: pending_observer_ptr,
+            field: field_ptr,
+            prev: None,
+            next: None,
+        };
 
         field.pending_head = Some(NonNull::from(&mut pending_entry));
 
-        // 3. Receive: must dequeue the first message (label 10), consume the
-        //    pending entry, and refill the freed slot with a placeholder.
+        // 3. Receive: must dequeue the first message (label 10), consume
+        //    the pending entry, and enqueue its deferred message.
         let mut receiver = make_wait_entry();
         let outcome = receive(&mut field, &mut receiver);
 
@@ -915,8 +926,8 @@ mod integration_tests {
             field.pending_head.is_none(),
             "D18: pending_head must be None after receive drains the pending entry"
         );
-        // 6. The queue must still be full: the freed slot was immediately
-        //    refilled by the placeholder from the pending entry.
+        // 6. The queue must still be full: the freed slot was filled by
+        //    the deferred fault message from the pending Observer.
         assert_eq!(
             field.queue_length, 2,
             "D18: queue must be refilled from pending — length stays at capacity"

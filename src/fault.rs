@@ -12,7 +12,7 @@
 //!       kernel-as-root-fault-handler (log + PSCI SYSTEM_OFF).
 
 use crate::capability::{self, Badge, ObjectType, Rights, TransferredCap};
-use crate::field::{self, Field, FieldError};
+use crate::field::{self, Field};
 use crate::observer::Observer;
 use core::ptr::NonNull;
 
@@ -167,10 +167,10 @@ pub enum FaultDeliveryOutcome {
     WokeReceiver(NonNull<Observer>, field::Message),
 
     /// Handler Field queue is full (D18). The faulting Observer should
-    /// be linked into the handler Field's pending list. The next
-    /// receive() that frees a slot will drain the pending entry and
-    /// deliver the deferred fault message.
-    Deferred,
+    /// be linked into the handler Field's pending list. The message is
+    /// returned so the caller can store it on the Observer for re-delivery
+    /// when the next receive() frees a slot.
+    Deferred(field::Message),
 
     /// The fault handler cap at slot 0 is invalid: empty slot, wrong
     /// type, or stale generation. D68 pager unavailability — the caller
@@ -247,17 +247,18 @@ pub fn deliver_fault(
     }
 
     // No waiter — try to enqueue into the handler Field's queue.
+    // Check capacity first so we can return the message on Deferred.
+    if handler_field.is_full() {
+        return FaultDeliveryOutcome::Deferred(message);
+    }
+
     match handler_field.enqueue(message) {
         Ok(()) => FaultDeliveryOutcome::Enqueued,
-        Err(FieldError::QueueFull) => {
-            // D18: handler Field full. The faulting Observer will be linked
-            // into the pending list by the caller.
-            FaultDeliveryOutcome::Deferred
-        }
         Err(_) => {
-            // No other error variants from enqueue currently exist.
-            // Defensive: treat as deferred.
-            FaultDeliveryOutcome::Deferred
+            // Should not happen after is_full check, but construct a
+            // replacement message rather than losing the fault.
+            let fallback = fault.to_message(handler_badge, observer_cap);
+            FaultDeliveryOutcome::Deferred(fallback)
         }
     }
 }
@@ -677,7 +678,7 @@ mod tests {
         let result = deliver_fault(fault, &mut handler_field, Badge(0), ObjectId(0), 0);
 
         assert!(
-            matches!(result, FaultDeliveryOutcome::Deferred),
+            matches!(result, FaultDeliveryOutcome::Deferred(_)),
             "D80/D18: full queue must defer"
         );
         assert_eq!(
@@ -941,7 +942,7 @@ mod tests {
         let fault = FaultType::CapTableFull;
         let result = deliver_fault(fault, &mut handler_field, Badge(0), ObjectId(0), 0);
 
-        assert!(matches!(result, FaultDeliveryOutcome::Deferred));
+        assert!(matches!(result, FaultDeliveryOutcome::Deferred(_)));
     }
 
     /// D80: zero-capacity handler Field with waiter still delivers directly.

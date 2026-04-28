@@ -491,6 +491,56 @@ pub fn observer_prepare_wait(
     }
 }
 
+/// Prepare an Observer's wait_state for the pending list (D18).
+///
+/// Like `observer_prepare_wait` but for fault-deferred delivery. Sets
+/// wait_state to Single with the given field pointer and stores the
+/// deferred fault message on the Observer. Returns a mutable reference
+/// to the WaitEntry for linking into the Field's pending_head list.
+#[cfg(any(target_os = "none", test))]
+pub fn observer_prepare_pending(
+    observer_ptr: NonNull<Observer>,
+    field_ptr: NonNull<crate::field::Field>,
+    message: crate::field::Message,
+) -> &'static mut crate::observer::WaitEntry {
+    use crate::observer::{WaitEntry, WaitState};
+
+    // SAFETY: observer_ptr points to a live Observer in Faulted state.
+    // A4 non-reentrancy guarantees exclusive access on this core.
+    unsafe {
+        let observer = &mut *observer_ptr.as_ptr();
+
+        observer.deferred_fault_message = Some(message);
+        observer.wait_state = WaitState::Single(WaitEntry {
+            observer: observer_ptr,
+            field: field_ptr,
+            prev: None,
+            next: None,
+        });
+
+        match &mut observer.wait_state {
+            WaitState::Single(entry) => &mut *(entry as *mut WaitEntry),
+            _ => core::hint::unreachable_unchecked(),
+        }
+    }
+}
+
+/// Take the deferred fault message from an Observer (D18).
+///
+/// Called by the receive drain path when processing a pending list entry.
+/// Returns the stored message and clears the Observer's deferred state.
+pub fn observer_take_deferred_message(
+    observer_ptr: core::ptr::NonNull<crate::observer::Observer>,
+) -> Option<crate::field::Message> {
+    // SAFETY: observer_ptr points to a live Observer. The caller holds
+    // &mut Field (pending list owner), and A4 non-reentrancy applies.
+    unsafe {
+        let observer = &mut *observer_ptr.as_ptr();
+
+        observer.deferred_fault_message.take()
+    }
+}
+
 /// Call reply_recv with two distinct &mut Field references (D16).
 ///
 /// Safe dispatch cannot obtain two &mut Field references from the arena
