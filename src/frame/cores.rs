@@ -1105,6 +1105,28 @@ pub fn observer_set_clock_access(observer_ptr: NonNull<Observer>) {
     }
 }
 
+/// Add compute units to an Observer's cached scheduling aggregate (D30).
+///
+/// Called when a Time cap is installed into this Observer's cap table.
+#[cfg(any(target_os = "none", test))]
+pub fn observer_add_compute(observer_ptr: NonNull<Observer>, units: u32) {
+    // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy.
+    unsafe {
+        (*observer_ptr.as_ptr()).add_compute(units);
+    }
+}
+
+/// Remove compute units from an Observer's cached scheduling aggregate (D30).
+///
+/// Called when a Time cap is removed from this Observer's cap table.
+#[cfg(any(target_os = "none", test))]
+pub fn observer_remove_compute(observer_ptr: NonNull<Observer>, units: u32) {
+    // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy.
+    unsafe {
+        (*observer_ptr.as_ptr()).remove_compute(units);
+    }
+}
+
 // ── Observer restore helpers for EL0 exception exit ─────────────
 
 /// Extract the restore parameters for an Observer (D74, D76).

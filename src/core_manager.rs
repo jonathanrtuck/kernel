@@ -474,7 +474,46 @@ impl<S: Scheduler> CoreState<S> {
             }
         }
 
-        let target_field = match fields_guard.get_mut(object_id) {
+        let badge = entry.badge;
+        let is_send_once = entry.is_send_once();
+        let handle_index = crate::capability::Handle::decode(raw_handle).index;
+        // D67 generation check + D45 routing via shared access.
+        let effective_field_id = {
+            let target = match fields_guard.get(object_id) {
+                Some(f) => f,
+                None => {
+                    drop(fields_guard);
+
+                    crate::frame::cores::write_ipc_error(
+                        sender_ptr,
+                        crate::syscall::SyscallError::InvalidCap,
+                    );
+
+                    return DispatchResult::Resume(sender_ptr);
+                }
+            };
+            let live_gen = target.generation.load(Ordering::Acquire);
+
+            if entry.stored_generation != live_gen {
+                drop(fields_guard);
+
+                crate::frame::cores::write_ipc_error(
+                    sender_ptr,
+                    crate::syscall::SyscallError::StaleCap,
+                );
+
+                return DispatchResult::Resume(sender_ptr);
+            }
+
+            // D45: check badge-range routing for send-side operations.
+            match operation {
+                crate::syscall::IpcOperation::Send | crate::syscall::IpcOperation::Call => {
+                    target.resolve_route(badge.0).unwrap_or(object_id)
+                }
+                _ => object_id,
+            }
+        };
+        let target_field = match fields_guard.get_mut(effective_field_id) {
             Some(f) => f,
             None => {
                 drop(fields_guard);
@@ -487,24 +526,6 @@ impl<S: Scheduler> CoreState<S> {
                 return DispatchResult::Resume(sender_ptr);
             }
         };
-
-        // D67: generation check.
-        let live_gen = target_field.generation.load(Ordering::Acquire);
-
-        if entry.stored_generation != live_gen {
-            drop(fields_guard);
-
-            crate::frame::cores::write_ipc_error(
-                sender_ptr,
-                crate::syscall::SyscallError::StaleCap,
-            );
-
-            return DispatchResult::Resume(sender_ptr);
-        }
-
-        let badge = entry.badge;
-        let is_send_once = entry.is_send_once();
-        let handle_index = crate::capability::Handle::decode(raw_handle).index;
 
         trace_point!(self, 1); // cap resolved + field looked up
 
@@ -525,7 +546,6 @@ impl<S: Scheduler> CoreState<S> {
                         return DispatchResult::Resume(sender_ptr);
                     }
                 };
-
                 // Step 6: construct Message from IPC registers.
                 let message = crate::field::Message {
                     data: ipc_regs.data,
@@ -569,7 +589,6 @@ impl<S: Scheduler> CoreState<S> {
                 // Step 8: dispatch outcome per D79 matrix.
                 self.dispatch_send_outcome(sender_ptr, outcome)
             }
-
             crate::syscall::IpcOperation::Receive => {
                 // Get a NonNull<Field> for the WaitEntry.
                 let field_ptr = NonNull::from(&*target_field);
@@ -590,7 +609,6 @@ impl<S: Scheduler> CoreState<S> {
                 // Dispatch outcome per D79 matrix.
                 self.dispatch_receive_outcome(sender_ptr, outcome)
             }
-
             crate::syscall::IpcOperation::Call => {
                 // D106: check reply field BEFORE extracting user cap (move
                 // semantics would lose the cap on early return).
@@ -697,7 +715,6 @@ impl<S: Scheduler> CoreState<S> {
                     reply_cap,
                 )
             }
-
             crate::syscall::IpcOperation::ReplyRecv => {
                 // ReplyRecv needs TWO fields:
                 // - reply_field: from x5 handle (already resolved above as target_field)
@@ -723,7 +740,6 @@ impl<S: Scheduler> CoreState<S> {
                         return DispatchResult::Resume(sender_ptr);
                     }
                 };
-
                 // Check recv entry is a Field with RECEIVE right.
                 let (recv_type, recv_id) = match recv_entry.object {
                     Some(pair) => pair,
@@ -790,7 +806,6 @@ impl<S: Scheduler> CoreState<S> {
                         return DispatchResult::Resume(sender_ptr);
                     }
                 };
-
                 let recv_live_gen = recv_field.generation.load(Ordering::Acquire);
 
                 if recv_entry.stored_generation != recv_live_gen {
@@ -854,7 +869,6 @@ impl<S: Scheduler> CoreState<S> {
 
                 self.dispatch_reply_recv_outcome(sender_ptr, outcome)
             }
-
             crate::syscall::IpcOperation::Yield => unreachable!("Yield handled above"),
         }
     }
@@ -1264,6 +1278,18 @@ impl<S: Scheduler> CoreState<S> {
 
                             if let Some(field) = fields.get_mut(source_id) {
                                 field.badge_increment(source_entry.badge);
+                            }
+                        }
+
+                        // D30: update target Observer's cached scheduling aggregate.
+                        if source_type == ObjectType::Time {
+                            let times = kernel_state.times.acquire();
+
+                            if let Some(time) = times.get(source_id) {
+                                crate::frame::cores::observer_add_compute(
+                                    target_ptr,
+                                    time.compute_units,
+                                );
                             }
                         }
 
@@ -1769,22 +1795,68 @@ impl<S: Scheduler> CoreState<S> {
                             }
                         }
 
-                        // D17/D73: badge tracking on closed Field caps.
-                        if closed_type == ObjectType::Field {
-                            let mut fields = kernel_state.fields.acquire();
+                        // D11: decrement refcount and handle type-specific cleanup.
+                        // D73: send-once caps are not counted in refcount.
+                        match closed_type {
+                            ObjectType::Field => {
+                                let mut fields = kernel_state.fields.acquire();
 
-                            if let Some(field) = fields.get_mut(closed_id) {
-                                if entry_send_once {
-                                    // D73: send-once close → direct closure
-                                    // (no refcount — consumed-by-use exempt).
-                                    if field.badge_tracking {
-                                        field.enqueue_badge_closure(entry_badge);
+                                if let Some(field) = fields.get_mut(closed_id) {
+                                    if entry_send_once {
+                                        // D73: send-once close → direct closure
+                                        // (no refcount — consumed-by-use exempt).
+                                        if field.badge_tracking {
+                                            field.enqueue_badge_closure(entry_badge);
+                                        }
+                                    } else {
+                                        // D17: refcounted close → closure when last.
+                                        if field.badge_decrement(entry_badge) {
+                                            field.enqueue_badge_closure(entry_badge);
+                                        }
+
+                                        field.refcount = field.refcount.saturating_sub(1);
                                     }
-                                } else if field.badge_decrement(entry_badge) {
-                                    // D17: refcounted close → closure when last.
-                                    field.enqueue_badge_closure(entry_badge);
                                 }
                             }
+                            ObjectType::Observer if !entry_send_once => {
+                                let mut observers = kernel_state.observers.acquire();
+
+                                if let Some(obs) = observers.get_mut(closed_id) {
+                                    obs.refcount = obs.refcount.saturating_sub(1);
+                                }
+                            }
+                            ObjectType::Space if !entry_send_once => {
+                                let mut spaces = kernel_state.spaces.acquire();
+
+                                if let Some(space) = spaces.get_mut(closed_id) {
+                                    space.refcount = space.refcount.saturating_sub(1);
+                                }
+                            }
+                            ObjectType::Time if !entry_send_once => {
+                                let times = kernel_state.times.acquire();
+
+                                if let Some(time) = times.get(closed_id) {
+                                    let units = time.compute_units;
+
+                                    drop(times);
+                                    // D30: update caller's cached scheduling aggregate.
+                                    crate::frame::cores::observer_remove_compute(sender_ptr, units);
+
+                                    let mut times = kernel_state.times.acquire();
+
+                                    if let Some(time) = times.get_mut(closed_id) {
+                                        time.refcount = time.refcount.saturating_sub(1);
+                                    }
+                                }
+                            }
+                            ObjectType::Pulsar if !entry_send_once => {
+                                let mut pulsars = kernel_state.pulsars.acquire();
+
+                                if let Some(pulsar) = pulsars.get_mut(closed_id) {
+                                    pulsar.refcount = pulsar.refcount.saturating_sub(1);
+                                }
+                            }
+                            _ => {}
                         }
 
                         typed_ok(0)
@@ -1986,13 +2058,35 @@ impl<S: Scheduler> CoreState<S> {
                     generation: core::sync::atomic::AtomicU64::new(0),
                 };
                 let mut spaces = kernel_state.spaces.acquire();
-                let target = match spaces.get_mut(object_id) {
-                    Some(t) => t,
-                    None => return typed_error(SyscallError::InvalidCap),
+                let merge_result = {
+                    let target = match spaces.get_mut(object_id) {
+                        Some(t) => t,
+                        None => return typed_error(SyscallError::InvalidCap),
+                    };
+
+                    target.merge(&source_snapshot)
                 };
 
-                match target.merge(&source_snapshot) {
-                    Ok(()) => typed_ok(0),
+                match merge_result {
+                    Ok(()) => {
+                        // Source absorbed into target. Revoke and free source.
+                        if let Some(source) = spaces.get(source_id) {
+                            source.generation.fetch_add(1, Ordering::Release);
+                        }
+
+                        spaces.free(source_id);
+                        drop(spaces);
+
+                        // Free the source cap slot in the caller's table.
+                        let source_decoded = capability::Handle::decode(source_handle);
+
+                        crate::frame::cores::observer_free_cap_slot(
+                            sender_ptr,
+                            source_decoded.index,
+                        );
+
+                        typed_ok(0)
+                    }
                     Err(crate::space::SpaceError::NotAdjacent) => {
                         typed_error(SyscallError::NotAdjacent)
                     }
@@ -2821,10 +2915,11 @@ impl<S: Scheduler> CoreState<S> {
                 if live_gen == route_generation {
                     // Route is valid — construct and deliver message.
                     let message = field::Message::device_irq(badge, irq);
-                    // D18: if the queue is full, the message is dropped.
-                    // IRQ messages are edge-triggered — the interrupt stays
-                    // masked until explicitly acked. No pending list needed.
-                    let _ = target_field.enqueue(message);
+                    // Use deliver_kernel_message_inner to wake any blocked
+                    // receiver (via communication::send). D18: if the queue
+                    // is full and no waiter, the message is dropped — IRQ
+                    // messages are edge-triggered notifications.
+                    let _ = self.deliver_kernel_message_inner(target_field, message);
                 }
                 // else: stale route — generation mismatch, silently ignore.
             }
