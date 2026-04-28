@@ -1,9 +1,12 @@
 #!/bin/bash
 # Run benchmark binaries and collect results.
 #
-# Builds the kernel and all bench_*.rs binaries, runs each under the
-# hypervisor, collects BENCH lines from serial output, and formats a
-# results table with human-readable time units.
+# Usage:
+#   scripts/bench                    Run benchmarks (3 trials, best-of-3)
+#   scripts/bench --trials 1         Single trial (fast, noisier)
+#   scripts/bench --save FILE        Save results for future comparison
+#   scripts/bench --compare FILE     Compare against a saved baseline
+#   scripts/bench --save F --compare F  Update baseline and show delta
 #
 # ── Benchmark protocol ──────────────────────────────────────────────
 #
@@ -11,14 +14,19 @@
 #   BENCH <x0> <x1> <x2> <x3>  (16-char zero-padded hex)
 # then advances PC and resumes the Observer.
 #
-# Stats::emit produces 5 consecutive BENCH lines per group:
-#   tag+0=min, tag+1=median, tag+2=p99, tag+3=mean, tag+4=count.
-# The script detects these groups and formats them as summary lines.
+# Stats::emit produces 7 consecutive BENCH lines per group:
+#   tag+0=min, tag+1=median, tag+2=p99, tag+3=trimmed_mean,
+#   tag+4=iqr, tag+5=mean, tag+6=count.
+#
+# Multiple trials: each benchmark runs TRIALS times. For stats groups,
+# the trial with the lowest median is selected (least host interference).
+# For raw values, the minimum is taken.
 
 set -eo pipefail
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
 DIM='\033[2m'
 BOLD='\033[1m'
 RESET='\033[0m'
@@ -32,6 +40,24 @@ KERNEL="$PROJECT_DIR/target/aarch64-unknown-none/debug/kernel"
 HYPERVISOR="$HOME/.local/bin/hypervisor"
 LLVM_OBJCOPY="$(find "$(rustc --print sysroot)/lib/rustlib" -name 'llvm-objcopy' 2>/dev/null | head -1)"
 TIMEOUT=30
+TRIALS=3
+SAVE_FILE=""
+COMPARE_FILE=""
+
+# ── Argument parsing ──────────────────────────────────────────────
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --trials)  TRIALS="$2"; shift 2 ;;
+        --save)    SAVE_FILE="$2"; shift 2 ;;
+        --compare) COMPARE_FILE="$2"; shift 2 ;;
+        -h|--help)
+            sed -n '2,/^$/{ s/^# //; s/^#//; p }' "$0"
+            exit 0
+            ;;
+        *) echo "unknown option: $1" >&2; exit 1 ;;
+    esac
+done
 
 # ── Counter frequency ─────────────────────────────────────────────
 
@@ -42,17 +68,14 @@ ticks_to_time() {
     local ns=$(( ticks * 1000000000 / FREQ ))
 
     if [ "$ns" -ge 1000000000 ]; then
-        # >= 1s: show as seconds with 3 decimal places
         local s=$((ns / 1000000000))
         local ms=$(( (ns / 1000000) % 1000 ))
         printf "%d.%03ds" "$s" "$ms"
     elif [ "$ns" -ge 1000000 ]; then
-        # >= 1ms: show as milliseconds with 2 decimal places
         local ms=$((ns / 1000000))
         local us=$(( (ns / 1000) % 1000 ))
         printf "%d.%02dms" "$ms" "$((us / 10))"
     elif [ "$ns" -ge 1000 ]; then
-        # >= 1µs: show as microseconds with 2 decimal places
         local us=$((ns / 1000))
         local frac=$((ns % 1000))
         printf "%d.%02dµs" "$us" "$((frac / 10))"
@@ -60,6 +83,48 @@ ticks_to_time() {
         printf "%dns" "$ns"
     fi
 }
+
+# Format a percentage delta: (+12%), (-3%), (=)
+format_delta() {
+    local old=$1 new=$2
+    if [ "$old" -eq 0 ]; then
+        printf "(new)"
+        return
+    fi
+    local pct=$(( (new - old) * 100 / old ))
+    if [ "$pct" -gt 10 ]; then
+        printf "${RED}(+%d%%)${RESET}" "$pct"
+    elif [ "$pct" -gt 2 ]; then
+        printf "${YELLOW}(+%d%%)${RESET}" "$pct"
+    elif [ "$pct" -lt -2 ]; then
+        printf "${GREEN}(%d%%)${RESET}" "$pct"
+    else
+        printf "(=)"
+    fi
+}
+
+# ── Baseline loading ──────────────────────────────────────────────
+
+# Baseline file is tab-separated: name\ttype\tidx\tfield\tvalue
+# Lookup via grep (no associative arrays — macOS ships bash 3.2).
+BASELINE_LOADED=""
+
+baseline_lookup() {
+    local name="$1" idx="$2" field="$3"
+    [ -n "$BASELINE_LOADED" ] || return 1
+    local line
+    line=$(grep -m1 "^${name}	[a-z]*	${idx}	${field}	" "$BASELINE_LOADED" 2>/dev/null) || return 1
+    echo "$line" | cut -f5
+}
+
+if [ -n "$COMPARE_FILE" ]; then
+    if [ ! -f "$COMPARE_FILE" ]; then
+        echo "warning: baseline file not found: $COMPARE_FILE (running without comparison)" >&2
+    else
+        BASELINE_LOADED="$COMPARE_FILE"
+        info "loaded baseline from $COMPARE_FILE"
+    fi
+fi
 
 # ── Preflight checks ──────────────────────────────────────────────
 
@@ -92,12 +157,21 @@ fi
 RUST_TARGET="$TEST_DIR/target/aarch64-unknown-none/debug"
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
+mkdir -p "$TMPDIR/results"
 
 BENCH_COUNT=0
 ERROR_COUNT=0
 
+# Save file header
+SAVE_LINES=()
+SAVE_LINES+=("# bench results $(date -u +%Y-%m-%dT%H:%M:%SZ)")
+SAVE_LINES+=("# freq=$FREQ trials=$TRIALS")
+
 echo ""
 info "counter frequency: $(printf "%'d" $FREQ) Hz ($(( FREQ / 1000000 )) MHz, 1 tick = $((1000000000 / FREQ))ns)"
+if [ "$TRIALS" -gt 1 ]; then
+    info "running $TRIALS trials per benchmark (best-of-$TRIALS)"
+fi
 echo ""
 printf "${BOLD}%-35s  %s${RESET}\n" "benchmark" "results"
 printf "%-35s  %s\n" "-----------------------------------" "-------"
@@ -117,16 +191,56 @@ for elf in "$RUST_TARGET"/bench_*; do
 
     BENCH_COUNT=$((BENCH_COUNT + 1))
 
-    output=$("$HYPERVISOR" "$KERNEL" --module "$bin" --no-gpu --timeout "$TIMEOUT" 2>&1) || true
+    # ── Run multiple trials ────────────────────────────────────
+    best_trial_file=""
+    best_median=999999999999
 
-    # Check for clean exit
-    if ! echo "$output" | grep -q "TEST PASSED"; then
-        # Show the failure reason
+    for trial in $(seq 1 "$TRIALS"); do
+        output=$("$HYPERVISOR" "$KERNEL" --module "$bin" --no-gpu --timeout "$TIMEOUT" 2>&1) || true
+
+        if ! echo "$output" | grep -q "TEST PASSED"; then
+            continue
+        fi
+
+        bench_lines=$(echo "$output" | grep 'BENCH ' | sed 's/^[[:space:]]*//' || true)
+        [ -z "$bench_lines" ] && continue
+
+        trial_file="$TMPDIR/trial_${name}_${trial}"
+        echo "$bench_lines" > "$trial_file"
+
+        # Find the first stats group's median (tag+1) to rank this trial
+        trial_tags=()
+        trial_values=()
+        while IFS= read -r line; do
+            read -r _ t v m0 m1 <<< "$line"
+            trial_tags+=("$t")
+            trial_values+=("$v")
+        done <<< "$bench_lines"
+
+        # Check for a 7-value group to get the median
+        if [ ${#trial_tags[@]} -ge 7 ]; then
+            base=$((16#${trial_tags[0]}))
+            next=$((16#${trial_tags[1]}))
+            if [ "$next" -eq $((base + 1)) ]; then
+                this_median=$((16#${trial_values[1]}))
+                if [ "$this_median" -lt "$best_median" ]; then
+                    best_median=$this_median
+                    best_trial_file="$trial_file"
+                fi
+                continue
+            fi
+        fi
+
+        # No stats group — just keep the last successful trial
+        best_trial_file="$trial_file"
+    done
+
+    if [ -z "$best_trial_file" ]; then
         fault=$(echo "$output" | grep -m1 "FATAL FAULT" || true)
-        timeout=$(echo "$output" | grep -m1 "timeout after" || true)
+        timeout_msg=$(echo "$output" | grep -m1 "timeout after" || true)
         if [ -n "$fault" ]; then
             printf "%-35s  ${RED}ERROR${RESET} (%s)\n" "$name" "$fault"
-        elif [ -n "$timeout" ]; then
+        elif [ -n "$timeout_msg" ]; then
             printf "%-35s  ${RED}ERROR${RESET} (timeout)\n" "$name"
         else
             printf "%-35s  ${RED}ERROR${RESET} (no TEST PASSED)\n" "$name"
@@ -135,36 +249,25 @@ for elf in "$RUST_TARGET"/bench_*; do
         continue
     fi
 
-    # Extract BENCH lines
-    bench_lines=$(echo "$output" | grep 'BENCH ' | sed 's/^[[:space:]]*//' || true)
+    # ── Parse best trial ───────────────────────────────────────
 
-    if [ -z "$bench_lines" ]; then
-        printf "%-35s  ${DIM}(no BENCH data)${RESET}\n" "$name"
-        continue
-    fi
-
-    # Collect all tag/value pairs into arrays for Stats group detection.
-    # Format: "BENCH <tag_hex_16> <val_hex_16> <m0_hex_16> <m1_hex_16>"
     tags=()
     values=()
     while IFS= read -r line; do
-        # Parse the 4 hex fields after "BENCH"
         read -r _ t v m0 m1 <<< "$line"
         tags+=("$t")
         values+=("$v")
-    done <<< "$bench_lines"
+    done < "$best_trial_file"
 
     n=${#tags[@]}
-
-    # Try to detect Stats::emit groups (5 consecutive tags: base, base+1, ..., base+4)
-    # If the lines form complete groups, display summary format.
     i=0
     displayed=false
+    group_idx=0
 
     while [ $i -lt $n ]; do
         remaining=$((n - i))
 
-        # Try 7-value group first (new format: min, median, p99, trimmed_mean, iqr, mean, count)
+        # Try 7-value group (min, median, p99, trimmed_mean, iqr, mean, count)
         if [ $remaining -ge 7 ]; then
             base_tag=$((16#${tags[$i]}))
             is_group=true
@@ -195,16 +298,31 @@ for elf in "$RUST_TARGET"/bench_*; do
                 tavg_t=$(ticks_to_time "$tavg_val")
                 iqr_t=$(ticks_to_time "$iqr_val")
 
+                # Baseline comparison for median
+                med_delta=""
+                old_med=$(baseline_lookup "$name" "$group_idx" "med" 2>/dev/null) && \
+                    med_delta=" $(format_delta "$old_med" "$median_val")"
+
                 if ! $displayed; then
                     printf "%-35s  " "$name"
                 else
                     printf "%-35s  " ""
                 fi
 
-                printf "min=%-10s  med=%-10s  p99=%-10s  tavg=%-9s  iqr=%-9s  (%d iters)\n" \
-                    "$min_t" "$med_t" "$p99_t" "$tavg_t" "$iqr_t" "$count_val"
+                printf "min=%-10s  med=%-10s%s  p99=%-10s  tavg=%-9s  iqr=%-9s  (%d iters)\n" \
+                    "$min_t" "$med_t" "${med_delta:- }" "$p99_t" "$tavg_t" "$iqr_t" "$count_val"
+
+                # Save results
+                SAVE_LINES+=("${name}	stats	${group_idx}	min	${min_val}")
+                SAVE_LINES+=("${name}	stats	${group_idx}	med	${median_val}")
+                SAVE_LINES+=("${name}	stats	${group_idx}	p99	${p99_val}")
+                SAVE_LINES+=("${name}	stats	${group_idx}	tavg	${tavg_val}")
+                SAVE_LINES+=("${name}	stats	${group_idx}	iqr	${iqr_val}")
+                SAVE_LINES+=("${name}	stats	${group_idx}	mean	${mean_val}")
+                SAVE_LINES+=("${name}	stats	${group_idx}	count	${count_val}")
 
                 displayed=true
+                group_idx=$((group_idx + 1))
                 i=$((i + 7))
                 continue
             fi
@@ -238,16 +356,29 @@ for elf in "$RUST_TARGET"/bench_*; do
                 p99_t=$(ticks_to_time "$p99_val")
                 avg_t=$(ticks_to_time "$mean_val")
 
+                med_delta=""
+                bkey="${name}:${group_idx}:med"
+                if [ -n "${BASELINE[$bkey]+x}" ]; then
+                    med_delta=" $(format_delta "${BASELINE[$bkey]}" "$median_val")"
+                fi
+
                 if ! $displayed; then
                     printf "%-35s  " "$name"
                 else
                     printf "%-35s  " ""
                 fi
 
-                printf "min=%-10s  med=%-10s  p99=%-10s  avg=%-10s  (%d iters)\n" \
-                    "$min_t" "$med_t" "$p99_t" "$avg_t" "$count_val"
+                printf "min=%-10s  med=%-10s%s  p99=%-10s  avg=%-10s  (%d iters)\n" \
+                    "$min_t" "$med_t" "${med_delta:- }" "$p99_t" "$avg_t" "$count_val"
+
+                SAVE_LINES+=("${name}	stats	${group_idx}	min	${min_val}")
+                SAVE_LINES+=("${name}	stats	${group_idx}	med	${median_val}")
+                SAVE_LINES+=("${name}	stats	${group_idx}	p99	${p99_val}")
+                SAVE_LINES+=("${name}	stats	${group_idx}	mean	${mean_val}")
+                SAVE_LINES+=("${name}	stats	${group_idx}	count	${count_val}")
 
                 displayed=true
+                group_idx=$((group_idx + 1))
                 i=$((i + 5))
                 continue
             fi
@@ -258,18 +389,32 @@ for elf in "$RUST_TARGET"/bench_*; do
         val_dec=$((16#${values[$i]}))
         val_t=$(ticks_to_time "$val_dec")
 
+        val_delta=""
+        old_val=$(baseline_lookup "$name" "$group_idx" "tag_${tag_dec}" 2>/dev/null) && \
+            val_delta=" $(format_delta "$old_val" "$val_dec")"
+
         if ! $displayed; then
             printf "%-35s  " "$name"
         else
             printf "%-35s  " ""
         fi
 
-        printf "tag=0x%x  value=%d (%s)\n" "$tag_dec" "$val_dec" "$val_t"
+        printf "tag=0x%x  value=%d (%s)%s\n" "$tag_dec" "$val_dec" "$val_t" "$val_delta"
+
+        SAVE_LINES+=("${name}	raw	${group_idx}	tag_${tag_dec}	${val_dec}")
 
         displayed=true
+        group_idx=$((group_idx + 1))
         i=$((i + 1))
     done
 done
+
+# ── Save results ──────────────────────────────────────────────────
+
+if [ -n "$SAVE_FILE" ]; then
+    printf '%s\n' "${SAVE_LINES[@]}" > "$SAVE_FILE"
+    info "results saved to $SAVE_FILE"
+fi
 
 # ── Summary ────────────────────────────────────────────────────────
 
