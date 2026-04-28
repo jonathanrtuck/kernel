@@ -5,8 +5,8 @@
 //! Safe arena operations in `arena.rs` delegate to these primitives.
 //!
 //! Test builds use a `Vec`-backed implementation (needs `alloc`).
-//! Bare-metal builds provide a stub that compiles but panics if called —
-//! arena allocation is not yet wired into the boot path.
+//! Bare-metal builds use a page-backed implementation with an intrusive
+//! freelist and bitmap occupancy tracking (D93).
 
 #[cfg(test)]
 extern crate alloc;

@@ -302,7 +302,7 @@ pub fn route_lookup(table_ptr: NonNull<RoutingTable>, badge: u64) -> Option<Obje
 /// order by badge_low via insertion into the correct position.
 ///
 /// Test builds allocate via the global allocator. Bare-metal builds
-/// will allocate from root Space (D31) — currently stubbed.
+/// allocate from root Space pages (D31).
 pub fn route_add(
     table_ptr: &mut Option<NonNull<RoutingTable>>,
     low: u64,
@@ -504,7 +504,7 @@ const BADGE_MAP_MAX_CAPACITY: u32 = 256;
 /// Allocate a new BadgeMap (D-3.2b).
 ///
 /// Called at Field creation when badge_tracking=true. Test builds use
-/// the heap allocator; bare-metal builds return None (deferred).
+/// the heap allocator; bare-metal builds allocate from root Space pages.
 #[cfg(test)]
 pub fn allocate_badge_map() -> Option<NonNull<BadgeMap>> {
     extern crate alloc;
@@ -551,10 +551,55 @@ pub fn allocate_badge_map() -> Option<NonNull<BadgeMap>> {
     }
 }
 
-/// Bare-metal stub for badge map allocation.
+/// Bare-metal badge map allocation (D17, D31).
+///
+/// Allocates a zeroed page from SpaceManager and places the BadgeMap header
+/// at the start, with the entries array immediately after it. A single page
+/// holds both the header and entries — more than enough capacity for any
+/// realistic badge count.
 #[cfg(not(test))]
 pub fn allocate_badge_map() -> Option<NonNull<BadgeMap>> {
-    None
+    #[cfg(not(target_os = "none"))]
+    {
+        None
+    }
+    #[cfg(target_os = "none")]
+    {
+        let page_size = crate::frame::arch::mmu::page_size();
+        let ks = crate::frame::kernel_state();
+        let pa = crate::frame::boot::alloc_zeroed_pages(ks, 1).ok()?;
+        let base = crate::frame::phys_to_virt(pa) as *mut u8;
+        let header_size = core::mem::size_of::<BadgeMap>();
+        let entry_align = core::mem::align_of::<BadgeMapEntry>();
+        let entries_offset = header_size.next_multiple_of(entry_align);
+        let remaining = page_size - entries_offset;
+        let capacity = remaining / core::mem::size_of::<BadgeMapEntry>();
+
+        if capacity == 0 {
+            return None;
+        }
+
+        // SAFETY: base points to a zeroed page exclusively owned by this
+        // allocation. entries_offset is aligned for BadgeMapEntry. Both the
+        // header and entries array fit within the page (verified by capacity
+        // calculation).
+        unsafe {
+            let entries_ptr = base.add(entries_offset) as *mut BadgeMapEntry;
+            let entries_nn = NonNull::new_unchecked(entries_ptr);
+            let map_ptr = base as *mut BadgeMap;
+
+            core::ptr::write(
+                map_ptr,
+                BadgeMap {
+                    entries: entries_nn,
+                    count: 0,
+                    capacity: capacity as u32,
+                },
+            );
+
+            Some(NonNull::new_unchecked(map_ptr))
+        }
+    }
 }
 
 /// Increment the refcount for a badge in the map (D17).
@@ -792,18 +837,58 @@ fn grow_badge_map(map: &mut BadgeMap) -> Result<(), FieldError> {
     Ok(())
 }
 
-/// Bare-metal stub for badge map growth.
+/// Bare-metal badge map growth (D17, D31).
+///
+/// Allocates a new page, copies existing entries, and updates the map's
+/// entries pointer and capacity. The old page is not deallocated — it
+/// returns to the pool when the Field is destroyed. Single-page allocation
+/// means the new capacity is the maximum that fits in one page.
 #[cfg(not(test))]
-fn grow_badge_map(_map: &mut BadgeMap) -> Result<(), FieldError> {
-    Err(FieldError::RoutingTableFull)
+fn grow_badge_map(map: &mut BadgeMap) -> Result<(), FieldError> {
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = map;
+        Err(FieldError::RoutingTableFull)
+    }
+    #[cfg(target_os = "none")]
+    {
+        let page_size = crate::frame::arch::mmu::page_size();
+        let ks = crate::frame::kernel_state();
+        let pa = crate::frame::boot::alloc_zeroed_pages(ks, 1)
+            .map_err(|_| FieldError::RoutingTableFull)?;
+        let base = crate::frame::phys_to_virt(pa) as *mut u8;
+        let new_capacity = page_size / core::mem::size_of::<BadgeMapEntry>();
+
+        if new_capacity <= map.capacity as usize {
+            return Err(FieldError::RoutingTableFull);
+        }
+
+        let old_count = map.count as usize;
+        let new_ptr = base as *mut BadgeMapEntry;
+
+        if old_count > 0 {
+            // SAFETY: map.entries is valid for old_count elements. new_ptr is a
+            // freshly allocated zeroed page with room for new_capacity entries.
+            // The regions do not overlap (distinct pages).
+            unsafe {
+                core::ptr::copy_nonoverlapping(map.entries.as_ptr(), new_ptr, old_count);
+            }
+        }
+
+        // SAFETY: new_ptr is non-null (phys_to_virt of a valid PA).
+        map.entries = unsafe { NonNull::new_unchecked(new_ptr) };
+        map.capacity = new_capacity as u32;
+
+        Ok(())
+    }
 }
 
 // ── Internal allocation helpers ───────────────────────────────────────
 
 /// Allocate a new RoutingTable with the given entry capacity.
 ///
-/// Test builds use the global allocator. Bare-metal builds will use
-/// root Space pages (D31).
+/// Test builds use the global allocator. Bare-metal builds allocate
+/// from root Space pages (D31).
 #[cfg(test)]
 fn allocate_routing_table(capacity: u32) -> Result<NonNull<RoutingTable>, FieldError> {
     extern crate alloc;
@@ -856,11 +941,56 @@ fn allocate_routing_table(capacity: u32) -> Result<NonNull<RoutingTable>, FieldE
     }
 }
 
-/// Stub for bare-metal builds — routing table allocation requires
-/// root Space pages (D31), not yet wired.
+/// Bare-metal routing table allocation (D31, D54).
+///
+/// Allocates a zeroed page and places the RoutingTable header at the
+/// start with the entries array immediately after. The actual capacity
+/// is the maximum that fits in the page, regardless of the requested
+/// capacity (we never allocate less than a page anyway).
 #[cfg(not(test))]
-fn allocate_routing_table(_capacity: u32) -> Result<NonNull<RoutingTable>, FieldError> {
-    Err(FieldError::RoutingTableFull)
+fn allocate_routing_table(capacity: u32) -> Result<NonNull<RoutingTable>, FieldError> {
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = capacity;
+        Err(FieldError::RoutingTableFull)
+    }
+    #[cfg(target_os = "none")]
+    {
+        let page_size = crate::frame::arch::mmu::page_size();
+        let ks = crate::frame::kernel_state();
+        let pa = crate::frame::boot::alloc_zeroed_pages(ks, 1)
+            .map_err(|_| FieldError::RoutingTableFull)?;
+        let base = crate::frame::phys_to_virt(pa) as *mut u8;
+        let header_size = core::mem::size_of::<RoutingTable>();
+        let entry_align = core::mem::align_of::<RoutingEntry>();
+        let entries_offset = header_size.next_multiple_of(entry_align);
+        let remaining = page_size - entries_offset;
+        let page_capacity = remaining / core::mem::size_of::<RoutingEntry>();
+
+        if page_capacity < capacity as usize {
+            return Err(FieldError::RoutingTableFull);
+        }
+
+        // SAFETY: base points to a zeroed page exclusively owned by this
+        // allocation. entries_offset is aligned for RoutingEntry. Both the
+        // header and entries array fit within the page.
+        unsafe {
+            let entries_ptr = base.add(entries_offset) as *mut RoutingEntry;
+            let entries_nn = NonNull::new_unchecked(entries_ptr);
+            let table_ptr = base as *mut RoutingTable;
+
+            core::ptr::write(
+                table_ptr,
+                RoutingTable {
+                    entries: entries_nn,
+                    count: 0,
+                    capacity: page_capacity as u32,
+                },
+            );
+
+            Ok(NonNull::new_unchecked(table_ptr))
+        }
+    }
 }
 
 /// Grow the routing table's entries array to new_capacity.
@@ -913,10 +1043,49 @@ fn grow_routing_table(table: &mut RoutingTable, new_capacity: u32) -> Result<(),
     Ok(())
 }
 
-/// Bare-metal stub for grow.
+/// Bare-metal routing table growth (D31, D54).
+///
+/// Allocates a new page for the entries array, copies existing entries,
+/// and updates the table pointer and capacity. The old entries page is
+/// not deallocated — it returns to the pool when the Field is destroyed.
 #[cfg(not(test))]
-fn grow_routing_table(_table: &mut RoutingTable, _new_capacity: u32) -> Result<(), FieldError> {
-    Err(FieldError::RoutingTableFull)
+fn grow_routing_table(table: &mut RoutingTable, _new_capacity: u32) -> Result<(), FieldError> {
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = table;
+        Err(FieldError::RoutingTableFull)
+    }
+    #[cfg(target_os = "none")]
+    {
+        let page_size = crate::frame::arch::mmu::page_size();
+        let ks = crate::frame::kernel_state();
+        let pa = crate::frame::boot::alloc_zeroed_pages(ks, 1)
+            .map_err(|_| FieldError::RoutingTableFull)?;
+        let base = crate::frame::phys_to_virt(pa) as *mut u8;
+        let actual_capacity = page_size / core::mem::size_of::<RoutingEntry>();
+
+        if actual_capacity <= table.capacity as usize {
+            return Err(FieldError::RoutingTableFull);
+        }
+
+        let old_count = table.count as usize;
+        let new_ptr = base as *mut RoutingEntry;
+
+        if old_count > 0 {
+            // SAFETY: table.entries is valid for old_count elements. new_ptr
+            // is a freshly allocated zeroed page with room for actual_capacity
+            // entries. The regions do not overlap (distinct pages).
+            unsafe {
+                core::ptr::copy_nonoverlapping(table.entries.as_ptr(), new_ptr, old_count);
+            }
+        }
+
+        // SAFETY: new_ptr is non-null (phys_to_virt of a valid PA).
+        table.entries = unsafe { NonNull::new_unchecked(new_ptr) };
+        table.capacity = actual_capacity as u32;
+
+        Ok(())
+    }
 }
 
 // ── D. Queue allocation for object creation (D95, D32) ──────────────
