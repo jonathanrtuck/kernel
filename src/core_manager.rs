@@ -327,6 +327,15 @@ impl<S: Scheduler> CoreState<S> {
         let user_cap_slot = Self::install_cap_or_absent(observer_ptr, message.user_cap.as_ref());
         let reply_cap_slot = Self::install_cap_or_absent(observer_ptr, message.reply_cap.as_ref());
 
+        // D107: install added cap to receiver's table — increment refcount.
+        // Reply caps are always send-once (D73) — exempt from refcount.
+        if user_cap_slot != crate::capability::CAP_ABSENT
+            && let Some(tc) = &message.user_cap
+            && !tc.send_once
+        {
+            increment_refcount(kernel_state, tc.object_type, tc.object_id);
+        }
+
         // D30: update receiver's compute_aggregate if a Time cap was installed.
         if user_cap_slot != crate::capability::CAP_ABSENT
             && let Some(tc) = &message.user_cap
@@ -562,6 +571,13 @@ impl<S: Scheduler> CoreState<S> {
                         return DispatchResult::Resume(sender_ptr);
                     }
                 };
+                // D107: extract removed cap from sender's table — decrement refcount.
+                if let Some(ref tc) = user_cap
+                    && !tc.send_once
+                {
+                    decrement_refcount(kernel_state, tc.object_type, tc.object_id);
+                }
+
                 // D30: sender extracted a Time cap — update their compute_aggregate.
                 if let Some(ref tc) = user_cap
                     && tc.object_type == crate::capability::ObjectType::Time
@@ -673,6 +689,13 @@ impl<S: Scheduler> CoreState<S> {
                         return DispatchResult::Resume(sender_ptr);
                     }
                 };
+
+                // D107: extract removed cap from sender's table — decrement refcount.
+                if let Some(ref tc) = user_cap
+                    && !tc.send_once
+                {
+                    decrement_refcount(kernel_state, tc.object_type, tc.object_id);
+                }
 
                 // D30: sender extracted a Time cap — update their compute_aggregate.
                 if let Some(ref tc) = user_cap
@@ -1325,8 +1348,12 @@ impl<S: Scheduler> CoreState<S> {
                     &transferred,
                 ) {
                     Ok(encoded_handle) => {
+                        // D107: copy to child's table → increment refcount.
+                        if !source_entry.send_once {
+                            increment_refcount(kernel_state, source_type, source_id);
+                        }
+
                         // D17/D73: badge increment on tracked Fields.
-                        // D73: send-once caps bypass the refcount model.
                         if source_type == ObjectType::Field && !source_entry.send_once {
                             let mut fields = kernel_state.fields.acquire();
 
@@ -1517,6 +1544,9 @@ impl<S: Scheduler> CoreState<S> {
                     capability::SLOT_REPLY_FIELD,
                     new_reply,
                 ) {
+                    // D107: new cap to existing Field → increment refcount.
+                    increment_refcount(kernel_state, ObjectType::Field, field_id);
+
                     typed_ok(0)
                 } else {
                     typed_error(SyscallError::InvalidCap)
@@ -1802,8 +1832,12 @@ impl<S: Scheduler> CoreState<S> {
                     &transferred,
                 ) {
                     Ok(encoded_handle) => {
+                        // D107: new cap to existing object → increment refcount.
+                        if !entry.send_once {
+                            increment_refcount(kernel_state, object_type, object_id);
+                        }
+
                         // D17/D73: badge increment on tracked Fields.
-                        // D73: send-once caps bypass the refcount model.
                         if object_type == ObjectType::Field && !entry.send_once {
                             let mut fields = kernel_state.fields.acquire();
 
@@ -1850,8 +1884,7 @@ impl<S: Scheduler> CoreState<S> {
                         }
 
                         // D11: decrement refcount and handle type-specific cleanup.
-                        // D107: if refcount reaches zero, auto-destroy inline
-                        // (backing → root Space). Not yet implemented.
+                        // D107: auto-destroy when refcount reaches zero.
                         // D73: send-once caps are not counted in refcount.
                         match closed_type {
                             ObjectType::Field => {
@@ -1871,14 +1904,118 @@ impl<S: Scheduler> CoreState<S> {
                                         }
 
                                         field.refcount = field.refcount.saturating_sub(1);
+
+                                        // D107: auto-destroy — drain in-flight
+                                        // caps from queue, then free arena slot.
+                                        if field.refcount == 0 {
+                                            let mut in_flight: [(
+                                                crate::capability::ObjectType,
+                                                ObjectId,
+                                            );
+                                                64] = [(
+                                                crate::capability::ObjectType::Field,
+                                                ObjectId(0),
+                                            );
+                                                64];
+                                            let mut n = 0usize;
+
+                                            while let Some(msg) = field.dequeue() {
+                                                if let Some(ref tc) = msg.user_cap
+                                                    && !tc.send_once
+                                                    && n < 64
+                                                {
+                                                    in_flight[n] = (tc.object_type, tc.object_id);
+                                                    n += 1;
+                                                }
+                                            }
+
+                                            if let Some(ref msg) = field.pending_kernel_message
+                                                && let Some(ref tc) = msg.user_cap
+                                                && !tc.send_once
+                                                && n < 64
+                                            {
+                                                in_flight[n] = (tc.object_type, tc.object_id);
+                                                n += 1;
+                                            }
+
+                                            fields.free(closed_id);
+                                            drop(fields);
+
+                                            for &(t, id) in &in_flight[..n] {
+                                                decrement_refcount(kernel_state, t, id);
+                                            }
+                                        }
                                     }
                                 }
                             }
                             ObjectType::Observer if !entry_send_once => {
-                                let mut observers = kernel_state.observers.acquire();
+                                let refcount_now = {
+                                    let mut observers = kernel_state.observers.acquire();
 
-                                if let Some(obs) = observers.get_mut(closed_id) {
-                                    obs.refcount = obs.refcount.saturating_sub(1);
+                                    if let Some(obs) = observers.get_mut(closed_id) {
+                                        obs.refcount = obs.refcount.saturating_sub(1);
+                                        obs.refcount
+                                    } else {
+                                        1
+                                    }
+                                };
+
+                                if refcount_now == 0 {
+                                    // D107/D33: Observer auto-destroy — cascade.
+                                    // Revoke generation so stale caps fail.
+                                    {
+                                        let observers = kernel_state.observers.acquire();
+
+                                        if let Some(obs) = observers.get(closed_id) {
+                                            obs.revoke();
+                                        }
+                                    }
+
+                                    let obs_ptr = crate::frame::cores::observer_ptr_from_arena(
+                                        kernel_state,
+                                        closed_id,
+                                    );
+
+                                    if let Some(ptr) = obs_ptr {
+                                        let mut cascade =
+                                            crate::capability::CascadeContinuation::new();
+
+                                        cascade.push(closed_id);
+
+                                        // D107: closer blocked during cascade but
+                                        // backing returns to root (backing_size=0
+                                        // signals no return cap).
+                                        cascade.destroyer_ptr = Some(sender_ptr);
+                                        cascade.backing_va = 0;
+                                        cascade.backing_size = 0;
+                                        cascade.target_id = closed_id;
+
+                                        let done = cascade_batch_with_badge_tracking(
+                                            ptr,
+                                            &mut cascade,
+                                            16,
+                                            kernel_state,
+                                        );
+
+                                        if done {
+                                            cascade.pop();
+                                        }
+
+                                        if cascade.is_empty() {
+                                            let mut observers = kernel_state.observers.acquire();
+
+                                            observers.free(closed_id);
+                                        } else {
+                                            let _ = crate::frame::cores::observer_set_blocked(
+                                                sender_ptr,
+                                            );
+
+                                            self.scheduler.dequeue(sender_ptr);
+                                            self.cascade_continuation = Some(cascade);
+
+                                            return self.schedule_next();
+                                        }
+                                    }
                                 }
                             }
                             ObjectType::Space if !entry_send_once => {
@@ -1886,6 +2023,11 @@ impl<S: Scheduler> CoreState<S> {
 
                                 if let Some(space) = spaces.get_mut(closed_id) {
                                     space.refcount = space.refcount.saturating_sub(1);
+
+                                    if space.refcount == 0 {
+                                        space.generation.fetch_add(1, Ordering::Release);
+                                        spaces.free(closed_id);
+                                    }
                                 }
                             }
                             ObjectType::Time if !entry_send_once => {
@@ -1902,6 +2044,10 @@ impl<S: Scheduler> CoreState<S> {
 
                                     if let Some(time) = times.get_mut(closed_id) {
                                         time.refcount = time.refcount.saturating_sub(1);
+
+                                        if time.refcount == 0 {
+                                            times.free(closed_id);
+                                        }
                                     }
                                 }
                             }
@@ -1910,6 +2056,10 @@ impl<S: Scheduler> CoreState<S> {
 
                                 if let Some(pulsar) = pulsars.get_mut(closed_id) {
                                     pulsar.refcount = pulsar.refcount.saturating_sub(1);
+
+                                    if pulsar.refcount == 0 {
+                                        pulsars.free(closed_id);
+                                    }
                                 }
                             }
                             _ => {}
@@ -1955,8 +2105,12 @@ impl<S: Scheduler> CoreState<S> {
                     &transferred,
                 ) {
                     Ok(encoded_handle) => {
+                        // D107: new cap to existing object → increment refcount.
+                        if !transferred.send_once {
+                            increment_refcount(kernel_state, object_type, object_id);
+                        }
+
                         // D17/D73: badge increment on tracked Fields.
-                        // D73: send-once caps bypass the refcount model.
                         if object_type == ObjectType::Field && !transferred.send_once {
                             let mut fields = kernel_state.fields.acquire();
 
@@ -2612,6 +2766,9 @@ impl<S: Scheduler> CoreState<S> {
 
                 debug_assert!(wrote);
 
+                // D107: handler cap is a new reference to the Field.
+                increment_refcount(kernel_state, ObjectType::Field, handler_field_id);
+
                 // D17: the fault handler cap targets a Field — track the
                 // badge so cascade-closing this slot on Observer destroy
                 // produces a badge-closure notification on the handler Field.
@@ -2638,6 +2795,9 @@ impl<S: Scheduler> CoreState<S> {
                 );
 
                 debug_assert!(wrote);
+
+                // D107: self-cap is a second reference to the Observer.
+                increment_refcount(kernel_state, ObjectType::Observer, observer_id);
 
                 let handle = capability::Handle::decode(regs.target_handle);
                 let wrote = crate::frame::capabilities::write_entry(
@@ -3398,6 +3558,90 @@ fn unwire_space_for_observer(
     );
 }
 
+/// D107: increment an object's refcount when a new cap reference is created.
+///
+/// Called on cap duplication paths (Clone, Mint, InstallCap) where a new
+/// cap table entry points to an existing object. NOT called on object
+/// creation (refcount starts at 1) or IPC transfer (move semantics).
+#[cfg(any(target_os = "none", test))]
+fn increment_refcount(
+    kernel_state: &KernelState,
+    object_type: crate::capability::ObjectType,
+    object_id: ObjectId,
+) {
+    use crate::capability::ObjectType;
+
+    match object_type {
+        ObjectType::Field => {
+            if let Some(field) = kernel_state.fields.acquire().get_mut(object_id) {
+                field.refcount += 1;
+            }
+        }
+        ObjectType::Observer => {
+            if let Some(obs) = kernel_state.observers.acquire().get_mut(object_id) {
+                obs.refcount += 1;
+            }
+        }
+        ObjectType::Space => {
+            if let Some(space) = kernel_state.spaces.acquire().get_mut(object_id) {
+                space.refcount += 1;
+            }
+        }
+        ObjectType::Time => {
+            if let Some(time) = kernel_state.times.acquire().get_mut(object_id) {
+                time.refcount += 1;
+            }
+        }
+        ObjectType::Pulsar => {
+            if let Some(pulsar) = kernel_state.pulsars.acquire().get_mut(object_id) {
+                pulsar.refcount += 1;
+            }
+        }
+    }
+}
+
+/// D107: decrement an object's refcount when a cap reference is removed.
+///
+/// Called on IPC extract (cap moved out of sender's table). Does NOT
+/// auto-destroy — the cap is in-flight and may be installed in the
+/// receiver. Auto-destroy happens only in the Close path (above).
+#[cfg(any(target_os = "none", test))]
+fn decrement_refcount(
+    kernel_state: &KernelState,
+    object_type: crate::capability::ObjectType,
+    object_id: ObjectId,
+) {
+    use crate::capability::ObjectType;
+
+    match object_type {
+        ObjectType::Field => {
+            if let Some(field) = kernel_state.fields.acquire().get_mut(object_id) {
+                field.refcount = field.refcount.saturating_sub(1);
+            }
+        }
+        ObjectType::Observer => {
+            if let Some(obs) = kernel_state.observers.acquire().get_mut(object_id) {
+                obs.refcount = obs.refcount.saturating_sub(1);
+            }
+        }
+        ObjectType::Space => {
+            if let Some(space) = kernel_state.spaces.acquire().get_mut(object_id) {
+                space.refcount = space.refcount.saturating_sub(1);
+            }
+        }
+        ObjectType::Time => {
+            if let Some(time) = kernel_state.times.acquire().get_mut(object_id) {
+                time.refcount = time.refcount.saturating_sub(1);
+            }
+        }
+        ObjectType::Pulsar => {
+            if let Some(pulsar) = kernel_state.pulsars.acquire().get_mut(object_id) {
+                pulsar.refcount = pulsar.refcount.saturating_sub(1);
+            }
+        }
+    }
+}
+
 #[cfg(any(target_os = "none", test))]
 fn consume_space(kernel_state: &KernelState, space_id: ObjectId) {
     let mut spaces = kernel_state.spaces.acquire();
@@ -3428,17 +3672,28 @@ fn cascade_batch_with_badge_tracking(
         Some(level) => level.slot_cursor,
         None => return true,
     };
-    // Pre-read: collect (field_id, badge, send_once) for Field-type entries.
+    // Pre-read: collect all occupied entries for refcount + badge tracking.
     let mut badge_events: [(ObjectId, crate::capability::Badge, bool); 16] =
         [(ObjectId(0), crate::capability::Badge(0), false); 16];
     let mut badge_count = 0usize;
+    let mut ref_events: [(ObjectType, ObjectId); 16] = [(ObjectType::Field, ObjectId(0)); 16];
+    let mut ref_count = 0usize;
 
     for slot in cursor..cursor.saturating_add(batch_size) {
         if let Some(entry) = crate::frame::cores::observer_read_full_cap_entry(observer_ptr, slot)
-            && let Some((ObjectType::Field, fid)) = entry.object
+            && let Some((obj_type, obj_id)) = entry.object
         {
-            badge_events[badge_count] = (fid, entry.badge, entry.send_once);
-            badge_count += 1;
+            // D107: track non-send-once caps for refcount decrement.
+            if !entry.send_once && ref_count < 16 {
+                ref_events[ref_count] = (obj_type, obj_id);
+                ref_count += 1;
+            }
+
+            // D17: track Field caps for badge decrement.
+            if obj_type == ObjectType::Field && badge_count < 16 {
+                badge_events[badge_count] = (obj_id, entry.badge, entry.send_once);
+                badge_count += 1;
+            }
         }
     }
 
@@ -3452,16 +3707,19 @@ fn cascade_batch_with_badge_tracking(
         for &(fid, badge, send_once) in &badge_events[..badge_count] {
             if let Some(field) = fields.get_mut(fid) {
                 if send_once {
-                    // D73: send-once close → direct closure.
                     if field.badge_tracking {
                         field.enqueue_badge_closure(badge);
                     }
                 } else if field.badge_decrement(badge) {
-                    // D17: refcounted close → closure when last.
                     field.enqueue_badge_closure(badge);
                 }
             }
         }
+    }
+
+    // D107: decrement refcounts for cascade-closed caps.
+    for &(obj_type, obj_id) in &ref_events[..ref_count] {
+        decrement_refcount(kernel_state, obj_type, obj_id);
     }
 
     done
@@ -9155,9 +9413,13 @@ mod tests {
         let field_id = make_tracked_field_in_arena(&ks, 8);
 
         // Pre-populate badge map: one cap with badge 0xCAFE.
+        // D107: bump refcount to simulate an external holder so
+        // the Field survives the test Close for observation.
         {
             let mut fields = ks.fields.acquire();
             let field = fields.get_mut(field_id).unwrap();
+
+            field.refcount += 1;
 
             field.badge_increment(Badge(0xCAFE));
         }
@@ -9219,9 +9481,12 @@ mod tests {
         let field_id = make_tracked_field_in_arena(&ks, 8);
 
         // Pre-populate badge map: two caps with badge 0xBEEF.
+        // D107: bump refcount so the Field survives Close.
         {
             let mut fields = ks.fields.acquire();
             let field = fields.get_mut(field_id).unwrap();
+
+            field.refcount += 1;
 
             field.badge_increment(Badge(0xBEEF));
             field.badge_increment(Badge(0xBEEF));
@@ -9268,6 +9533,14 @@ mod tests {
     fn test_d17_close_non_tracked_field_no_badge_work() {
         let ks = make_kernel_state();
         let field_id = make_field_in_arena(&ks, 8);
+
+        // D107: bump refcount so the Field survives Close for observation.
+        {
+            let mut fields = ks.fields.acquire();
+
+            fields.get_mut(field_id).unwrap().refcount += 1;
+        }
+
         let (mut sender, _entries) =
             make_sender_with_cap(ObjectType::Field, field_id, Rights::FIELD_ALL, Badge(42), 0);
         let sender_ptr = NonNull::from(&mut sender);
@@ -9427,6 +9700,10 @@ mod tests {
         let field_id = make_tracked_field_in_arena(&ks, 8);
 
         // Pre-populate badge map: one cap with badge 0x11 (the source).
+        // D107: bump refcount so Field survives closing all test caps.
+        {
+            ks.fields.acquire().get_mut(field_id).unwrap().refcount += 1;
+        }
         {
             let mut fields = ks.fields.acquire();
             let field = fields.get_mut(field_id).unwrap();
@@ -9611,6 +9888,9 @@ mod tests {
         // Read the Field id from slot 0.
         let entry = crate::frame::capabilities::entry_ref(sender.cap_table, 16, 0).unwrap();
         let (_, field_id) = entry.object.unwrap();
+
+        // D107: bump refcount so Field survives closing all test caps.
+        ks.fields.acquire().get_mut(field_id).unwrap().refcount += 1;
 
         // Close the clone — must NOT trigger closure (original still alive).
         setup_typed_regs(

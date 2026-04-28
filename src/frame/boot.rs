@@ -551,7 +551,8 @@ fn create_child_observer(
     child_obs.saved_syscall = crate::observer::SavedSyscallContext::None;
     child_obs.backing_va_base = 0;
     child_obs.backing_size = 0;
-    child_obs.refcount = 1;
+    // D107: 2 caps point to this Observer (self-cap + root's child cap).
+    child_obs.refcount = 2;
     child_obs.generation = AtomicU64::new(0);
 
     let child_ptr = NonNull::from(&*child_obs);
