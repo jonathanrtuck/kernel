@@ -84,6 +84,17 @@ ticks_to_time() {
     fi
 }
 
+# Right-pad a string to a target display width.
+# printf's %-Ns counts bytes, not display columns — the multi-byte µ (U+00B5)
+# in µs values causes columns to fall 1 short. This pads by character count.
+pad() {
+    local str="$1" width="$2"
+    printf "%s" "$str"
+    local len=${#str}
+    local spaces=$((width - len))
+    [ "$spaces" -gt 0 ] && printf "%${spaces}s" ""
+}
+
 # Format a percentage delta: (+12%), (-3%), (=)
 format_delta() {
     local old=$1 new=$2
@@ -309,8 +320,9 @@ for elf in "$RUST_TARGET"/bench_*; do
                     printf "%-35s  " ""
                 fi
 
-                printf "min=%-10s  med=%-10s%s  p99=%-10s  tavg=%-9s  iqr=%-9s  (%d iters)\n" \
-                    "$min_t" "$med_t" "${med_delta:- }" "$p99_t" "$tavg_t" "$iqr_t" "$count_val"
+                printf "min=%s  med=%s%s  p99=%s  tavg=%s  iqr=%s  (%d iters)\n" \
+                    "$(pad "$min_t" 10)" "$(pad "$med_t" 10)" "${med_delta:- }" \
+                    "$(pad "$p99_t" 10)" "$(pad "$tavg_t" 9)" "$(pad "$iqr_t" 9)" "$count_val"
 
                 # Save results
                 SAVE_LINES+=("${name}	stats	${group_idx}	min	${min_val}")
@@ -368,8 +380,9 @@ for elf in "$RUST_TARGET"/bench_*; do
                     printf "%-35s  " ""
                 fi
 
-                printf "min=%-10s  med=%-10s%s  p99=%-10s  avg=%-10s  (%d iters)\n" \
-                    "$min_t" "$med_t" "${med_delta:- }" "$p99_t" "$avg_t" "$count_val"
+                printf "min=%s  med=%s%s  p99=%s  avg=%s  (%d iters)\n" \
+                    "$(pad "$min_t" 10)" "$(pad "$med_t" 10)" "${med_delta:- }" \
+                    "$(pad "$p99_t" 10)" "$(pad "$avg_t" 10)" "$count_val"
 
                 SAVE_LINES+=("${name}	stats	${group_idx}	min	${min_val}")
                 SAVE_LINES+=("${name}	stats	${group_idx}	med	${median_val}")

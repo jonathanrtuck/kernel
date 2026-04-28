@@ -578,6 +578,28 @@ pub fn install_reply_field(field_handle: u64) -> bool {
     result == 0
 }
 
+/// Enable or disable dispatch tracing via BRK #0x4B.
+///
+/// mode=1: start tracing (clears buffer).
+/// mode=0: stop tracing, kernel emits buffer as BENCH lines.
+///         Returns the number of trace entries recorded.
+pub fn trace_control(mode: u64) -> u64 {
+    let result: u64;
+
+    // SAFETY: BRK #0x4B is the kernel's trace control (benchmark
+    // infrastructure). mode=1 enables tracing, mode=0 disables and
+    // emits the trace buffer as BENCH lines. Advances PC, resumes.
+    unsafe {
+        asm!(
+            "brk #0x4b",
+            in("x0") mode,
+            lateout("x0") result,
+        );
+    }
+
+    result
+}
+
 // ── Observer creation ─────────────────────────────────────────
 
 /// Create a new Observer from a Space.

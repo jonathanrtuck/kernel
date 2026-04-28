@@ -174,6 +174,49 @@ pub struct CoreState<S: Scheduler> {
     /// the timer. None when no cascade is active. The destroying Observer
     /// is blocked while this is Some (D39).
     pub cascade_continuation: Option<crate::capability::CascadeContinuation>,
+
+    /// Dispatch-path tracing for benchmark attribution. When active,
+    /// each trace_point! records a CNTVCT timestamp. The buffer is
+    /// emitted as BENCH lines via BRK #0x4B (trace control).
+    /// Zero cost when inactive (single branch, always not-taken).
+    pub trace_active: bool,
+    pub trace_count: u8,
+    pub trace_buffer: [TraceEntry; TRACE_CAPACITY],
+}
+
+// ── Trace infrastructure ─────────────────────────────────────────
+
+pub const TRACE_CAPACITY: usize = 16;
+
+#[derive(Clone, Copy)]
+pub struct TraceEntry {
+    pub stage: u8,
+    pub timestamp: u64,
+}
+
+impl TraceEntry {
+    pub const fn empty() -> Self {
+        Self {
+            stage: 0,
+            timestamp: 0,
+        }
+    }
+}
+
+macro_rules! trace_point {
+    ($self:expr, $stage:expr) => {
+        if $self.trace_active {
+            let idx = $self.trace_count as usize;
+
+            if idx < TRACE_CAPACITY {
+                $self.trace_buffer[idx] = TraceEntry {
+                    stage: $stage,
+                    timestamp: crate::frame::arch::cntvct_el0(),
+                };
+                $self.trace_count = idx as u8 + 1;
+            }
+        }
+    };
 }
 
 // ── Dispatch outcomes ──────────────────────────────────────────────
@@ -331,17 +374,8 @@ impl<S: Scheduler> CoreState<S> {
         }
 
         // ── Cap resolution and IPC dispatch ──────────────────────────
-        //
-        // D77: 8-step cap resolution sequence. D76: pull IPC registers.
-        // 1. read_ipc_registers(sender_ptr) for handle + message data
-        // 2. Read cap table from Observer (framekernel helper)
-        // 3. resolve_cap_entry(handle) — check bounds, slot tag, occupancy
-        // 4. Look up target Field in KernelState.fields arena
-        // 5. Check generation (D67), rights (D52), type (Field)
-        // 6. Construct Message from registers + badge from cap entry
-        // 7. Call the communication function
-        // 8. Handle outcome per the D79 matrix
-        // On error: write_ipc_error(sender_ptr, error), Resume(sender)
+
+        trace_point!(self, 0); // IPC entry
 
         // Step 1: read IPC registers from sender's saved state.
         let ipc_regs = crate::frame::cores::read_ipc_registers(sender_ptr);
@@ -470,6 +504,8 @@ impl<S: Scheduler> CoreState<S> {
         let badge = entry.badge;
         let is_send_once = entry.is_send_once();
         let handle_index = crate::capability::Handle::decode(raw_handle).index;
+
+        trace_point!(self, 1); // cap resolved + field looked up
 
         // ── Dispatch per operation ──────────────────────────────────
         match operation {
@@ -954,15 +990,8 @@ impl<S: Scheduler> CoreState<S> {
             crate::communication::CallOutcome::DirectSwitch(receiver_ptr) => {
                 // Row 6: D50 fast path. Consult scheduler.
                 if self.scheduler.should_switch_to(receiver_ptr) {
-                    // Approved: direct-switch to receiver.
-                    // D50: no user cap (0-cap gate).
-                    //
-                    // D74 intended x0-x3 to pass through in physical
-                    // registers, but __restore_observer performs a full
-                    // RegisterState load for both Resume and ResumeFastPath.
-                    // Until the assembly implements a dedicated fast-path
-                    // restore that skips x0-x3, we must write the sender's
-                    // data words into the receiver's RegisterState.
+                    trace_point!(self, 2); // DirectSwitch approved
+
                     let sender_regs = crate::frame::cores::read_ipc_registers(sender_ptr);
                     let user_cap_slot = crate::capability::CAP_ABSENT;
                     let reply_cap_slot =
@@ -978,13 +1007,15 @@ impl<S: Scheduler> CoreState<S> {
                     );
                     crate::frame::cores::clear_ipc_carry(receiver_ptr);
 
-                    // Dequeue sender (it's blocking). Receiver bypasses queue.
+                    trace_point!(self, 3); // message delivered
+
                     let _ = crate::frame::cores::observer_set_blocked(sender_ptr);
 
                     self.scheduler.dequeue(sender_ptr);
 
-                    // Unblock receiver (D39: Blocked -> Runnable).
                     let _ = crate::frame::cores::observer_unblock(receiver_ptr);
+
+                    trace_point!(self, 4); // scheduler done
 
                     self.current = Some(receiver_ptr);
 
@@ -3174,6 +3205,9 @@ mod tests {
             deadlines: [None; MAX_DEADLINES_PER_CORE],
             deadline_count: 0,
             cascade_continuation: None,
+            trace_active: false,
+            trace_count: 0,
+            trace_buffer: [TraceEntry::empty(); TRACE_CAPACITY],
         }
     }
 
@@ -10787,6 +10821,9 @@ mod tests {
             deadlines: [None; MAX_DEADLINES_PER_CORE],
             deadline_count: 0,
             cascade_continuation: None,
+            trace_active: false,
+            trace_count: 0,
+            trace_buffer: [TraceEntry::empty(); TRACE_CAPACITY],
         };
         let result = target_core.handle_ipi(&ks);
 

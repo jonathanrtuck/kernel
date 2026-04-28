@@ -76,6 +76,10 @@ static mut SECONDARY_CORE_STATES: [CoreState<RoundRobin>; config::MAX_CORES - 1]
         deadlines: [None; MAX_DEADLINES_PER_CORE],
         deadline_count: 0,
         cascade_continuation: None,
+        trace_active: false,
+        trace_count: 0,
+        trace_buffer: [crate::core_manager::TraceEntry::empty();
+            crate::core_manager::TRACE_CAPACITY],
     }
 };
     config::MAX_CORES - 1];
@@ -109,6 +113,10 @@ fn init_secondary_per_core_data(core_id: usize) {
                 deadlines: [None; MAX_DEADLINES_PER_CORE],
                 deadline_count: 0,
                 cascade_continuation: None,
+                trace_active: false,
+                trace_count: 0,
+                trace_buffer: [crate::core_manager::TraceEntry::empty();
+                    crate::core_manager::TRACE_CAPACITY],
             },
         );
 

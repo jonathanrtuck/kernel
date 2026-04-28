@@ -1373,6 +1373,10 @@ mod integration_tests {
             deadlines: [None; MAX_DEADLINES_PER_CORE],
             deadline_count: 0,
             cascade_continuation: None,
+            trace_active: false,
+            trace_count: 0,
+            trace_buffer: [crate::core_manager::TraceEntry::empty();
+                crate::core_manager::TRACE_CAPACITY],
         };
         let mut obs_a = make_observer_for_scheduler();
         let mut obs_b = make_observer_for_scheduler();
@@ -1484,6 +1488,10 @@ mod integration_tests {
             deadlines: [None; MAX_DEADLINES_PER_CORE],
             deadline_count: 0,
             cascade_continuation: None,
+            trace_active: false,
+            trace_count: 0,
+            trace_buffer: [crate::core_manager::TraceEntry::empty();
+                crate::core_manager::TRACE_CAPACITY],
         };
 
         // No observers enqueued — empty queue.

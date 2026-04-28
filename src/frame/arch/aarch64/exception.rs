@@ -261,6 +261,8 @@ fn handle_el0_sync<S: crate::time_manager::Scheduler + 'static>(
                 space_info::<S>()
             } else if imm == 0x4A {
                 install_reply_field::<S>()
+            } else if imm == 0x4B {
+                trace_control::<S>()
             } else {
                 handle_el0_fault::<S>(esr, far)
             }
@@ -647,6 +649,57 @@ fn install_reply_field<S: crate::time_manager::Scheduler + 'static>()
             as *mut crate::frame::arch::register_state::RegisterState);
 
         rs.gprs[0] = result;
+    }
+
+    crate::frame::cores::observer_advance_pc(observer);
+    crate::core_manager::DispatchResult::Resume(observer)
+}
+
+/// BRK #0x4B: dispatch trace control (benchmark infrastructure).
+///
+/// x0 = 0: stop tracing, emit buffer as BENCH lines, return count in x0.
+/// x0 = 1: start tracing, clear buffer.
+///
+/// Trace points in the dispatch path record CNTVCT timestamps at key
+/// stages. Tags 0xF000..0xF00F encode the stage ID; values are raw
+/// counter ticks. scripts/bench parses these alongside regular stats.
+#[cfg(target_os = "none")]
+fn trace_control<S: crate::time_manager::Scheduler + 'static>()
+-> crate::core_manager::DispatchResult {
+    let core = crate::core_manager::current_core_mut::<S>();
+    let observer = core.current.expect("must have current observer");
+    let regs = crate::frame::cores::read_typed_registers(observer);
+
+    if regs.args[0] == 1 {
+        core.trace_active = true;
+        core.trace_count = 0;
+    } else {
+        core.trace_active = false;
+
+        let count = core.trace_count;
+
+        for i in 0..count as usize {
+            let entry = core.trace_buffer[i];
+
+            crate::println!(
+                "    BENCH {:016x} {:016x} {:016x} {:016x}",
+                0xF000u64 + entry.stage as u64,
+                entry.timestamp,
+                0u64,
+                0u64,
+            );
+        }
+
+        core.trace_count = 0;
+
+        // SAFETY: observer points to a live Observer. A4 non-reentrancy.
+        unsafe {
+            let obs = observer.as_ref();
+            let rs = &mut *(obs.register_state.as_ptr().as_ptr()
+                as *mut crate::frame::arch::register_state::RegisterState);
+
+            rs.gprs[0] = count as u64;
+        }
     }
 
     crate::frame::cores::observer_advance_pc(observer);

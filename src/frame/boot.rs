@@ -280,6 +280,9 @@ static mut BSP_CORE_STATE: CoreState<RoundRobin> = CoreState {
     deadlines: [None; MAX_DEADLINES_PER_CORE],
     deadline_count: 0,
     cascade_continuation: None,
+    trace_active: false,
+    trace_count: 0,
+    trace_buffer: [crate::core_manager::TraceEntry::empty(); crate::core_manager::TRACE_CAPACITY],
 };
 
 // Linker symbol for the BSP boot stack top (link.ld).
@@ -312,6 +315,10 @@ fn init_bsp_per_core_data(rs_ptr: *mut RegisterState) {
                 deadlines: [None; MAX_DEADLINES_PER_CORE],
                 deadline_count: 0,
                 cascade_continuation: None,
+                trace_active: false,
+                trace_count: 0,
+                trace_buffer: [crate::core_manager::TraceEntry::empty();
+                    crate::core_manager::TRACE_CAPACITY],
             },
         );
 
