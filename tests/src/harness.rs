@@ -154,6 +154,10 @@ pub fn share_field(child: u64, field: u64) -> u64 {
         fail();
     }
 
+    // ObserverInstallCap copies (doesn't move) the source cap, so the
+    // cloned entry still occupies a slot in the parent's table.
+    let _ = close(cloned_handle);
+
     installed.value()
 }
 
