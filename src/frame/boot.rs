@@ -39,7 +39,7 @@ use crate::time_manager::CoreId;
 #[cfg(target_os = "none")]
 use crate::time_manager::Scheduler;
 #[cfg(target_os = "none")]
-use crate::time_manager::round_robin::RoundRobin;
+use crate::time_manager::SchedulerAlgorithm;
 #[cfg(target_os = "none")]
 use core::ptr::NonNull;
 #[cfg(target_os = "none")]
@@ -274,10 +274,10 @@ static mut BSP_PER_CORE_DATA: PerCoreData = PerCoreData {
 };
 
 #[cfg(target_os = "none")]
-static mut BSP_CORE_STATE: CoreState<RoundRobin> = CoreState {
+static mut BSP_CORE_STATE: CoreState<SchedulerAlgorithm> = CoreState {
     core_id: CoreId(0),
     current: None,
-    scheduler: RoundRobin::new(),
+    scheduler: SchedulerAlgorithm::eevdf(),
     deadlines: [None; MAX_DEADLINES_PER_CORE],
     deadline_count: 0,
     cascade_continuation: None,
@@ -312,7 +312,7 @@ fn init_bsp_per_core_data(rs_ptr: *mut RegisterState) {
             CoreState {
                 core_id: CoreId(0),
                 current: None,
-                scheduler: RoundRobin::new(),
+                scheduler: SchedulerAlgorithm::eevdf(),
                 deadlines: [None; MAX_DEADLINES_PER_CORE],
                 deadline_count: 0,
                 cascade_continuation: None,

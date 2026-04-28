@@ -13,7 +13,7 @@ use crate::frame::cores::PerCoreData;
 #[cfg(target_os = "none")]
 use crate::time_manager::CoreId;
 #[cfg(target_os = "none")]
-use crate::time_manager::round_robin::RoundRobin;
+use crate::time_manager::SchedulerAlgorithm;
 #[cfg(target_os = "none")]
 use core::cell::UnsafeCell;
 #[cfg(target_os = "none")]
@@ -69,11 +69,11 @@ static mut SECONDARY_PER_CORE_DATA: [PerCoreData; config::MAX_CORES - 1] = [cons
     config::MAX_CORES - 1];
 
 #[cfg(target_os = "none")]
-static mut SECONDARY_CORE_STATES: [CoreState<RoundRobin>; config::MAX_CORES - 1] = [const {
+static mut SECONDARY_CORE_STATES: [CoreState<SchedulerAlgorithm>; config::MAX_CORES - 1] = [const {
     CoreState {
         core_id: CoreId(0),
         current: None,
-        scheduler: RoundRobin::new(),
+        scheduler: SchedulerAlgorithm::eevdf(),
         deadlines: [None; MAX_DEADLINES_PER_CORE],
         deadline_count: 0,
         cascade_continuation: None,
@@ -110,7 +110,7 @@ fn init_secondary_per_core_data(core_id: usize) {
             CoreState {
                 core_id: CoreId(core_id as u16),
                 current: None,
-                scheduler: RoundRobin::new(),
+                scheduler: SchedulerAlgorithm::eevdf(),
                 deadlines: [None; MAX_DEADLINES_PER_CORE],
                 deadline_count: 0,
                 cascade_continuation: None,

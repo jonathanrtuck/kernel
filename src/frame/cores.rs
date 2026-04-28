@@ -808,6 +808,29 @@ pub fn observer_fault_info(observer_ptr: NonNull<Observer>) -> (crate::arena::Ob
     }
 }
 
+/// Read scheduling-relevant fields from an Observer (D42, D59).
+///
+/// Returns (compute_aggregate, responsiveness, throughput). Used by
+/// scheduling algorithms that need Observer profile data to make
+/// decisions (EEVDF weight and slice derivation).
+pub fn observer_scheduling_params(
+    observer_ptr: core::ptr::NonNull<crate::observer::Observer>,
+) -> (u32, u8, u8) {
+    // SAFETY: observer_ptr points to a live Observer in the arena.
+    // These fields are written only by cold-path typed operations
+    // (SetScheduling, Time cap install). Reading without the arena
+    // lock is acceptable per D59 lock discipline.
+    unsafe {
+        let observer = observer_ptr.as_ref();
+
+        (
+            observer.compute_aggregate,
+            observer.responsiveness,
+            observer.throughput,
+        )
+    }
+}
+
 /// Transition an Observer from Runnable to Faulted (D39, D100).
 ///
 /// Returns Ok(()) on success, Err if the transition is invalid.

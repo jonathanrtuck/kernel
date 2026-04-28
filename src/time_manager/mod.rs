@@ -78,5 +78,88 @@ pub trait Placement {
     fn place(&self, observer: &Observer, snapshots: &[CoreSnapshot]) -> PlacementDecision;
 }
 
+pub mod earliest_eligible_virtual_deadline;
 pub mod round_robin;
 pub mod scored_placement;
+
+/// Runtime-selectable scheduling algorithm (D2).
+///
+/// Wraps all Scheduler implementations in an enum so each core can
+/// run a different algorithm and the Governor can swap algorithms at
+/// runtime. Adding a new algorithm means adding a variant here and
+/// forwarding the trait methods.
+#[allow(clippy::large_enum_variant)]
+pub enum SchedulerAlgorithm {
+    RoundRobin(round_robin::RoundRobin),
+    Eevdf(earliest_eligible_virtual_deadline::EarliestEligibleVirtualDeadline),
+}
+
+impl SchedulerAlgorithm {
+    pub const fn round_robin() -> Self {
+        SchedulerAlgorithm::RoundRobin(round_robin::RoundRobin::new())
+    }
+
+    pub const fn eevdf() -> Self {
+        SchedulerAlgorithm::Eevdf(
+            earliest_eligible_virtual_deadline::EarliestEligibleVirtualDeadline::new(),
+        )
+    }
+
+    pub fn queue_depth(&self) -> u32 {
+        match self {
+            SchedulerAlgorithm::RoundRobin(rr) => rr.queue_depth(),
+            SchedulerAlgorithm::Eevdf(eevdf) => eevdf.queue_depth(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        match self {
+            SchedulerAlgorithm::RoundRobin(rr) => rr.is_empty(),
+            SchedulerAlgorithm::Eevdf(eevdf) => eevdf.is_empty(),
+        }
+    }
+
+    pub fn contains(&self, observer: NonNull<Observer>) -> bool {
+        match self {
+            SchedulerAlgorithm::RoundRobin(rr) => rr.contains(observer),
+            SchedulerAlgorithm::Eevdf(eevdf) => eevdf.contains(observer),
+        }
+    }
+}
+
+impl Scheduler for SchedulerAlgorithm {
+    fn enqueue(&mut self, observer: NonNull<Observer>) {
+        match self {
+            SchedulerAlgorithm::RoundRobin(rr) => rr.enqueue(observer),
+            SchedulerAlgorithm::Eevdf(eevdf) => eevdf.enqueue(observer),
+        }
+    }
+
+    fn dequeue(&mut self, observer: NonNull<Observer>) {
+        match self {
+            SchedulerAlgorithm::RoundRobin(rr) => rr.dequeue(observer),
+            SchedulerAlgorithm::Eevdf(eevdf) => eevdf.dequeue(observer),
+        }
+    }
+
+    fn pick_next(&self) -> Option<NonNull<Observer>> {
+        match self {
+            SchedulerAlgorithm::RoundRobin(rr) => rr.pick_next(),
+            SchedulerAlgorithm::Eevdf(eevdf) => eevdf.pick_next(),
+        }
+    }
+
+    fn should_switch_to(&self, receiver: NonNull<Observer>) -> bool {
+        match self {
+            SchedulerAlgorithm::RoundRobin(rr) => rr.should_switch_to(receiver),
+            SchedulerAlgorithm::Eevdf(eevdf) => eevdf.should_switch_to(receiver),
+        }
+    }
+
+    fn on_preempt(&mut self) {
+        match self {
+            SchedulerAlgorithm::RoundRobin(rr) => rr.on_preempt(),
+            SchedulerAlgorithm::Eevdf(eevdf) => eevdf.on_preempt(),
+        }
+    }
+}

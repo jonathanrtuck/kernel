@@ -178,11 +178,11 @@ extern "C" fn exception_handler(frame: &mut TrapFrame, source: u64) {
 #[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
 extern "C" fn el0_exception_handler(source: u64, esr: u64, far: u64) -> ! {
-    use crate::time_manager::round_robin::RoundRobin;
+    use crate::time_manager::SchedulerAlgorithm;
 
     let result = match source {
-        8 => handle_el0_sync::<RoundRobin>(source, esr, far),
-        9 => handle_el0_irq::<RoundRobin>(),
+        8 => handle_el0_sync::<SchedulerAlgorithm>(source, esr, far),
+        9 => handle_el0_irq::<SchedulerAlgorithm>(),
         _ => fatal_exception_el0(source, esr, far),
     };
 
@@ -608,7 +608,7 @@ fn verify_timer_fire<S: crate::time_manager::Scheduler + 'static>()
 
 #[cfg(target_os = "none")]
 fn verify_observer_destroy() -> ! {
-    let core = crate::core_manager::current_core::<crate::time_manager::round_robin::RoundRobin>();
+    let core = crate::core_manager::current_core::<crate::time_manager::SchedulerAlgorithm>();
     let observer = core.current.expect("must have current observer");
     let regs = crate::frame::cores::read_typed_registers(observer);
 
@@ -876,9 +876,9 @@ fn irq_handler(_frame: &mut TrapFrame) {
 #[cfg(target_os = "none")]
 fn idle_wakeup_check() {
     use crate::core_manager::{self, DispatchResult};
-    use crate::time_manager::round_robin::RoundRobin;
+    use crate::time_manager::SchedulerAlgorithm;
 
-    let core = core_manager::current_core_mut::<RoundRobin>();
+    let core = core_manager::current_core_mut::<SchedulerAlgorithm>();
 
     if core.current.is_some() {
         return;
@@ -910,9 +910,9 @@ fn idle_wakeup_check() {}
 #[cfg(target_os = "none")]
 fn idle_ipi_check() {
     use crate::core_manager::{self, DispatchResult};
-    use crate::time_manager::round_robin::RoundRobin;
+    use crate::time_manager::SchedulerAlgorithm;
 
-    let core = core_manager::current_core_mut::<RoundRobin>();
+    let core = core_manager::current_core_mut::<SchedulerAlgorithm>();
 
     if core.current.is_some() {
         return;

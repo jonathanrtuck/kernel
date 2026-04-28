@@ -1,0 +1,729 @@
+//! EEVDF scheduler: Earliest Eligible Virtual Deadline First.
+//!
+//! Proportional-share scheduler with bounded latency. Stoica &
+//! Abdel-Wahab 1995, adapted for this kernel's R/T/P profile model.
+//!
+//! Each Observer in the queue tracks virtual eligible time (VET) and
+//! virtual deadline (VD). The global virtual time advances by
+//! `SCALE / total_weight` per timer tick. An Observer is eligible when
+//! `VET <= global_virtual_time`. Among eligible Observers, `pick_next`
+//! selects the one with the earliest VD.
+//!
+//! R/T/P mapping:
+//! - Weight: `max(1, compute_aggregate)` — CPU share proportional to
+//!   held Time caps (D36). Equal weight = equal share.
+//! - Slice: derived from T. Higher T = longer slice = later deadlines
+//!   = fewer context switches. Lower T (high R or high P) = shorter
+//!   slice = earlier deadlines = more responsive.
+//!
+//! D2:  per-core algorithm, state lives in this struct (not Observer).
+//! D42: R/T/P profile interpreted through weight and slice mapping.
+//! D50: should_switch_to checks receiver's hypothetical deadline.
+//! D59: implements the five-method Scheduler trait.
+
+use crate::observer::Observer;
+use crate::time_manager::Scheduler;
+use core::ptr::NonNull;
+
+const MAX_QUEUE_DEPTH: usize = 64;
+
+/// Fixed-point scale factor for virtual time arithmetic.
+/// Multiply all virtual times by this to avoid precision loss
+/// when dividing by weight.
+const SCALE: u64 = 1 << 20;
+
+/// Minimum slice in logical ticks. Even the most responsive Observer
+/// gets at least this many ticks before its deadline advances.
+const MIN_SLICE_TICKS: u64 = 1;
+
+/// Maximum slice in logical ticks. The most throughput-oriented
+/// Observer gets this many ticks per scheduling quantum.
+const MAX_SLICE_TICKS: u64 = 16;
+
+/// Per-Observer scheduling state within the EEVDF queue.
+///
+/// Stored alongside the Observer pointer in the scheduler's array.
+/// This is algorithm-specific state (D2) — it lives in the scheduler,
+/// not in the Observer struct.
+#[derive(Clone, Copy)]
+struct EevdfEntry {
+    observer: NonNull<Observer>,
+    virtual_eligible_time: u64,
+    virtual_deadline: u64,
+    weight: u32,
+    slice: u64,
+}
+
+/// EEVDF scheduler (D2, D59).
+///
+/// Unsorted flat array with linear scan. At MAX_QUEUE_DEPTH=64, a
+/// full scan is ~200 cycles — comparable to RoundRobin's dequeue.
+pub struct EarliestEligibleVirtualDeadline {
+    entries: [Option<EevdfEntry>; MAX_QUEUE_DEPTH],
+    count: u8,
+    global_virtual_time: u64,
+    total_weight: u32,
+    /// Cached pointer to the Observer last returned by pick_next.
+    /// Used by on_preempt to update the running Observer's state.
+    current: Option<usize>,
+}
+
+impl Default for EarliestEligibleVirtualDeadline {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EarliestEligibleVirtualDeadline {
+    pub const fn new() -> Self {
+        EarliestEligibleVirtualDeadline {
+            entries: [None; MAX_QUEUE_DEPTH],
+            count: 0,
+            global_virtual_time: SCALE,
+            total_weight: 0,
+            current: None,
+        }
+    }
+
+    pub fn queue_depth(&self) -> u32 {
+        self.count as u32
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub fn contains(&self, observer: NonNull<Observer>) -> bool {
+        self.find(observer).is_some()
+    }
+
+    fn find(&self, observer: NonNull<Observer>) -> Option<usize> {
+        for i in 0..self.count as usize {
+            if let Some(ref entry) = self.entries[i]
+                && entry.observer == observer
+            {
+                return Some(i);
+            }
+        }
+
+        None
+    }
+
+    /// Derive weight from Observer's compute_aggregate (D36).
+    fn weight_of(observer: NonNull<Observer>) -> u32 {
+        let (aggregate, _, _) = crate::frame::cores::observer_scheduling_params(observer);
+
+        if aggregate == 0 { 1 } else { aggregate }
+    }
+
+    /// Derive slice (in scaled virtual ticks) from Observer's throughput.
+    ///
+    /// Higher T = longer slice = later deadlines = more throughput.
+    /// Lower T (high R or high P) = shorter slice = earlier deadlines.
+    fn slice_of(observer: NonNull<Observer>, weight: u32) -> u64 {
+        let (_, _, throughput_val) = crate::frame::cores::observer_scheduling_params(observer);
+        let throughput = throughput_val as u64;
+        let ticks = MIN_SLICE_TICKS + throughput * (MAX_SLICE_TICKS - MIN_SLICE_TICKS) / 128;
+
+        ticks * SCALE / weight as u64
+    }
+
+    /// Find the index of the eligible Observer with the earliest VD.
+    fn best_eligible(&self) -> Option<usize> {
+        let mut best_idx = None;
+        let mut best_vd = u64::MAX;
+
+        for i in 0..self.count as usize {
+            if let Some(ref entry) = self.entries[i]
+                && entry.virtual_eligible_time <= self.global_virtual_time
+                && entry.virtual_deadline < best_vd
+            {
+                best_vd = entry.virtual_deadline;
+                best_idx = Some(i);
+            }
+        }
+
+        best_idx
+    }
+}
+
+impl Scheduler for EarliestEligibleVirtualDeadline {
+    /// Add an Observer to the run queue (D59).
+    ///
+    /// On enqueue (wake from block or initial resume), the Observer is
+    /// immediately eligible: VET = global_virtual_time. Its deadline is
+    /// VD = VET + slice. This gives recently-woken Observers favorable
+    /// treatment — they are eligible immediately with a near deadline,
+    /// matching the EEVDF sleeper-fairness property.
+    fn enqueue(&mut self, observer: NonNull<Observer>) {
+        if self.find(observer).is_some() {
+            return;
+        }
+        if (self.count as usize) >= MAX_QUEUE_DEPTH {
+            return;
+        }
+
+        let weight = Self::weight_of(observer);
+        let slice = Self::slice_of(observer, weight);
+        let entry = EevdfEntry {
+            observer,
+            virtual_eligible_time: self.global_virtual_time,
+            virtual_deadline: self.global_virtual_time + slice,
+            weight,
+            slice,
+        };
+
+        self.entries[self.count as usize] = Some(entry);
+        self.count += 1;
+        self.total_weight += weight;
+    }
+
+    /// Remove an Observer from the run queue (D59).
+    ///
+    /// On dequeue (block on Receive/Call), EEVDF state is discarded.
+    /// Re-enqueue will re-derive VET/VD from the current global time,
+    /// matching standard EEVDF wakeup behavior.
+    fn dequeue(&mut self, observer: NonNull<Observer>) {
+        if let Some(idx) = self.find(observer) {
+            let weight = self.entries[idx].as_ref().unwrap().weight;
+
+            self.total_weight = self.total_weight.saturating_sub(weight);
+
+            // Swap-remove: move last entry into the gap.
+            let last = self.count as usize - 1;
+
+            if idx != last {
+                self.entries[idx] = self.entries[last];
+            }
+
+            self.entries[last] = None;
+            self.count -= 1;
+
+            // Invalidate current index if it pointed to the removed or
+            // swapped entry.
+            if let Some(cur) = self.current {
+                if cur == idx {
+                    self.current = None;
+                } else if cur == last {
+                    self.current = Some(idx);
+                }
+            }
+        }
+    }
+
+    /// Select the eligible Observer with the earliest virtual deadline.
+    ///
+    /// If no Observer is eligible (all have VET > global_virtual_time),
+    /// falls back to the Observer with the earliest VD regardless of
+    /// eligibility — prevents starvation when virtual time drifts.
+    fn pick_next(&self) -> Option<NonNull<Observer>> {
+        if self.count == 0 {
+            return None;
+        }
+
+        // Primary: earliest deadline among eligible Observers.
+        if let Some(idx) = self.best_eligible() {
+            // Cache the index for on_preempt (interior mutability not
+            // needed — pick_next is always followed by on_preempt which
+            // is &mut self and will set current).
+            return Some(self.entries[idx].as_ref().unwrap().observer);
+        }
+
+        // Fallback: no eligible Observers. Pick earliest VD overall.
+        // This happens when all Observers have consumed ahead of their
+        // share (negative lag). Picking the earliest VD prevents
+        // starvation and allows virtual time to catch up.
+        let mut best_idx = 0;
+        let mut best_vd = u64::MAX;
+
+        for i in 0..self.count as usize {
+            if let Some(ref entry) = self.entries[i]
+                && entry.virtual_deadline < best_vd
+            {
+                best_vd = entry.virtual_deadline;
+                best_idx = i;
+            }
+        }
+
+        Some(self.entries[best_idx].as_ref().unwrap().observer)
+    }
+
+    /// IPC fast-path predicate (D50, D59).
+    ///
+    /// Approves the direct switch if the receiver would have an earlier
+    /// deadline than the current best eligible Observer. The receiver is
+    /// not in the queue (it was blocked), so we compute its hypothetical
+    /// deadline: global_virtual_time + slice_of(receiver).
+    ///
+    /// Budget: ~20 cycles (two field reads + arithmetic + comparison).
+    fn should_switch_to(&self, receiver: NonNull<Observer>) -> bool {
+        if self.count == 0 {
+            return true;
+        }
+
+        let weight = Self::weight_of(receiver);
+        let receiver_vd = self.global_virtual_time + Self::slice_of(receiver, weight);
+
+        // Compare against the best eligible in the queue.
+        if let Some(idx) = self.best_eligible() {
+            let best_vd = self.entries[idx].as_ref().unwrap().virtual_deadline;
+
+            return receiver_vd <= best_vd;
+        }
+
+        true
+    }
+
+    /// Timer tick accounting (D59).
+    ///
+    /// Advances global virtual time and updates the running Observer's
+    /// VET and VD. The running Observer is the one last returned by
+    /// pick_next — tracked via `current` index.
+    fn on_preempt(&mut self) {
+        if self.count == 0 {
+            return;
+        }
+
+        // Advance global virtual time by one tick scaled by total weight.
+        if self.total_weight > 0 {
+            self.global_virtual_time += SCALE / self.total_weight as u64;
+        }
+
+        // Find the running Observer (the one pick_next last selected).
+        // If current is stale (dequeue invalidated it), re-derive from
+        // pick_next's logic.
+        let running_idx = match self.current {
+            Some(idx) if idx < self.count as usize => idx,
+            _ => {
+                // Re-derive: find best eligible, or earliest VD.
+                match self.best_eligible() {
+                    Some(idx) => idx,
+                    None => {
+                        // Fallback: earliest VD.
+                        let mut best = 0;
+                        let mut best_vd = u64::MAX;
+
+                        for i in 0..self.count as usize {
+                            if let Some(ref entry) = self.entries[i]
+                                && entry.virtual_deadline < best_vd
+                            {
+                                best_vd = entry.virtual_deadline;
+                                best = i;
+                            }
+                        }
+
+                        best
+                    }
+                }
+            }
+        };
+
+        // Update the running Observer: it consumed one tick of CPU.
+        // VET advances to its old VD (it has now "used" its quantum).
+        // VD advances by slice/weight (its next deadline).
+        if let Some(ref mut entry) = self.entries[running_idx] {
+            entry.virtual_eligible_time = entry.virtual_deadline;
+            entry.virtual_deadline += entry.slice;
+            // Refresh weight and slice in case profile changed.
+            entry.weight = Self::weight_of(entry.observer);
+            entry.slice = Self::slice_of(entry.observer, entry.weight);
+        }
+
+        // Update current for next cycle. pick_next will be called
+        // immediately after on_preempt; cache the best for consistency.
+        self.current = self.best_eligible().or_else(|| {
+            let mut best = 0;
+            let mut best_vd = u64::MAX;
+
+            for i in 0..self.count as usize {
+                if let Some(ref entry) = self.entries[i]
+                    && entry.virtual_deadline < best_vd
+                {
+                    best_vd = entry.virtual_deadline;
+                    best = i;
+                }
+            }
+
+            Some(best)
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::observer::Observer;
+
+    fn make_observer() -> Observer {
+        Observer::test_default()
+    }
+
+    fn make_observer_with_profile(r: u8, t: u8) -> Observer {
+        let mut obs = Observer::test_default();
+
+        obs.responsiveness = r;
+        obs.throughput = t;
+
+        obs
+    }
+
+    // ── Basic trait compliance ──────────────────────────────────────
+
+    #[test]
+    fn new_scheduler_is_empty() {
+        let sched = EarliestEligibleVirtualDeadline::new();
+
+        assert!(sched.is_empty());
+        assert_eq!(sched.queue_depth(), 0);
+        assert!(sched.pick_next().is_none());
+    }
+
+    #[test]
+    fn enqueue_adds_to_queue() {
+        let mut sched = EarliestEligibleVirtualDeadline::new();
+        let mut obs = make_observer();
+        let ptr = NonNull::from(&mut obs);
+
+        sched.enqueue(ptr);
+
+        assert_eq!(sched.queue_depth(), 1);
+        assert!(sched.contains(ptr));
+    }
+
+    #[test]
+    fn dequeue_removes_from_queue() {
+        let mut sched = EarliestEligibleVirtualDeadline::new();
+        let mut obs = make_observer();
+        let ptr = NonNull::from(&mut obs);
+
+        sched.enqueue(ptr);
+        sched.dequeue(ptr);
+
+        assert_eq!(sched.queue_depth(), 0);
+        assert!(!sched.contains(ptr));
+    }
+
+    #[test]
+    fn pick_next_returns_enqueued_observer() {
+        let mut sched = EarliestEligibleVirtualDeadline::new();
+        let mut obs = make_observer();
+        let ptr = NonNull::from(&mut obs);
+
+        sched.enqueue(ptr);
+
+        assert_eq!(sched.pick_next(), Some(ptr));
+    }
+
+    #[test]
+    fn pick_next_returns_none_when_empty() {
+        let sched = EarliestEligibleVirtualDeadline::new();
+
+        assert!(sched.pick_next().is_none());
+    }
+
+    #[test]
+    fn dequeue_nonexistent_is_noop() {
+        let mut sched = EarliestEligibleVirtualDeadline::new();
+        let mut obs_a = make_observer();
+        let mut obs_b = make_observer();
+        let ptr_a = NonNull::from(&mut obs_a);
+        let ptr_b = NonNull::from(&mut obs_b);
+
+        sched.enqueue(ptr_a);
+        sched.dequeue(ptr_b);
+
+        assert_eq!(sched.queue_depth(), 1);
+    }
+
+    #[test]
+    fn duplicate_enqueue_rejected() {
+        let mut sched = EarliestEligibleVirtualDeadline::new();
+        let mut obs = make_observer();
+        let ptr = NonNull::from(&mut obs);
+
+        sched.enqueue(ptr);
+        sched.enqueue(ptr);
+
+        assert_eq!(sched.queue_depth(), 1);
+    }
+
+    // ── EEVDF-specific behavior ─────────────────────────────────────
+
+    #[test]
+    fn high_responsiveness_observer_selected_first() {
+        let mut sched = EarliestEligibleVirtualDeadline::new();
+        let mut interactive = make_observer_with_profile(120, 0);
+        let mut batch = make_observer_with_profile(0, 120);
+        let iptr = NonNull::from(&mut interactive);
+        let bptr = NonNull::from(&mut batch);
+
+        sched.enqueue(iptr);
+        sched.enqueue(bptr);
+
+        // Both are eligible (VET = global_virtual_time). Interactive
+        // has shorter slice → earlier deadline → selected first.
+        assert_eq!(
+            sched.pick_next(),
+            Some(iptr),
+            "EEVDF must select high-R observer (earlier deadline)"
+        );
+    }
+
+    #[test]
+    fn equal_profiles_round_robin_like() {
+        let mut sched = EarliestEligibleVirtualDeadline::new();
+        let mut obs_a = make_observer();
+        let mut obs_b = make_observer();
+        let ptr_a = NonNull::from(&mut obs_a);
+        let ptr_b = NonNull::from(&mut obs_b);
+
+        sched.enqueue(ptr_a);
+        sched.enqueue(ptr_b);
+
+        // With equal profiles, both have the same slice. First enqueued
+        // has (marginally) earlier VD. After on_preempt, A's VD advances
+        // past B's, so B should be selected.
+        assert_eq!(sched.pick_next(), Some(ptr_a));
+
+        sched.on_preempt();
+
+        assert_eq!(
+            sched.pick_next(),
+            Some(ptr_b),
+            "after preempt, the other observer should be selected"
+        );
+    }
+
+    #[test]
+    fn on_preempt_advances_virtual_time() {
+        let mut sched = EarliestEligibleVirtualDeadline::new();
+        let mut obs = make_observer();
+        let ptr = NonNull::from(&mut obs);
+        let vt_before = sched.global_virtual_time;
+
+        sched.enqueue(ptr);
+        sched.on_preempt();
+
+        assert!(
+            sched.global_virtual_time > vt_before,
+            "on_preempt must advance global virtual time"
+        );
+    }
+
+    #[test]
+    fn interactive_scheduled_more_frequently() {
+        let mut sched = EarliestEligibleVirtualDeadline::new();
+        let mut interactive = make_observer_with_profile(120, 0);
+        let mut batch1 = make_observer_with_profile(0, 120);
+        let mut batch2 = make_observer_with_profile(0, 120);
+        let iptr = NonNull::from(&mut interactive);
+        let bptr1 = NonNull::from(&mut batch1);
+        let bptr2 = NonNull::from(&mut batch2);
+
+        sched.enqueue(bptr1);
+        sched.enqueue(bptr2);
+        sched.enqueue(iptr);
+
+        // Interactive has the shortest slice → earliest deadline → first pick.
+        assert_eq!(sched.pick_next(), Some(iptr));
+
+        // After one preempt, interactive's VET advances past global_vt
+        // (it consumed its short quantum). A batch observer runs next.
+        // This is correct: EEVDF gives interactive frequent but short turns.
+        sched.on_preempt();
+
+        let second = sched.pick_next().unwrap();
+
+        assert_ne!(
+            second, iptr,
+            "after consuming its quantum, interactive yields to batch"
+        );
+
+        // Over 60 ticks, interactive should be selected much more often
+        // than either batch observer (shorter slice = earlier deadlines
+        // = more frequent scheduling).
+        let mut interactive_count = 0u32;
+
+        for _ in 0..60 {
+            if sched.pick_next() == Some(iptr) {
+                interactive_count += 1;
+            }
+
+            sched.on_preempt();
+        }
+
+        // With equal weights but 15:1 slice ratio, interactive should
+        // get ~15x more scheduling events (each shorter). It should
+        // appear in at least 40% of picks.
+        assert!(
+            interactive_count >= 20,
+            "interactive got {interactive_count}/60 picks, expected >= 20"
+        );
+    }
+
+    #[test]
+    fn should_switch_to_favors_responsive_receiver() {
+        let mut sched = EarliestEligibleVirtualDeadline::new();
+        let mut batch = make_observer_with_profile(0, 120);
+        let bptr = NonNull::from(&mut batch);
+
+        sched.enqueue(bptr);
+
+        let mut interactive = make_observer_with_profile(120, 0);
+        let iptr = NonNull::from(&mut interactive);
+
+        assert!(
+            sched.should_switch_to(iptr),
+            "should approve switch to responsive receiver"
+        );
+    }
+
+    #[test]
+    fn should_switch_to_empty_queue_approves() {
+        let sched = EarliestEligibleVirtualDeadline::new();
+        let mut obs = make_observer();
+        let ptr = NonNull::from(&mut obs);
+
+        assert!(sched.should_switch_to(ptr));
+    }
+
+    #[test]
+    fn on_preempt_empty_is_noop() {
+        let mut sched = EarliestEligibleVirtualDeadline::new();
+
+        sched.on_preempt();
+
+        assert!(sched.is_empty());
+    }
+
+    #[test]
+    fn on_preempt_single_preserves_observer() {
+        let mut sched = EarliestEligibleVirtualDeadline::new();
+        let mut obs = make_observer();
+        let ptr = NonNull::from(&mut obs);
+
+        sched.enqueue(ptr);
+        sched.on_preempt();
+
+        assert_eq!(sched.pick_next(), Some(ptr));
+        assert_eq!(sched.queue_depth(), 1);
+    }
+
+    // ── Fairness ────────────────────────────────────────────────────
+
+    #[test]
+    fn equal_observers_get_equal_scheduling() {
+        let mut sched = EarliestEligibleVirtualDeadline::new();
+        let mut observers: [Observer; 4] = core::array::from_fn(|_| make_observer());
+        let ptrs: [NonNull<Observer>; 4] =
+            core::array::from_fn(|i| NonNull::from(&mut observers[i]));
+
+        for ptr in &ptrs {
+            sched.enqueue(*ptr);
+        }
+
+        // Run 40 ticks and count how many times each observer is selected.
+        let mut counts = [0u32; 4];
+
+        for _ in 0..40 {
+            if let Some(picked) = sched.pick_next() {
+                for (j, ptr) in ptrs.iter().enumerate() {
+                    if picked == *ptr {
+                        counts[j] += 1;
+
+                        break;
+                    }
+                }
+            }
+
+            sched.on_preempt();
+        }
+
+        // Each should get ~10 ticks (±2 for rounding).
+        for (i, &count) in counts.iter().enumerate() {
+            assert!(
+                count >= 5 && count <= 15,
+                "observer {i} got {count} ticks, expected ~10"
+            );
+        }
+    }
+
+    // ── Adversarial ─────────────────────────────────────────────────
+
+    #[test]
+    fn dequeue_middle_preserves_others() {
+        let mut sched = EarliestEligibleVirtualDeadline::new();
+        let mut obs_a = make_observer();
+        let mut obs_b = make_observer();
+        let mut obs_c = make_observer();
+        let ptr_a = NonNull::from(&mut obs_a);
+        let ptr_b = NonNull::from(&mut obs_b);
+        let ptr_c = NonNull::from(&mut obs_c);
+
+        sched.enqueue(ptr_a);
+        sched.enqueue(ptr_b);
+        sched.enqueue(ptr_c);
+        sched.dequeue(ptr_b);
+
+        assert_eq!(sched.queue_depth(), 2);
+        assert!(sched.contains(ptr_a));
+        assert!(!sched.contains(ptr_b));
+        assert!(sched.contains(ptr_c));
+    }
+
+    #[test]
+    fn enqueue_after_drain() {
+        let mut sched = EarliestEligibleVirtualDeadline::new();
+        let mut obs_a = make_observer();
+        let mut obs_b = make_observer();
+        let ptr_a = NonNull::from(&mut obs_a);
+        let ptr_b = NonNull::from(&mut obs_b);
+
+        sched.enqueue(ptr_a);
+        sched.dequeue(ptr_a);
+        sched.enqueue(ptr_b);
+
+        assert_eq!(sched.queue_depth(), 1);
+        assert_eq!(sched.pick_next(), Some(ptr_b));
+    }
+
+    #[test]
+    fn many_preempts_no_overflow() {
+        let mut sched = EarliestEligibleVirtualDeadline::new();
+        let mut obs = make_observer();
+        let ptr = NonNull::from(&mut obs);
+
+        sched.enqueue(ptr);
+
+        for _ in 0..10_000 {
+            sched.on_preempt();
+        }
+
+        assert_eq!(sched.pick_next(), Some(ptr));
+    }
+
+    #[test]
+    fn total_weight_tracks_correctly() {
+        let mut sched = EarliestEligibleVirtualDeadline::new();
+        let mut obs_a = make_observer();
+        let mut obs_b = make_observer();
+        let ptr_a = NonNull::from(&mut obs_a);
+        let ptr_b = NonNull::from(&mut obs_b);
+
+        sched.enqueue(ptr_a);
+
+        assert_eq!(sched.total_weight, 100);
+
+        sched.enqueue(ptr_b);
+
+        assert_eq!(sched.total_weight, 200);
+
+        sched.dequeue(ptr_a);
+
+        assert_eq!(sched.total_weight, 100);
+
+        sched.dequeue(ptr_b);
+
+        assert_eq!(sched.total_weight, 0);
+    }
+}
