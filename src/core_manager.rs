@@ -986,6 +986,8 @@ impl<S: Scheduler> CoreState<S> {
                     // Unblock receiver (D39: Blocked -> Runnable).
                     let _ = crate::frame::cores::observer_unblock(receiver_ptr);
 
+                    self.current = Some(receiver_ptr);
+
                     DispatchResult::ResumeFastPath(receiver_ptr)
                 } else {
                     // D96: DirectSwitch denied — fall back to slow path.
