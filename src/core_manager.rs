@@ -2356,6 +2356,17 @@ impl<S: Scheduler> CoreState<S> {
 
                 debug_assert!(wrote);
 
+                // D17: the fault handler cap targets a Field — track the
+                // badge so cascade-closing this slot on Observer destroy
+                // produces a badge-closure notification on the handler Field.
+                {
+                    let mut fields = kernel_state.fields.acquire();
+
+                    if let Some(field) = fields.get_mut(handler_field_id) {
+                        field.badge_increment(handler_badge);
+                    }
+                }
+
                 let wrote = crate::frame::capabilities::write_entry(
                     cap_entries_new,
                     cap_capacity_new,
@@ -9262,6 +9273,219 @@ mod tests {
 
         assert_eq!(msg.badge, Badge(0));
         assert_eq!(msg.label, crate::field::LABEL_CLOSURE);
+    }
+
+    /// D17/D95: CreateObserver installs a fault handler cap (slot 0) to
+    /// a Field. If that Field has badge tracking, the handler badge must
+    /// be tracked. Destroying the child Observer must produce a badge-
+    /// closure notification on the handler Field.
+    #[test]
+    fn test_d17_create_observer_fault_handler_badge_tracked() {
+        let ks = make_kernel_state();
+        let handler_field_id = make_tracked_field_in_arena(&ks, 8);
+
+        // Create a Space for the new Observer's backing (needs room for
+        // RegisterState + L1 root + cap table).
+        let space_id = make_space_in_arena(&ks, 0x10000, 8 * 4096);
+
+        // Sender holds a Space cap (will become CreateObserver target)
+        // and a Field cap (handler) at slot 3.
+        let mut sender = crate::observer::Observer::test_with_cap_table(16);
+        let entries = sender.cap_table;
+
+        // Slot 0: Space cap (CreateObserver target).
+        crate::frame::capabilities::write_entry(
+            entries,
+            16,
+            0,
+            crate::capability::Entry {
+                object: Some((ObjectType::Space, space_id)),
+                rights: Rights::SPACE_ALL,
+                badge: Badge(0),
+                slot_tag: crate::capability::SlotTag(0),
+                send_once: false,
+                stored_generation: 0,
+            },
+        );
+
+        // Slot 3: handler Field cap.
+        let handler_handle = crate::capability::Handle {
+            index: 3,
+            slot_tag: crate::capability::SlotTag(0),
+        };
+
+        crate::frame::capabilities::write_entry(
+            entries,
+            16,
+            3,
+            crate::capability::Entry {
+                object: Some((ObjectType::Field, handler_field_id)),
+                rights: Rights::SEND,
+                badge: Badge(0),
+                slot_tag: crate::capability::SlotTag(0),
+                send_once: false,
+                stored_generation: 0,
+            },
+        );
+
+        sender.cap_table_count = 2;
+
+        let sender_ptr = NonNull::from(&mut sender);
+        let space_handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        // CreateObserver: args[0]=handler cap handle, args[1]=handler badge.
+        setup_typed_regs(
+            sender_ptr,
+            TypedOperation::CreateObserver as u16,
+            space_handle,
+            [handler_handle.encode(), 0xAA, 0, 0],
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::CreateObserver, &ks);
+
+        let x0 = read_typed_result(sender_ptr);
+
+        assert_eq!(x0, 0, "CreateObserver must succeed");
+
+        // The cap at slot 0 was overwritten with the Observer cap.
+        let entry = crate::frame::capabilities::entry_ref(entries, 16, 0).unwrap();
+        let (obj_type, observer_id) = entry.object.unwrap();
+
+        assert_eq!(obj_type, ObjectType::Observer);
+
+        // Now destroy the child Observer — cascade should close the
+        // handler cap (slot 0 in child's table, badge 0xAA) and produce
+        // a badge-closure on the handler Field.
+        setup_typed_regs(
+            sender_ptr,
+            TypedOperation::Destroy as u16,
+            space_handle, // slot 0 now holds the Observer cap
+            [0; 4],
+        );
+        core.dispatch_typed(TypedOperation::Destroy, &ks);
+
+        let mut fields = ks.fields.acquire();
+        let field = fields.get_mut(handler_field_id).unwrap();
+
+        assert!(
+            !field.is_empty(),
+            "D17/D95: destroying child must enqueue badge-closure on handler Field"
+        );
+
+        let msg = field.dequeue().unwrap();
+
+        assert_eq!(msg.label, crate::field::LABEL_CLOSURE);
+        assert_eq!(
+            msg.badge,
+            Badge(0xAA),
+            "D17/D95: closure badge must match handler_badge"
+        );
+    }
+
+    /// D17/D45: FieldSplit initial cap (badge 0) must be tracked if the
+    /// sub-Field inherits badge tracking from the source Field.
+    /// Currently FieldSplit does not enable tracking on sub-Fields, so
+    /// this test verifies the sub-Field can be used without badge issues.
+    /// When sub-Field tracking is added, this test should be updated.
+    #[test]
+    fn test_d17_field_split_initial_cap_no_tracking() {
+        let ks = make_kernel_state();
+        let source_field_id = make_tracked_field_in_arena(&ks, 8);
+        let space_id = make_space_in_arena(&ks, 0x10000, 0x1000);
+
+        let (mut sender, _entries) = make_sender_with_cap(
+            ObjectType::Field,
+            source_field_id,
+            Rights::FIELD_ALL,
+            Badge(0),
+            0,
+        );
+
+        // Install Space cap at slot 3.
+        crate::frame::capabilities::write_entry(
+            sender.cap_table,
+            16,
+            3,
+            crate::capability::Entry {
+                object: Some((ObjectType::Space, space_id)),
+                rights: Rights::SPACE_ALL,
+                badge: Badge(0),
+                slot_tag: crate::capability::SlotTag(0),
+                send_once: false,
+                stored_generation: 0,
+            },
+        );
+
+        sender.cap_table_count = 2;
+        sender.cap_table_free_head = Some(4);
+
+        let sender_ptr = NonNull::from(&mut sender);
+        let source_handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+        let space_handle = crate::capability::Handle {
+            index: 3,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        // FieldSplit: args[0]=space cap, args[1]=badge_low, args[2]=badge_high.
+        setup_typed_regs(
+            sender_ptr,
+            TypedOperation::FieldSplit as u16,
+            source_handle,
+            [space_handle, 100, 200, 0],
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::FieldSplit, &ks);
+
+        let x0 = read_typed_result(sender_ptr);
+
+        assert_eq!(x0, 0, "FieldSplit must succeed");
+
+        // The sub-Field cap is now at slot 3 (Space cap was consumed).
+        let entry = crate::frame::capabilities::entry_ref(sender.cap_table, 16, 3).unwrap();
+        let (obj_type, sub_field_id) = entry.object.unwrap();
+
+        assert_eq!(obj_type, ObjectType::Field);
+
+        // Sub-Field should NOT have badge tracking (FieldSplit doesn't enable it).
+        let fields = ks.fields.acquire();
+        let sub_field = fields.get(sub_field_id).unwrap();
+
+        assert!(
+            !sub_field.badge_tracking,
+            "D17: FieldSplit sub-Field does not enable badge tracking"
+        );
+
+        // Closing the sub-Field cap should not crash or produce spurious notifications.
+        drop(fields);
+
+        setup_typed_regs(
+            sender_ptr,
+            TypedOperation::Close as u16,
+            space_handle, // slot 3 now holds sub-Field cap
+            [0; 4],
+        );
+        core.dispatch_typed(TypedOperation::Close, &ks);
+
+        let x0_close = read_typed_result(sender_ptr);
+
+        assert_eq!(x0_close, 0, "Close on sub-Field cap must succeed");
     }
 
     /// D17/D98: Observer Destroy cascade decrements badges and enqueues
