@@ -258,6 +258,7 @@ pub fn deliver_fault(
             // Should not happen after is_full check, but construct a
             // replacement message rather than losing the fault.
             let fallback = fault.to_message(handler_badge, observer_cap);
+
             FaultDeliveryOutcome::Deferred(fallback)
         }
     }

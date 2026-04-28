@@ -3156,7 +3156,6 @@ fn cascade_batch_with_badge_tracking(
         Some(level) => level.slot_cursor,
         None => return true,
     };
-
     // Pre-read: collect (field_id, badge) for Field-type entries in this batch.
     let mut badge_events: [(ObjectId, crate::capability::Badge); 16] =
         [(ObjectId(0), crate::capability::Badge(0)); 16];
@@ -9333,7 +9332,6 @@ mod tests {
 
             id
         };
-
         // Sender holds a Destroy cap to the target Observer.
         let (mut sender, _entries) = make_sender_with_cap(
             ObjectType::Observer,
@@ -10537,7 +10535,6 @@ mod tests {
             matches!(outcome, crate::communication::ReceiveOutcome::Received(_)),
             "D18: first receive must return the queued message"
         );
-
         // The pending entry should be consumed and the deferred fault
         // message enqueued — the queue should still have 1 message.
         assert!(
