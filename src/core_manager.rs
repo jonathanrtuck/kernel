@@ -1941,9 +1941,12 @@ impl<S: Scheduler> CoreState<S> {
                         space_size,
                     );
 
-                    // D17: opt-in badge tracking.
+                    // D17: opt-in badge tracking. The initial cap (badge 0)
+                    // must be counted so Clone + Close doesn't produce a
+                    // spurious closure while the original cap still exists.
                     if badge_tracking_requested {
                         new_field.enable_badge_tracking();
+                        new_field.badge_increment(capability::Badge(0));
                     }
 
                     id
@@ -9160,6 +9163,106 @@ mod tests {
             field.badge_map.is_some(),
             "D17: badge_map must be allocated"
         );
+    }
+
+    /// D17 CreateField: the initial cap (badge 0) must be tracked in the
+    /// badge map. Cloning and closing the clone must NOT produce a spurious
+    /// closure while the original cap still exists.
+    #[test]
+    fn test_d17_create_field_initial_cap_tracked() {
+        let ks = make_kernel_state();
+        let space_id = make_space_in_arena(&ks, 0x10000, 0x1000);
+        let (mut sender, _entries) =
+            make_sender_with_cap(ObjectType::Space, space_id, Rights::SPACE_ALL, Badge(0), 0);
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        // CreateField with badge tracking.
+        setup_typed_regs(
+            sender_ptr,
+            TypedOperation::CreateField as u16,
+            handle,
+            [1, 0, 0, 0],
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::CreateField, &ks);
+
+        let x0 = read_typed_result(sender_ptr);
+
+        assert_eq!(x0, 0, "CreateField must succeed");
+
+        // Slot 0 now holds the Field cap with badge 0.
+        let source_handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        // Clone the creator's cap (same badge 0).
+        setup_typed_regs(
+            sender_ptr,
+            TypedOperation::Clone as u16,
+            source_handle,
+            [0; 4],
+        );
+        core.dispatch_typed(TypedOperation::Clone, &ks);
+
+        let clone_handle = read_typed_result(sender_ptr);
+
+        assert!((clone_handle as i64) >= 0, "Clone must succeed");
+
+        // Read the Field id from slot 0.
+        let entry = crate::frame::capabilities::entry_ref(sender.cap_table, 16, 0).unwrap();
+        let (_, field_id) = entry.object.unwrap();
+
+        // Close the clone — must NOT trigger closure (original still alive).
+        setup_typed_regs(
+            sender_ptr,
+            TypedOperation::Close as u16,
+            clone_handle,
+            [0; 4],
+        );
+        core.dispatch_typed(TypedOperation::Close, &ks);
+
+        {
+            let fields = ks.fields.acquire();
+            let field = fields.get(field_id).unwrap();
+
+            assert!(
+                field.is_empty(),
+                "D17: closing clone with original alive must not produce spurious closure"
+            );
+        }
+
+        // Close the original — NOW the closure should fire.
+        setup_typed_regs(
+            sender_ptr,
+            TypedOperation::Close as u16,
+            source_handle,
+            [0; 4],
+        );
+        core.dispatch_typed(TypedOperation::Close, &ks);
+
+        let mut fields = ks.fields.acquire();
+        let field = fields.get_mut(field_id).unwrap();
+
+        assert!(
+            !field.is_empty(),
+            "D17: closing last cap must enqueue closure"
+        );
+
+        let msg = field.dequeue().unwrap();
+
+        assert_eq!(msg.badge, Badge(0));
+        assert_eq!(msg.label, crate::field::LABEL_CLOSURE);
     }
 
     /// D17/D98: Observer Destroy cascade decrements badges and enqueues

@@ -1707,7 +1707,7 @@ Time clonability.
 ### D32 — Kernel-internal memory accounting: type conversion model
 
 Object creation is type conversion: a Space is consumed entirely and becomes the
-object's functional backing. `create_field(space_cap) → field_cap`;
+object's functional backing. `create_field(space_cap, flags) → field_cap`;
 `create_observer(space_cap, config) → observer_cap`. The Space is gone; the
 object exists. Destruction is the reverse: `destroy(object_cap) → space_cap`.
 The freed pages become a new Space returned to the destroyer. Conservation is
@@ -2920,7 +2920,7 @@ Field operations:
 
 | Operation    | Signature                                     | Source           |
 | ------------ | --------------------------------------------- | ---------------- |
-| create_field | (space_cap) → field_cap                       | D32              |
+| create_field | (space_cap, flags) → field_cap                | D32, D17         |
 | field_split  | (cap, badge_range, space_cap) → new_field_cap | D45, journal 071 |
 
 Time operations:
@@ -5553,8 +5553,11 @@ CreateObserver: `create_observer(space_cap, handler_field_cap, badge)` →
 observer_cap (inert). Space consumed entirely for structural backing (cap table,
 L1 page table root, RegisterState). Observer metadata from root pool (D32).
 Reserved slots populated: 0 = handler, 1 = reply (empty), 2 = self-cap (D57).
-Composable setup via D35. CreateField: `create_field(space_cap)` → field_cap.
-Queue capacity derived from Space size. CreatePulsar:
+Composable setup via D35. CreateField: `create_field(space_cap, flags)` →
+field_cap. `flags` bit 0: badge tracking (D17 opt-in). Queue capacity derived
+from Space size. When badge tracking is enabled, the badge map is allocated
+eagerly (D-3.2b) and the initial cap (badge 0) is counted in the map.
+CreatePulsar:
 `create_pulsar(space_cap, field_cap, badge, duration_ns, period_ns)` →
 pulsar_cap (armed at creation, D62). Deadline installed in creating Observer's
 current core (D83 array, max 32).
