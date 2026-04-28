@@ -1245,8 +1245,9 @@ impl<S: Scheduler> CoreState<S> {
                     &transferred,
                 ) {
                     Ok(encoded_handle) => {
-                        // D17: badge increment on tracked Fields.
-                        if source_type == ObjectType::Field {
+                        // D17/D73: badge increment on tracked Fields.
+                        // D73: send-once caps bypass the refcount model.
+                        if source_type == ObjectType::Field && !source_entry.send_once {
                             let mut fields = kernel_state.fields.acquire();
 
                             if let Some(field) = fields.get_mut(source_id) {
@@ -1631,8 +1632,9 @@ impl<S: Scheduler> CoreState<S> {
                     &transferred,
                 ) {
                     Ok(encoded_handle) => {
-                        // D17: badge increment on tracked Fields.
-                        if object_type == ObjectType::Field {
+                        // D17/D73: badge increment on tracked Fields.
+                        // D73: send-once caps bypass the refcount model.
+                        if object_type == ObjectType::Field && !entry.send_once {
                             let mut fields = kernel_state.fields.acquire();
 
                             if let Some(field) = fields.get_mut(object_id) {
@@ -1648,8 +1650,9 @@ impl<S: Scheduler> CoreState<S> {
             TypedOperation::Close => {
                 // D97: free slot in caller's cap table.
                 let handle = capability::Handle::decode(regs.target_handle);
-                // D17: save badge before close frees the entry.
+                // D17/D73: save badge and send_once before close frees the entry.
                 let entry_badge = entry.badge;
+                let entry_send_once = entry.send_once;
                 let close_result =
                     crate::frame::cores::observer_close_cap(sender_ptr, handle.index);
 
@@ -1676,14 +1679,21 @@ impl<S: Scheduler> CoreState<S> {
                             }
                         }
 
-                        // D17: badge decrement on tracked Fields.
+                        // D17/D73: badge tracking on closed Field caps.
                         if closed_type == ObjectType::Field {
                             let mut fields = kernel_state.fields.acquire();
 
-                            if let Some(field) = fields.get_mut(closed_id)
-                                && field.badge_decrement(entry_badge)
-                            {
-                                field.enqueue_badge_closure(entry_badge);
+                            if let Some(field) = fields.get_mut(closed_id) {
+                                if entry_send_once {
+                                    // D73: send-once close → direct closure
+                                    // (no refcount — consumed-by-use exempt).
+                                    if field.badge_tracking {
+                                        field.enqueue_badge_closure(entry_badge);
+                                    }
+                                } else if field.badge_decrement(entry_badge) {
+                                    // D17: refcounted close → closure when last.
+                                    field.enqueue_badge_closure(entry_badge);
+                                }
                             }
                         }
 
@@ -1722,8 +1732,9 @@ impl<S: Scheduler> CoreState<S> {
                     &transferred,
                 ) {
                     Ok(encoded_handle) => {
-                        // D17: badge increment on tracked Fields.
-                        if object_type == ObjectType::Field {
+                        // D17/D73: badge increment on tracked Fields.
+                        // D73: send-once caps bypass the refcount model.
+                        if object_type == ObjectType::Field && !transferred.send_once {
                             let mut fields = kernel_state.fields.acquire();
 
                             if let Some(field) = fields.get_mut(object_id) {
@@ -3167,16 +3178,16 @@ fn cascade_batch_with_badge_tracking(
         Some(level) => level.slot_cursor,
         None => return true,
     };
-    // Pre-read: collect (field_id, badge) for Field-type entries in this batch.
-    let mut badge_events: [(ObjectId, crate::capability::Badge); 16] =
-        [(ObjectId(0), crate::capability::Badge(0)); 16];
+    // Pre-read: collect (field_id, badge, send_once) for Field-type entries.
+    let mut badge_events: [(ObjectId, crate::capability::Badge, bool); 16] =
+        [(ObjectId(0), crate::capability::Badge(0), false); 16];
     let mut badge_count = 0usize;
 
     for slot in cursor..cursor.saturating_add(batch_size) {
         if let Some(entry) = crate::frame::cores::observer_read_full_cap_entry(observer_ptr, slot)
             && let Some((ObjectType::Field, fid)) = entry.object
         {
-            badge_events[badge_count] = (fid, entry.badge);
+            badge_events[badge_count] = (fid, entry.badge, entry.send_once);
             badge_count += 1;
         }
     }
@@ -3184,15 +3195,21 @@ fn cascade_batch_with_badge_tracking(
     // Close pass.
     let done = crate::frame::cores::observer_cascade_step(observer_ptr, cascade, batch_size);
 
-    // D17: badge decrement pass.
+    // D17/D73: badge tracking pass.
     if badge_count > 0 {
         let mut fields = kernel_state.fields.acquire();
 
-        for &(fid, badge) in &badge_events[..badge_count] {
-            if let Some(field) = fields.get_mut(fid)
-                && field.badge_decrement(badge)
-            {
-                field.enqueue_badge_closure(badge);
+        for &(fid, badge, send_once) in &badge_events[..badge_count] {
+            if let Some(field) = fields.get_mut(fid) {
+                if send_once {
+                    // D73: send-once close → direct closure.
+                    if field.badge_tracking {
+                        field.enqueue_badge_closure(badge);
+                    }
+                } else if field.badge_decrement(badge) {
+                    // D17: refcounted close → closure when last.
+                    field.enqueue_badge_closure(badge);
+                }
             }
         }
     }
@@ -9357,7 +9374,7 @@ mod tests {
 
         // The cap at slot 0 was overwritten with the Observer cap.
         let entry = crate::frame::capabilities::entry_ref(entries, 16, 0).unwrap();
-        let (obj_type, observer_id) = entry.object.unwrap();
+        let (obj_type, _observer_id) = entry.object.unwrap();
 
         assert_eq!(obj_type, ObjectType::Observer);
 
@@ -9400,7 +9417,6 @@ mod tests {
         let ks = make_kernel_state();
         let source_field_id = make_tracked_field_in_arena(&ks, 8);
         let space_id = make_space_in_arena(&ks, 0x10000, 0x1000);
-
         let (mut sender, _entries) = make_sender_with_cap(
             ObjectType::Field,
             source_field_id,
@@ -9474,7 +9490,6 @@ mod tests {
 
         // Closing the sub-Field cap should not crash or produce spurious notifications.
         drop(fields);
-
         setup_typed_regs(
             sender_ptr,
             TypedOperation::Close as u16,
@@ -9486,6 +9501,197 @@ mod tests {
         let x0_close = read_typed_result(sender_ptr);
 
         assert_eq!(x0_close, 0, "Close on sub-Field cap must succeed");
+    }
+
+    // ── D73: Send-once badge-closure (structural code-path separation) ──
+
+    /// D73: closing a send-once cap on a tracked Field enqueues badge-
+    /// closure directly, without needing a prior badge_increment. This is
+    /// the "reply will never come" notification path.
+    #[test]
+    fn test_d73_close_send_once_enqueues_closure_directly() {
+        let ks = make_kernel_state();
+        let field_id = make_tracked_field_in_arena(&ks, 8);
+
+        // No badge_increment — send-once caps bypass the refcount model.
+        let mut sender = crate::observer::Observer::test_with_cap_table(16);
+
+        crate::frame::capabilities::write_entry(
+            sender.cap_table,
+            16,
+            0,
+            crate::capability::Entry {
+                object: Some((ObjectType::Field, field_id)),
+                rights: Rights::SEND,
+                badge: Badge(0xCA11),
+                slot_tag: crate::capability::SlotTag(0),
+                send_once: true,
+                stored_generation: 0,
+            },
+        );
+
+        sender.cap_table_count = 1;
+
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        setup_typed_regs(sender_ptr, TypedOperation::Close as u16, handle, [0; 4]);
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::Close, &ks);
+
+        let x0 = read_typed_result(sender_ptr);
+
+        assert_eq!(x0, 0, "D73: Close of send-once cap must succeed");
+
+        let mut fields = ks.fields.acquire();
+        let field = fields.get_mut(field_id).unwrap();
+
+        assert!(
+            !field.is_empty(),
+            "D73: closing send-once cap must enqueue badge-closure directly"
+        );
+
+        let msg = field.dequeue().unwrap();
+
+        assert_eq!(msg.label, crate::field::LABEL_CLOSURE);
+        assert_eq!(
+            msg.badge,
+            Badge(0xCA11),
+            "D73: closure badge must match send-once cap"
+        );
+    }
+
+    /// D73: closing a send-once cap on a NON-tracked Field does nothing
+    /// (no crash, no notification).
+    #[test]
+    fn test_d73_close_send_once_non_tracked_no_closure() {
+        let ks = make_kernel_state();
+        let field_id = make_field_in_arena(&ks, 8);
+
+        let mut sender = crate::observer::Observer::test_with_cap_table(16);
+
+        crate::frame::capabilities::write_entry(
+            sender.cap_table,
+            16,
+            0,
+            crate::capability::Entry {
+                object: Some((ObjectType::Field, field_id)),
+                rights: Rights::SEND,
+                badge: Badge(42),
+                slot_tag: crate::capability::SlotTag(0),
+                send_once: true,
+                stored_generation: 0,
+            },
+        );
+
+        sender.cap_table_count = 1;
+
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        setup_typed_regs(sender_ptr, TypedOperation::Close as u16, handle, [0; 4]);
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::Close, &ks);
+
+        let fields = ks.fields.acquire();
+        let field = fields.get(field_id).unwrap();
+
+        assert!(
+            field.is_empty(),
+            "D73: non-tracked Field must have no closure messages"
+        );
+    }
+
+    /// D73: Mint preserving send_once must NOT badge_increment — send-once
+    /// caps bypass the refcount model entirely.
+    #[test]
+    fn test_d73_mint_send_once_no_badge_increment() {
+        let ks = make_kernel_state();
+        let field_id = make_tracked_field_in_arena(&ks, 8);
+
+        // Source cap is send_once.
+        let mut sender = crate::observer::Observer::test_with_cap_table(16);
+
+        crate::frame::capabilities::write_entry(
+            sender.cap_table,
+            16,
+            0,
+            crate::capability::Entry {
+                object: Some((ObjectType::Field, field_id)),
+                rights: Rights::FIELD_ALL,
+                badge: Badge(0x99),
+                slot_tag: crate::capability::SlotTag(0),
+                send_once: true,
+                stored_generation: 0,
+            },
+        );
+
+        sender.cap_table_count = 1;
+
+        let sender_ptr = NonNull::from(&mut sender);
+        let source_handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        // Mint with a new badge — should NOT increment badge 0xBB.
+        setup_typed_regs(
+            sender_ptr,
+            TypedOperation::Mint as u16,
+            source_handle,
+            [Rights::SEND.bits() as u64, 0xBB, 0, 0],
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+        core.scheduler.enqueue(sender_ptr);
+        core.dispatch_typed(TypedOperation::Mint, &ks);
+
+        let x0 = read_typed_result(sender_ptr);
+
+        assert!((x0 as i64) >= 0, "Mint must succeed");
+
+        // Close the minted cap — should fire D73 direct closure (not
+        // refcount-based, since badge was never incremented).
+        setup_typed_regs(sender_ptr, TypedOperation::Close as u16, x0, [0; 4]);
+        core.dispatch_typed(TypedOperation::Close, &ks);
+
+        let mut fields = ks.fields.acquire();
+        let field = fields.get_mut(field_id).unwrap();
+
+        assert!(
+            !field.is_empty(),
+            "D73: closing minted send-once cap must enqueue direct closure"
+        );
+
+        let msg = field.dequeue().unwrap();
+
+        assert_eq!(msg.badge, Badge(0xBB));
+        assert_eq!(msg.label, crate::field::LABEL_CLOSURE);
+
+        // Queue must be empty — no duplicate notification.
+        assert!(
+            field.is_empty(),
+            "D73: must produce exactly one closure notification"
+        );
     }
 
     /// D17/D98: Observer Destroy cascade decrements badges and enqueues
