@@ -1,5 +1,11 @@
 # D95 — Object creation protocols
 
+> **Note (D106):** Step 6 of the CreateObserver protocol below stated "the
+> kernel creates the reply Field on first Call." D106 settles the allocation
+> policy differently: userspace-created, installed via SetReplyField. Slot 1
+> starts empty and is populated by the creator, not by the kernel on first Call.
+> See `journal/106-reply-field-allocation-policy.md`.
+
 **Question:** What is the complete creation protocol for each structural kernel
 object (Observer, Field, Pulsar)? Where does each piece of structural backing
 come from?

@@ -812,12 +812,12 @@ retention. Badge-based reply was foreclosed by D4 (ambient addressing, not
 capability designation).
 
 Does NOT settle: Call()/ReplyRecv() syscall details (part of specific syscall
-surface), reply field allocation policy (pre-allocated at creation vs. lazy),
-~~send-once right encoding in D8's rights mask~~ (settled by D51: boolean flag
-on Entry, not a rights bit), shared reply field with badge disambiguation
-(depends on badge semantics). ~~Message format interaction~~ settled by D28:
-reply cap is a kernel-injected dedicated field (not a user cap slot),
-paralleling badge.
+surface), ~~reply field allocation policy (pre-allocated at creation vs. lazy)~~
+(settled by D106: userspace-created, SetReplyField operation), ~~send-once right
+encoding in D8's rights mask~~ (settled by D51: boolean flag on Entry, not a
+rights bit), shared reply field with badge disambiguation (depends on badge
+semantics). ~~Message format interaction~~ settled by D28: reply cap is a
+kernel-injected dedicated field (not a user cap slot), paralleling badge.
 
 - **Rests on:** D15 (unidirectional fields require reply-cap transfer — the cost
   this mechanism pays), D14 (fault resume settled separately — decouples IPC
@@ -1873,9 +1873,9 @@ negligible on this cold path relative to Observer creation's structural weight.
 
 Does NOT settle: ~~Observer rights model~~ (settled by D39: nine rights),
 Observer minimum schema (must support inert state), specific syscall encoding,
-reply field allocation timing (D16 downstream — compatible with either pre-
-allocated or lazy), cap-install slot selection policy (kernel-chosen default,
-D8-consistent).
+~~reply field allocation timing~~ (settled by D106: userspace-created,
+SetReplyField operation), cap-install slot selection policy (kernel-chosen
+default, D8-consistent).
 
 - **Rests on:** D32 (type conversion — Space consumed entirely as structural
   backing; creation Space does not provide executable memory), D20 + D21 (fault
@@ -2865,7 +2865,7 @@ callback, 0-cap gate, Call + ReplyRecv scope).
   (kernel fast-path code requires x0–x3 as scratch).
 - **Journal:** `journal/047-syscall-abi.md`.
 
-### D48 — Syscall enumeration: 5 IPC + 20 typed = 25 operations
+### D48 — Syscall enumeration: 5 IPC + 21 typed = 26 operations
 
 The kernel's complete syscall surface, collected from all settled derivations.
 
@@ -2885,7 +2885,7 @@ mechanism-based). NBRecv deferred: not foreclosed, D19 pattern; if
 polling/event-loop patterns prove painful, add as a flag on Receive or a
 separate SVC number.
 
-**Typed kernel operations (Family 2 — SVC #0, operation code in x4, 20
+**Typed kernel operations (Family 2 — SVC #0, operation code in x4, 21
 operations):**
 
 Observer operations (D39 — nine rights):
@@ -3046,6 +3046,7 @@ Primitives before compounds, IPC before scheduling. Convention, not structural.
 | 16–17 | Pulsar            | create, clock_read                                                                            |
 | 18    | Observer creation | create_observer                                                                               |
 | 19    | Resource          | resource_request                                                                              |
+| 20    | Observer          | set_reply_field (D106)                                                                        |
 
 Dense table dispatch. Type grouping is self-documenting; the kernel already
 knows the target type from the cap in x5. Future rights mask additions append to
@@ -4255,8 +4256,9 @@ Badge-closure notification on the reply Field is self-discriminating: its
 presence means "reply will never come." No reason code is needed in the message
 body — D64's all-zero data words are correct for this case.
 
-Does NOT settle: reply Field creation timing (pre-allocated vs. lazy — D16
-defers), voluntary Call() cancellation by the caller (not foreclosed), per-Field
+Does NOT settle: ~~reply Field creation timing (pre-allocated vs. lazy — D16
+defers)~~ (settled by D106: userspace-created, SetReplyField operation),
+voluntary Call() cancellation by the caller (not foreclosed), per-Field
 exemption policy for non-reply authorization-audit use cases (Option C from
 exploration — not foreclosed, additive if a concrete workload motivates it).
 
@@ -4676,300 +4678,6 @@ memory for unused regions).
 - **Rests on:** D31, D32, D35, D43, D70, D89.
 - **Status:** settled.
 - **Journal:** `journal/092-page-table-memory-accounting.md`.
-
----
-
-## Open questions
-
-- ~~**Time migration across cores.**~~ Dissolved by D31: Time is abstract
-  scheduling capacity (vocabulary revised). Core assignment is kernel-internal.
-  Migration is the kernel's internal scheduling decision — the Observer's Time
-  cap doesn't change when the kernel moves it to another core. (Previously
-  dissolved by D29 as a cap operation; D31 supersedes — migration is no longer a
-  user-visible event at all.)
-- ~~**Minimum abstract scheduling properties on an Observer.**~~ Settled by D42:
-  three-value budget — responsiveness, throughput, precision — sharing a fixed
-  per-Observer point allocation. D2's parenthetical "(priority, CPU/IO
-  classification, optional deadline)" replaced entirely. No priority integer
-  (inflation problem dissolved by budget trade-offs — maximizing any dimension
-  costs the other two). CPU/IO kernel-inferred from the profile. Deadline
-  kernel-derived from timer period + Time + precision value. Hard RT via
-  dedicated cores (D2) with EDF admission using Time + timer + precision.
-  Scheduling inheritance during IPC settled by D43 as a userspace concern
-  (modify-scheduling mechanism, not kernel policy). Remaining: ~~budget
-  encoding~~ (D57: budget 128, store R/T, derive P), ~~default profile~~ (D57:
-  43/43/42), timer syscall surface, RT admission control details.
-- ~~**Observer-Space cardinality formalization.**~~ Settled by D27: flat. An
-  Observer holds multiple independent Space caps directly in its D8 table. No
-  kernel-tracked hierarchy between Spaces. Grouping is userspace convention (D6
-  parallel). Hierarchy rejected on D8, D6, D4, D11, A3. Provenance tracking
-  deferred as kernel-internal optimization.
-- ~~**Revocation add-ons.**~~ Settled by D67: universal generation counters (all
-  object types). CDT rejected (gaps addressable through existing primitives).
-  Remaining: revocation syscall surface (new typed op vs. modifier), cap entry
-  layout (generation field placement), cross-core prompt-effect policy (strong
-  vs. weak — deferred from D11, not settled by D67), stale slot reclamation
-  mechanism.
-- ~~**Observer minimum schema.**~~ Settled by D43: eight field clusters in the
-  metadata struct — register save pointer, TTBR0, cap table pointer, scheduling
-  state (D39 five-state enum + suspended flag), cached compute-unit aggregate,
-  scheduling profile (R, T, P — one set, no base/effective split), wait-state
-  linkage (Rust enum: inline single-field, allocated multi-field), reference
-  count. Observer physically splits into metadata struct (root Space, ~80–100
-  bytes) and structural backing (consumed Space: registers, cap table, L0 page
-  table). Fault handler and reply field are cap-table reserved slots (D21
-  pattern). Core assignment is transient (no struct field). Scheduling
-  inheritance is a userspace concern (modify-scheduling mechanism, not kernel
-  policy). Remaining: wait-state allocation source for multi-field, cap table
-  capacity tracking placement. ~~Register save area layout~~ (already
-  implemented), ~~budget encoding~~ (D57: budget 128, store R/T, derive P),
-  ~~default profile~~ (D57: 43/43/42), ~~self-reference capabilities~~ (D57:
-  kernel-installed at reserved slot 2).
-- ~~**Address space binding mutability.**~~ Dissolved by D26: no address space
-  object, no binding. Observers access Spaces through capabilities; the page
-  table is updated automatically as caps are acquired and lost.
-- ~~**Observer creation API shape.**~~ Settled by D35: minimal create + separate
-  start + composable operations.
-  `create_observer(space_cap, handler_field_cap, badge) → observer_cap [inert]`.
-  PC/SP via write-registers, initial caps via general-purpose install-cap (same
-  primitive as fault resolution), start via resume. All-params-upfront rejected
-  (forecloses decomposition; composable primitives + userspace library is
-  A5-consistent). Remaining: Observer rights model (install-cap,
-  write-registers, resume confirmed as rights; complete set one level down).
-- ~~**Observer rights model.**~~ Settled by D39: nine rights — resume, destroy,
-  install-cap, write-registers, clone, read-registers, suspend, change-handler,
-  modify-scheduling. Extract-cap excluded (proactive cap sharing via D23 + D28
-  serves the use cases). Duplicate-control deferred to D8 derivation (not
-  Observer-specific). Remaining downstream: Observer minimum schema (D39
-  constrains state machine), ~~D2 scheduling properties~~ (settled by D42:
-  three-value profile — responsiveness, throughput, precision; modify-scheduling
-  gates these values), self-reference capabilities.
-- ~~**Observer handle clonability.**~~ Settled by D23: clonable. Observer
-  handles follow uniform capability rules (clone, attenuate, transfer)
-  identically to all other kernel object types. Non-clonable rejected on five
-  convergent structural arguments. Archive's "handle = handler unification"
-  dissolved by D20/D21. Duplicate-control right deferred to Observer rights
-  model.
-- ~~**Suspend as distinct from faulted.**~~ Settled by D39: yes. External
-  suspension exists as a fifth Observer state (alongside inert, runnable,
-  blocked, faulted). Suspend can co-occur with blocked or faulted. Resume clears
-  the suspension; underlying conditions remain. Use cases: debugging,
-  checkpointing, resource pressure.
-- ~~**Time reclamation on Observer destroy.**~~ Dissolved by D29: Time is a
-  capability-held kernel object. Observer destroy closes the Time cap (D11 close
-  semantics). If this was the last reference, the Time object is destroyed and
-  its scheduling allocation returns to the per-core pool. If other caps exist
-  (e.g., the creator retained a reference), the object persists.
-- ~~**Time cardinality.**~~ Settled by D30: one or more. An Observer holds
-  multiple independent Time caps in regular cap-table slots. Additive on same
-  core — kernel maintains cached aggregate. Vocabulary revised from "exactly one
-  Time" to "one or more Times." D6's "Multi-Time Observers" rejection was about
-  execution streams, not resource accumulation — superseded for this
-  interpretation.
-- ~~**Time parameters.**~~ Settled by D36: normalized compute units. Each Time
-  cap carries an integer quantity of compute units calibrated to hardware core
-  capacity factors. The kernel translates to per-core scheduling time
-  internally. Space = bytes, Time = compute units — both hardware-independent
-  quantities with kernel-internal placement. Budget/period foreclosed by D2 +
-  D30; per-core fraction foreclosed by D31 + A2 (breaks Space parallel on
-  heterogeneous hardware). Remaining: unit encoding, minimum quantum, Time split
-  syscall surface.
-- ~~**Time clonability.**~~ Settled by D38: non-clonable. Time caps are linear —
-  at most one capability reference per Time object. D30's aggregate
-  (`total += cap.amount`) double-counts clones, violating the conservation
-  invariant. D37's move-only donation reinforces. D16 send-once provides
-  precedent. D23's universality framing narrowed: clone is a per-type right, not
-  a universal meta-operation. Authority delegation for Time uses split (new
-  object with a portion of the original's quantity), not clone.
-- ~~**Time creation authority.**~~ Settled by D31: the kernel holds unallocated
-  scheduling capacity as per-core root Time objects internally. Observers
-  acquire Time through the pager chain (resource request → fault handler → ... →
-  kernel). The kernel allocates from its per-core pools. Initial Time
-  distributed at boot as part of the root Observer's minimal resource grant.
-- ~~**Time donation on IPC.**~~ Settled by D37: explicit cap transfer via the
-  D28 user cap slot on Call(). Standard move semantics. The server holds the
-  donated Time (D30 multi-Time), returns it in the reply. Opt-in, no kernel
-  enforcement of return. Transfers scheduling capacity (D36 compute units), not
-  scheduling priority (D2 hints). Kernel-internal donation rejected (D29
-  cap-graph tension). Kernel-injected dedicated field rejected (unnecessary D28
-  revision). Priority-level inheritance deferred to D2.
-- ~~**Can Observers share capability tables?**~~ Settled: per-Observer tables
-  with no sharing (D8 confirmed). D26 resolved the most common sharing use case
-  (shared memory) at the page-table level without requiring cap-table sharing.
-  The remaining ergonomic pressure (threads sharing authority) is accidental
-  complexity addressable by a userspace threading library — not essential
-  complexity that A5 requires the kernel to absorb. Per-Observer tables satisfy
-  D1 (zero synchronization on hot-path cap lookup), D4 (thread-granularity
-  confused-deputy protection), D33 (destroy cascade unmodified), and D8's own
-  typed-memory backing model (each table backed by its Observer's Space). Prior
-  art confirms viability: EROS/KeyKOS and seL4-strict operate this way;
-  userspace libraries absorb the authority-propagation pattern.
-- ~~**Interrupt model (device interrupts, not exceptions).**~~ Settled by D22:
-  delegation to userspace driver Observers through fields. No separate IRQ
-  object type — the interrupt namespace maps onto the field namespace. The
-  kernel routes hardware interrupts to fields; authority = receive cap. Ack via
-  D16 send-once cap in each interrupt message. Split/combine field operations
-  for IRQ range delegation (split settled by D45; combine dissolved by D45).
-  Preemption timer and IPIs excluded (kernel-internal).
-- ~~**Field split semantics.**~~ Settled by D45: badge-range routing with
-  fallback-on-destroy. Split installs routing rules on the source Field;
-  destination is a separate Field object. Generalizes beyond IRQ to all
-  badge-range traffic. Fallback-on-destroy provides automatic crash recovery
-  without parent tracking. Routing table structure settled by D54 (nullable
-  pointer to external sorted array, root Space). Remaining: badge condition
-  form, split-to-new vs. split-to-existing syscall shape, Field rights mask,
-  queued message handling at split time, badge-closure tracking partitioning.
-- ~~**Field combine semantics.**~~ Dissolved by D45: combine decomposes into
-  split-to-existing (route traffic from Field A to Field B) + destroy (the
-  now-empty A). No separate combine primitive.
-- ~~**Interrupt priority and routing.**~~ Settled by journal 066:
-  kernel-automatic routing (GICD_IROUTER tracked on migration and receive-cap
-  transfer, following receive-cap holder), flat priority (all SPIs at same
-  IPRIORITYR). D22 confirmed — no new interface surface. Priority exposure
-  explicitly not foreclosed; revisit if a defined hard-RT workload requires
-  simultaneous-interrupt arbitration not addressable through scheduling.
-- ~~**Userspace timers.**~~ Settled by D44: Pulsar, a capability-held timer
-  object with kernel-managed delivery. Fifth kernel object type. Created from
-  Space (D32) with delivery field, badge, duration, period. Kernel manages
-  re-arm, drift compensation, overflow. Period is EDF admission input (D42).
-  Clock access per-Observer via CNTKCTL_EL1 on context switch. Remaining:
-  ~~Pulsar rights mask~~ (D52), ~~creation API shape~~ (D62: single-call,
-  armed-at-creation), ~~message content layout~~ (D63: badge + fire_time +
-  overrun_count), ~~duration vs. absolute deadline~~ (D72: relative duration in
-  nanoseconds), ~~clock access mechanism~~ (D66), clock access authority
-  mechanism + default policy (genuine choices, decoupled from timer API by D72).
-- ~~**Page size exposure.**~~ Settled by D25: page size is exposed. Hiding
-  rejected — creates unpredictable hardware-dependent failures and security
-  violations under sub-page packing. Remaining: whether the interface is fully
-  page-addressed (all operations require page-aligned inputs) or ~~implicitly
-  rounded~~ (settled by D60: byte values accepted, kernel rounds, PAGE_SIZE
-  queryable).
-- ~~**Fault handler attachment.**~~ Settled by D20: per-Observer. Each Observer
-  stores its own fault handler field reference and badge.
-- ~~**Pager unavailability protocol.**~~ Settled by D68: three failure modes,
-  three mechanisms. Case A (dead handler Field): supervision notification at D33
-  hook. Case B (unresponsive handler): cooperative escalation chain + Pulsar
-  watchdog. Case C (chain terminus): kernel-autonomous destroy. Remaining:
-  supervision Field mandatory vs. optional, escalation protocol standardization,
-  error-faulted sub-state encoding.
-- ~~**Root/bootstrap fault handling.**~~ Settled by D31: the kernel is root
-  pager for hand-picked root Observer(s). Initial Spaces are fully physically
-  backed (D26 + D24 — page faults can't occur on initial memory). Resource
-  requests handled by kernel allocating from its pools. The kernel's policy is
-  trivially simple (allocate-or-deny); real policy in userspace pagers.
-- ~~**Pager reply/resume mechanism.**~~ Settled by D40: per-fault-type
-  resolution via typed kernel syscalls. Resource requests (D31): install_cap +
-  resume. Cap-table-full (D8): install_cap to reserved growth slot + resume
-  (kernel consumes Space for table growth). VM page faults (OOB): D41 settles
-  Space merge, enabling transparent demand paging — handler merges a source
-  Space into the faulting Space, then resumes. Error notification remains
-  available when the handler chooses not to grow. Lazy PTE population:
-  kernel-internal. No kernel validation of fault resolution. install_cap +
-  resume is the general-purpose pattern; D35's structural reuse holds across
-  creation, resource requests, and table growth.
-- ~~**D7 classification of fault traffic.**~~ Settled by D61: faults ARE IPC
-  (kernel-as-sender Send() to handler Field). Standard Field queue, standard cap
-  transfer, standard direct-switch. D18 pending list for overflow. Four fault
-  types with specific data word assignments.
-- ~~**Field overflow policy.**~~ Settled by D18: error-to-sender, deferred fault
-  delivery for kernel-as-sender. No per-field policy modes.
-- ~~**Coalescing / notification mechanism.**~~ Dissolved by D18: no overwrite
-  means no cross-source data loss. Coalescing lives in shared memory + signaling
-  (D9 shared Space caps), not in the field mechanism.
-- ~~**Multi-field wait.**~~ Resolved by D19: badge fan-in (D15+D17) covers the
-  common multi-source patterns (clients, faults, timers, replies on one field).
-  Residual cases (structurally distinct fields) use thread-per-source. A
-  stateless multi-receive syscall is planned (promoted from "not foreclosed" by
-  journal 071: field_split settled as split-to-new only, multi-receive covers
-  the two-Field case). Observer wait-state internals must accommodate N-field
-  blocking from the initial implementation.
-- ~~**Badge downstream details.**~~ D17 settles badge semantics
-  (minter-assigned, mint right, opt-in per-badge tracking). All sub-items
-  resolved: ~~badge size~~ (D58: u64), ~~send-once exemption encoding~~ (D73),
-  ~~badge on D16 kernel-created send-once caps~~ (D65: caller-supplied
-  reply_badge), ~~max-badge-count / capacity semantics~~ (growable map with hard
-  ceiling; new badges beyond ceiling silently dropped), ~~badge-closure message
-  format~~ (D64). (Badge-closure × overflow: resolved by D18 — dropped on full
-  queue. Per-badge tracking × coalescing: dissolved by D18 — coalescing is not a
-  field mechanism; per-badge map serves tracking only.)
-- ~~**Fault handler representation.**~~ Settled by D21: cap-table entry. The
-  handler is a regular capability in the Observer's D8 flat table at a
-  kernel-reserved slot index. D11 destroy-invalidation, D17 badge-closure, and
-  D8 ABA protection all operate automatically. Archive divergence: archive chose
-  kernel-internal, explained by absence of D17 badge-closure in the archive's
-  derivation context.
-- ~~**Message format.**~~ Settled by D28: fixed-size. 4 untyped data words + 1
-  user cap slot + label in header + badge as kernel-injected field + reply cap
-  as kernel-injected field (Call() only). Cap slots structurally separate from
-  data words. Variable-length rejected (D26 bulk-data-through-Spaces makes it
-  unnecessary). Archive's cap_mask bitmask replaced by dedicated cap fields
-  (D8's structural distinction between data copying and cap transfer).
-  Remaining: ~~fault message content per type~~ (settled by D61),
-  ~~badge-closure content~~ (settled by D64), interrupt content, ~~inspect()
-  shape~~ (settled by D48/D39), ~~fast-path conditions~~ (settled by D50).
-- ~~**Send-once right encoding.**~~ Settled by D51 (boolean flag on cap entry,
-  not a rights bit) and D73 (exemption encoding: structural code-path
-  separation, reply Field always-tracked).
-- ~~**IPC fast-path conditions.**~~ Settled by D50: six conditions — operation
-  is Call or ReplyRecv, same core, receiver waiting on target field, no user cap
-  in message (0-cap gate), per-core scheduler approves switch (callback
-  interface), field routing resolved. Scheduler callback generalizes seL4's
-  priority check to work with any D2 algorithm. 0-cap gate makes D37 Time
-  donation slow-path (cap-graph tradeoff accepted). Slow path can still
-  direct-switch through general code. Remaining: scheduler callback interface,
-  ~~Send-to-waiting-receiver "fast enqueue" optimization~~ (journal 055:
-  implementation-only), ~~interrupt masking during fast path~~ (settled by D69:
-  DAIF.I masking).
-- ~~**Specific syscall surface.**~~ Settled by D48: 5 IPC operations (Send,
-  Receive, Call, ReplyRecv, Yield) + 20 typed kernel operations = 25 total.
-  NBSend rejected (redundant — Send never blocks under D13/D18). Reply rejected
-  (redundant — Send to D16 send-once cap). NBRecv deferred (not foreclosed; D19
-  pattern). Typed operations collected from D14, D35, D39, D41, D44, D45, D11,
-  D17, D23, D31, D32. Generic cap operations (destroy, clone, close, mint) apply
-  across types. Pending additions from Space/Field/Pulsar rights masks (typed
-  operations only; IPC set is complete). D47 encoding details settled by D49:
-  SVC assignments (#1–#5), typed op codes (grouped sequential 0–19), error
-  signaling (carry flag for IPC, negative-x0 for typed), cap-present (sentinel
-  u64::MAX), large return values (userspace buffer pointer).
-- ~~**Address space lifecycle.**~~ Dissolved by D26: no address space kernel
-  object. The page table is kernel-internal; per-Observer L0 tables are
-  destroyed with the Observer; per-Space subtrees are reference-counted and
-  freed when the last holder's cap is closed.
-- ~~**Boot / bring-up model.**~~ Settled by D46: core lifecycle is fully
-  kernel-internal. All discovered cores activate at boot (PSCI CPU_ON). Idle
-  cores sleep (WFI/CPU_SUSPEND). Deactivation via CPU_OFF when conservation
-  permits (unallocated pool ≥ core capacity). No userspace syscall, no Core
-  object type. Cores are to Time what physical pages are to Space.
-- ~~**Explicit unmap() semantics.**~~ Dissolved by D26: no explicit map() or
-  unmap(). The page table is managed by the kernel based on Space cap holdings.
-  Holding a cap grants access; losing a cap removes access.
-- ~~**Sub-page packing under D24.**~~ Dissolved by D25 + D60: Spaces are
-  page-granular (minimum size = one page, all sizes rounded to page boundaries).
-  Multiple Spaces cannot share a physical page, so the cleanup concern cannot
-  arise.
-- ~~**Space acquisition at runtime.**~~ Settled by D31: Observers acquire Space
-  through the pager chain. A resource request syscall is routed to the
-  Observer's fault handler (D12 mechanism). The handler grants (from own
-  holdings), denies, or escalates. The chain terminates at the kernel, which
-  allocates from its internal root Space.
-- ~~**Kernel-internal memory on cap transfer.**~~ Settled by D32: page table
-  subtree cost is baked into the Space at split time (parent shrinks by
-  child_size + overhead). First holder populates from reserved capacity;
-  subsequent holders increment reference count. Per-Observer intermediate page
-  table pages (L1/L2) charged via D8 fault mechanism (handler provides Space in
-  fault reply). Kernel per-object metadata from root Space.
-- ~~**CoreState arena references for dispatch.**~~ Settled by D75: arenas live
-  in a global `KernelState` struct (not in CoreState). Cold-path dispatch code
-  accesses them through the global. Lock<T> refactored to own data (UnsafeCell)
-  — type-system enforcement of lock-before-access.
-- ~~**Observer cap table capacity.**~~ Settled by D83: capacity stored in
-  Observer metadata (hot-path access). D43's remaining item closed.
-- ~~**Per-core Pulsar deadline queue.**~~ Settled by D83: fixed-capacity
-  per-core deadline structure in CoreState. Timer handler checks pending
-  deadlines on each preemption tick.
-- ~~**IRQ-to-Field routing table.**~~ Settled by D81: kernel-wide direct-indexed
-  routing table in KernelState (D82). Each route maps an INTID to a Field with
-  badge and generation for stale-route detection.
 
 ---
 
@@ -5503,8 +5211,8 @@ memory for unused regions).
 - `100-fault-delivery-mechanics.md` — reasoning for D100: fault message register
   layout, fault Observer cap rights, kernel-as-root-fault-handler terminus.
 - `101-asid-assignment-and-tlb-invalidation-policy.md` — reasoning for D101:
-  generation-based ASID allocation, context switch staleness check, wrap triggers
-  full broadcast. Per-VA vs per-ASID TLB invalidation threshold.
+  generation-based ASID allocation, context switch staleness check, wrap
+  triggers full broadcast. Per-VA vs per-ASID TLB invalidation threshold.
 - `102-test-infrastructure-and-bootstrap-patterns.md` — reasoning for D102: flat
   binary test format, multi-Observer bootstrap sequence, IPC setup pattern.
 - `103-write-read-registers-inline-protocol.md` — reasoning for D103: inline
@@ -5515,6 +5223,9 @@ memory for unused regions).
 - `105-pager-chain-no-kernel-stack-recursion.md` — observation for D105: pager
   chain does not recurse on kernel stack. Liveness under perpetually-faulted
   handlers remains open.
+- `106-reply-field-allocation-policy.md` — settles D106: reply Field is
+  userspace-created, installed via SetReplyField typed operation. Settles the
+  allocation timing deferred by D16, D36, D73.
 
 ### D93 — Boot memory and multi-core initialization
 
@@ -5552,12 +5263,12 @@ SYSTEM_OFF with exit code.
 CreateObserver: `create_observer(space_cap, handler_field_cap, badge)` →
 observer_cap (inert). Space consumed entirely for structural backing (cap table,
 L1 page table root, RegisterState). Observer metadata from root pool (D32).
-Reserved slots populated: 0 = handler, 1 = reply (empty), 2 = self-cap (D57).
-Composable setup via D35. CreateField: `create_field(space_cap, flags)` →
-field_cap. `flags` bit 0: badge tracking (D17 opt-in). Queue capacity derived
-from Space size. When badge tracking is enabled, the badge map is allocated
-eagerly (D-3.2b) and the initial cap (badge 0) is counted in the map.
-CreatePulsar:
+Reserved slots populated: 0 = handler, 1 = reply (empty — populated by
+SetReplyField, D106), 2 = self-cap (D57). Composable setup via D35. CreateField:
+`create_field(space_cap, flags)` → field_cap. `flags` bit 0: badge tracking (D17
+opt-in). Queue capacity derived from Space size. When badge tracking is enabled,
+the badge map is allocated eagerly (D-3.2b) and the initial cap (badge 0) is
+counted in the map. CreatePulsar:
 `create_pulsar(space_cap, field_cap, badge, duration_ns, period_ns)` →
 pulsar_cap (armed at creation, D62). Deadline installed in creating Observer's
 current core (D83 array, max 32).
@@ -5590,9 +5301,12 @@ cap into target Observer's table; Space caps additionally trigger
 map_space_in_observer (D24 invariant). ObserverWriteRegisters/ReadRegisters:
 batch operation on full 816-byte RegisterState; target must be stopped.
 ObserverChangeHandler: overwrites SLOT_FAULT_HANDLER; old handler NOT
-auto-closed (D4).
+auto-closed (D4). ObserverSetReplyField (D106): install Field cap at
+SLOT_REPLY_FIELD (slot 1); auto-enables badge_tracking (D73); closes old entry
+if occupied (D11); requires INSTALL_CAP right.
 
-- **Rests on:** D4, D8, D11, D17, D21, D24, D26, D33, D35, D38, D39, D51, D91.
+- **Rests on:** D4, D8, D11, D17, D21, D24, D26, D33, D35, D38, D39, D51, D91,
+  D106.
 - **Status:** settled.
 - **Journal:** `journal/097-cap-table-self-mutation-and-mapping-bridge.md`.
 
@@ -5708,6 +5422,41 @@ supervision policy is not yet settled.
 - **Rests on:** D12, D31, D44, D68, D80, D100.
 - **Status:** observation (partial) — liveness open.
 - **Journal:** `journal/105-pager-chain-no-kernel-stack-recursion.md`.
+
+### D106 — Reply Field allocation: userspace-created, SetReplyField operation
+
+The reply Field (D16's pre-allocated per-Observer Field at cap-table slot 1) is
+created by userspace and installed via a new SetReplyField typed operation (code
+20). The Observer creator calls CreateField(space_cap) to create the Field, then
+SetReplyField(observer_cap, field_cap) to install it at slot 1. The kernel
+auto-enables badge_tracking (D73) and closes any existing entry at slot 1 (D11).
+Gated by INSTALL_CAP right (D39).
+
+Call() checks slot 1 and returns an error if empty — preventing silent caller
+zombification (blocked on nothing, no badge-closure signal, permanently stuck).
+
+Non-RPC Observers skip SetReplyField entirely — no waste. RPC Observers pay one
+page minimum (Space granularity) for the reply Field's queue backing; the queue
+needs capacity 1 (~128 bytes), so ~3.9KB per reply Field is wasted at page
+granularity. Sub-page Field allocation is an additive optimization that does not
+require changing the allocation model.
+
+Settles the allocation timing deferred by D16, D36, and D73. Resolves the
+inconsistency where D95's journal text stated "kernel creates on first Call" but
+spec entries continued to list the timing as unsettled.
+
+- **Rests on:** D16 (reply field mechanism — this settles D16's deferred
+  allocation policy), D32 (type conversion — userspace supplies Space; kernel
+  root pool exception stays narrow), D35 (composable setup — SetReplyField is a
+  composable post-creation operation), D43 (slot 1), D57 (reserved slots), D73
+  (badge_tracking unconditional for reply Fields), D39 (INSTALL_CAP right), D11
+  (close semantics for old entry), A3 (generic — non-RPC Observers pay nothing),
+  A4 (Call() error check prevents permanent blocking), A5 (auto-enables
+  badge_tracking).
+- **Status:** settled — revisit if D32 is revised (changes type conversion
+  model), if sub-page allocation is introduced (reduces the page-granularity
+  waste), if D16 is revised (changes reply mechanism).
+- **Journal:** `journal/106-reply-field-allocation-policy.md`.
 
 ---
 

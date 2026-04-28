@@ -12,6 +12,7 @@
 //! D67: generation counter for revocation.
 //! D71: badge condition form — closed range [low, high].
 //! D73: reply Field always-tracked (D17 specialization).
+//! D106: reply Field userspace-created, installed via SetReplyField.
 
 use crate::arena::ObjectId;
 use crate::capability::{Badge, TransferredCap};

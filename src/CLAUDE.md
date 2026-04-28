@@ -41,7 +41,7 @@ comments link to `design/spec.md`.
 
 | Module             | Design concept (graph.d2 name)               | Key derivations                                      |
 | ------------------ | -------------------------------------------- | ---------------------------------------------------- |
-| `core_manager.rs`  | Per-core hot path (`core-manager`)           | D1, D7, D46, D74, D79, D81, D83, D99, A4             |
+| `core_manager.rs`  | Per-core hot path (`core-manager`)           | D1, D7, D46, D74, D79, D81, D83, D99, D106, A4       |
 | `time_manager/`    | Scheduling + placement (`time-manager`)      | D2, D29, D50, D56, D59                               |
 | `space_manager.rs` | Physical memory allocation (`space-manager`) | D3, D31, D32, D70                                    |
 | `communication.rs` | IPC orchestration                            | D7, D13, D16, D28, D50, D69                          |
@@ -49,12 +49,12 @@ comments link to `design/spec.md`.
 | `capability.rs`    | Authority mechanism                          | D4, D8, D11, D17, D51, D52, D57, D58, D67            |
 | `space.rs`         | Memory object (Space)                        | D9, D25, D26, D27, D41, D60, D67                     |
 | `time.rs`          | Compute allocation (Time)                    | D29, D30, D31, D36–D38, D67                          |
-| `field.rs`         | IPC mechanism + message format (Field)       | D13, D15–D18, D28, D45, D54, D67, D71, D73           |
+| `field.rs`         | IPC mechanism + message format (Field)       | D13, D15–D18, D28, D45, D54, D67, D71, D73, D106     |
 | `observer.rs`      | Execution unit (Observer)                    | D6, D14, D20, D21, D39, D42, D43, D56, D57, D66, D67 |
 | `pulsar.rs`        | Timer mechanism (Pulsar)                     | D44, D52, D62, D63, D67, D72                         |
 | `kernel_state.rs`  | Global state bundle + IRQ routing            | D75, D81, D82, D99                                   |
 | `fault.rs`         | Fault types and delivery                     | D12, D40, D61, D100                                  |
-| `syscall.rs`       | Syscall ABI types                            | D47, D48, D49                                        |
+| `syscall.rs`       | Syscall ABI types                            | D47, D48, D49, D106                                  |
 | `frame/`           | Framekernel core (all unsafe)                | A1, A2, D75, D83, journal 023                        |
 | `frame/arch/`      | Hardware abstraction (incl. PAGE_SIZE)       | D1, D5, D25, D46, D47, D49, D56, D74                 |
 | `frame/firmware/`  | Boot-time data parsing                       |                                                      |

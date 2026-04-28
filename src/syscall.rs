@@ -60,6 +60,9 @@ pub enum TypedOperation {
 
     // Resource acquisition (D31)
     ResourceRequest = 19,
+
+    // Observer reply field (D106)
+    ObserverSetReplyField = 20,
 }
 
 // ── IPC register layout (D47, D49) ─────────────────────────────────
@@ -142,6 +145,8 @@ pub enum SyscallError {
     InsufficientResource,
     /// D41: merge requires adjacent VA space.
     NotAdjacent,
+    /// D106: Call() with empty SLOT_REPLY_FIELD (slot 1).
+    NoReplyField,
 }
 
 impl From<crate::capability::CapError> for SyscallError {
@@ -187,6 +192,7 @@ impl SyscallError {
             SyscallError::ZeroSize => -11,
             SyscallError::InsufficientResource => -12,
             SyscallError::NotAdjacent => -13,
+            SyscallError::NoReplyField => -14,
         };
 
         code as u64
@@ -249,6 +255,7 @@ impl TypedOperation {
             17 => Some(TypedOperation::ClockRead),
             18 => Some(TypedOperation::CreateObserver),
             19 => Some(TypedOperation::ResourceRequest),
+            20 => Some(TypedOperation::ObserverSetReplyField),
             _ => None,
         }
     }
@@ -269,7 +276,8 @@ impl TypedOperation {
             | TypedOperation::ObserverReadRegisters
             | TypedOperation::ObserverSuspend
             | TypedOperation::ObserverChangeHandler
-            | TypedOperation::ObserverSetScheduling => Some(ObjectType::Observer),
+            | TypedOperation::ObserverSetScheduling
+            | TypedOperation::ObserverSetReplyField => Some(ObjectType::Observer),
             TypedOperation::SpaceSplit | TypedOperation::SpaceMerge => Some(ObjectType::Space),
             TypedOperation::FieldSplit => Some(ObjectType::Field),
             TypedOperation::TimeSplit => Some(ObjectType::Time),
@@ -320,13 +328,13 @@ mod tests {
 
     #[test]
     fn from_code_roundtrips() {
-        for code in 0..=19u16 {
+        for code in 0..=20u16 {
             let op = TypedOperation::from_code(code).unwrap();
 
             assert_eq!(op as u16, code);
         }
 
-        assert!(TypedOperation::from_code(20).is_none());
+        assert!(TypedOperation::from_code(21).is_none());
     }
 
     #[test]
@@ -370,7 +378,7 @@ mod tests {
     fn from_code_boundary_values() {
         assert!(TypedOperation::from_code(u16::MAX).is_none());
         assert!(TypedOperation::from_code(100).is_none());
-        assert!(TypedOperation::from_code(20).is_none());
+        assert!(TypedOperation::from_code(21).is_none());
     }
 
     #[test]

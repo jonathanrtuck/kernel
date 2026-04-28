@@ -592,6 +592,25 @@ impl<S: Scheduler> CoreState<S> {
             }
 
             crate::syscall::IpcOperation::Call => {
+                // D106: check reply field BEFORE extracting user cap (move
+                // semantics would lose the cap on early return).
+                let reply_badge = crate::capability::Badge(ipc_regs.reply_info);
+                let reply_info = crate::frame::cores::observer_read_cap_entry(
+                    sender_ptr,
+                    crate::capability::SLOT_REPLY_FIELD,
+                );
+
+                if reply_info.is_none() {
+                    drop(fields_guard);
+
+                    crate::frame::cores::write_ipc_error(
+                        sender_ptr,
+                        crate::syscall::SyscallError::NoReplyField,
+                    );
+
+                    return DispatchResult::Resume(sender_ptr);
+                }
+
                 // D96: extract user cap from sender's table (move semantics).
                 let user_cap = match Self::try_extract_user_cap(sender_ptr, ipc_regs.user_cap) {
                     Ok(cap) => cap,
@@ -606,13 +625,6 @@ impl<S: Scheduler> CoreState<S> {
                         return DispatchResult::Resume(sender_ptr);
                     }
                 };
-                // D96: mint reply cap from sender's SLOT_REPLY_FIELD (slot 1).
-                // reply_badge from x7 (D65).
-                let reply_badge = crate::capability::Badge(ipc_regs.reply_info);
-                let reply_info = crate::frame::cores::observer_read_cap_entry(
-                    sender_ptr,
-                    crate::capability::SLOT_REPLY_FIELD,
-                );
                 let reply_cap = reply_info.map(|(object_type, object_id, stored_generation)| {
                     crate::capability::TransferredCap {
                         object_type,
@@ -1346,6 +1358,84 @@ impl<S: Scheduler> CoreState<S> {
                     target_ptr,
                     capability::SLOT_FAULT_HANDLER,
                     new_handler,
+                ) {
+                    typed_ok(0)
+                } else {
+                    typed_error(SyscallError::InvalidCap)
+                }
+            }
+
+            TypedOperation::ObserverSetReplyField => {
+                // D106: install Field cap at SLOT_REPLY_FIELD (slot 1).
+                // args[0] = Field cap handle (in caller's table).
+                let field_handle = regs.args[0];
+                let field_entry =
+                    match capability::resolve_cap_entry(field_handle, cap_entries, cap_capacity) {
+                        Ok(e) => e,
+                        Err(cap_err) => return typed_error(SyscallError::from(cap_err)),
+                    };
+                let (field_type, field_id) = match field_entry.object {
+                    Some(pair) => pair,
+                    None => return typed_error(SyscallError::InvalidCap),
+                };
+
+                if field_type != ObjectType::Field {
+                    return typed_error(SyscallError::WrongType);
+                }
+
+                let field_stored_gen = field_entry.stored_generation;
+                let target_ptr = match validated_observer_ptr(kernel_state, object_id, entry) {
+                    Ok(ptr) => ptr,
+                    Err(e) => return typed_error(e),
+                };
+
+                // D73: auto-enable badge_tracking on the reply Field.
+                {
+                    let mut fields = kernel_state.fields.acquire();
+
+                    if let Some(field) = fields.get_mut(field_id) {
+                        if !field.badge_tracking {
+                            field.badge_tracking = true;
+
+                            if field.badge_map.is_none() {
+                                field.badge_map = crate::frame::fields::allocate_badge_map();
+                            }
+                        }
+
+                        field.badge_increment(capability::Badge(0));
+                    }
+                }
+
+                // D11: close old entry at slot 1 if occupied.
+                let old_entry = crate::frame::cores::observer_read_full_cap_entry(
+                    target_ptr,
+                    capability::SLOT_REPLY_FIELD,
+                );
+
+                if let Some(old) = old_entry
+                    && let Some((ObjectType::Field, old_id)) = old.object
+                {
+                    let mut fields = kernel_state.fields.acquire();
+
+                    if let Some(old_field) = fields.get_mut(old_id) {
+                        old_field.badge_decrement(old.badge);
+                        old_field.refcount = old_field.refcount.saturating_sub(1);
+                    }
+                }
+
+                let new_reply = capability::Entry {
+                    object: Some((ObjectType::Field, field_id)),
+                    rights: Rights::RECEIVE,
+                    badge: capability::Badge(0),
+                    slot_tag: capability::SlotTag(0),
+                    send_once: false,
+                    stored_generation: field_stored_gen,
+                };
+
+                if crate::frame::cores::observer_write_cap_at(
+                    target_ptr,
+                    capability::SLOT_REPLY_FIELD,
+                    new_reply,
                 ) {
                     typed_ok(0)
                 } else {
@@ -2561,6 +2651,8 @@ impl<S: Scheduler> CoreState<S> {
                     _ => Rights::DESTROY,
                 }
             }
+            // D106: SetReplyField — install Field cap at slot 1.
+            TypedOperation::ObserverSetReplyField => Rights::INSTALL_CAP,
         }
     }
 
@@ -7193,14 +7285,29 @@ mod tests {
         let ks = make_kernel_state();
         // Allocate a Field in the arena.
         let field_id = make_field_in_arena(&ks, 8);
+        let reply_field_id = make_field_in_arena(&ks, 8);
         // Create the sender with a SEND cap.
-        let (mut sender, _entries) = make_sender_with_cap(
+        let (mut sender, entries) = make_sender_with_cap(
             crate::capability::ObjectType::Field,
             field_id,
             crate::capability::Rights::SEND,
             Badge(0x5555),
             0,
         );
+        // D106: install reply Field at SLOT_REPLY_FIELD (slot 1).
+        let reply_entry =
+            crate::frame::capabilities::entry_mut(entries, 16, crate::capability::SLOT_REPLY_FIELD)
+                .unwrap();
+
+        *reply_entry = crate::capability::Entry {
+            object: Some((crate::capability::ObjectType::Field, reply_field_id)),
+            rights: crate::capability::Rights::RECEIVE,
+            badge: Badge(0),
+            slot_tag: crate::capability::SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+
         let sender_ptr = NonNull::from(&mut sender);
         // Create a waiter Observer with a real RegisterState (needed for
         // unblock which calls observer_unblock on the waiter).
@@ -7366,6 +7473,74 @@ mod tests {
         assert_eq!(
             target.queue_length, 0,
             "P4-001: stale reply field must prevent message delivery"
+        );
+    }
+
+    /// D106: Call with empty SLOT_REPLY_FIELD returns NoReplyField.
+    #[test]
+    fn test_d106_call_empty_reply_field_returns_no_reply_field() {
+        let ks = make_kernel_state();
+        let target_field_id = make_field_in_arena(&ks, 8);
+        // Sender has a SEND cap at slot 0, but slot 1 (reply) is empty.
+        let (mut sender, _entries) = make_sender_with_cap(
+            crate::capability::ObjectType::Field,
+            target_field_id,
+            crate::capability::Rights::SEND,
+            Badge(0x5555),
+            0,
+        );
+        let sender_ptr = NonNull::from(&mut sender);
+        let handle = crate::capability::Handle {
+            index: 0,
+            slot_tag: crate::capability::SlotTag(0),
+        }
+        .encode();
+
+        crate::frame::cores::write_test_ipc_registers_via_observer(
+            sender_ptr,
+            &crate::syscall::IpcRegisters {
+                data: [0x10, 0x20, 0x30, 0x40],
+                label: 0x9999,
+                handle_or_badge: handle,
+                user_cap: u64::MAX,
+                reply_info: 0,
+            },
+        );
+
+        let mut core = make_core_state();
+
+        core.current = Some(sender_ptr);
+
+        core.scheduler.enqueue(sender_ptr);
+
+        let result = core.dispatch_ipc(IpcOperation::Call, &ks);
+
+        match result {
+            DispatchResult::Resume(resumed) => {
+                assert_eq!(
+                    resumed, sender_ptr,
+                    "D106: NoReplyField error must resume sender"
+                );
+            }
+            _ => panic!("D106: empty reply field must return Resume(sender), not block"),
+        }
+
+        let (carry, x0) = crate::frame::cores::read_ipc_carry_and_x0(sender_ptr);
+
+        assert!(carry, "D49: carry must be set on NoReplyField error");
+        assert_eq!(
+            x0,
+            crate::syscall::SyscallError::NoReplyField as u64,
+            "D106: empty reply field must return NoReplyField error code"
+        );
+
+        // Target Field must be unmodified.
+        let fields = ks.fields.acquire();
+        let target = fields.get(target_field_id).unwrap();
+
+        assert_eq!(
+            target.queue_length, 0,
+            "D106: empty reply field must prevent message delivery"
         );
     }
 
@@ -9300,11 +9475,9 @@ mod tests {
     fn test_d17_create_observer_fault_handler_badge_tracked() {
         let ks = make_kernel_state();
         let handler_field_id = make_tracked_field_in_arena(&ks, 8);
-
         // Create a Space for the new Observer's backing (needs room for
         // RegisterState + L1 root + cap table).
         let space_id = make_space_in_arena(&ks, 0x10000, 8 * 4096);
-
         // Sender holds a Space cap (will become CreateObserver target)
         // and a Field cap (handler) at slot 3.
         let mut sender = crate::observer::Observer::test_with_cap_table(16);
@@ -9512,7 +9685,6 @@ mod tests {
     fn test_d73_close_send_once_enqueues_closure_directly() {
         let ks = make_kernel_state();
         let field_id = make_tracked_field_in_arena(&ks, 8);
-
         // No badge_increment — send-once caps bypass the refcount model.
         let mut sender = crate::observer::Observer::test_with_cap_table(16);
 
@@ -9575,7 +9747,6 @@ mod tests {
     fn test_d73_close_send_once_non_tracked_no_closure() {
         let ks = make_kernel_state();
         let field_id = make_field_in_arena(&ks, 8);
-
         let mut sender = crate::observer::Observer::test_with_cap_table(16);
 
         crate::frame::capabilities::write_entry(
@@ -9624,7 +9795,6 @@ mod tests {
     fn test_d73_mint_send_once_no_badge_increment() {
         let ks = make_kernel_state();
         let field_id = make_tracked_field_in_arena(&ks, 8);
-
         // Source cap is send_once.
         let mut sender = crate::observer::Observer::test_with_cap_table(16);
 
@@ -9686,7 +9856,6 @@ mod tests {
 
         assert_eq!(msg.badge, Badge(0xBB));
         assert_eq!(msg.label, crate::field::LABEL_CLOSURE);
-
         // Queue must be empty — no duplicate notification.
         assert!(
             field.is_empty(),
@@ -11823,13 +11992,28 @@ mod tests {
     fn integration_call_blocks_caller() {
         let mut scenario = TestScenario::new();
         let field_id = scenario.create_field(8);
-        let (mut caller, _) = make_sender_with_cap(
+        let reply_field_id = scenario.create_field(8);
+        let (mut caller, entries) = make_sender_with_cap(
             ObjectType::Field,
             field_id,
             Rights::SEND.union(Rights::RECEIVE),
             Badge(0x1234),
             0,
         );
+        // D106: install reply Field at SLOT_REPLY_FIELD (slot 1).
+        let reply_entry =
+            crate::frame::capabilities::entry_mut(entries, 16, crate::capability::SLOT_REPLY_FIELD)
+                .unwrap();
+
+        *reply_entry = crate::capability::Entry {
+            object: Some((ObjectType::Field, reply_field_id)),
+            rights: Rights::RECEIVE,
+            badge: Badge(0),
+            slot_tag: crate::capability::SlotTag(0),
+            send_once: false,
+            stored_generation: 0,
+        };
+
         let caller_ptr = NonNull::from(&mut caller);
 
         scenario.core.scheduler.enqueue(caller_ptr);
