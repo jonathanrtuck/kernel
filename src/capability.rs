@@ -3219,6 +3219,7 @@ mod tests {
         ) {
             let h = Handle { index, slot_tag: SlotTag(slot_tag) };
             let decoded = Handle::decode(h.encode());
+
             prop_assert_eq!(decoded.index, index);
             prop_assert_eq!(decoded.slot_tag.0, slot_tag);
         }
@@ -3234,6 +3235,7 @@ mod tests {
             let h = Handle { index, slot_tag: SlotTag(slot_tag) };
             let encoded = h.encode();
             let redecoded = Handle::decode(encoded);
+
             prop_assert_eq!(redecoded.encode(), encoded);
         }
 
@@ -3251,6 +3253,7 @@ mod tests {
             high_bits in proptest::num::u64::ANY,
         ) {
             let high_mask = high_bits & !0xFFFF_FFFF_FFFFu64;
+
             prop_assert!(SlotTag(tag).abi_matches(SlotTag(tag | high_mask)));
         }
     }
@@ -3262,6 +3265,7 @@ mod tests {
         #[test]
         fn prop_rights_union_idempotent(bits in proptest::num::u16::ANY) {
             let a = Rights::from_bits(bits);
+
             prop_assert_eq!(a.union(a), a);
         }
 
@@ -3273,6 +3277,7 @@ mod tests {
         ) {
             let a = Rights::from_bits(a_bits);
             let b = Rights::from_bits(b_bits);
+
             prop_assert_eq!(a.union(b), b.union(a));
         }
 
@@ -3286,6 +3291,7 @@ mod tests {
             let a = Rights::from_bits(a_bits);
             let b = Rights::from_bits(b_bits);
             let c = Rights::from_bits(c_bits);
+
             prop_assert_eq!(a.union(b).union(c), a.union(b.union(c)));
         }
 
@@ -3293,6 +3299,7 @@ mod tests {
         #[test]
         fn prop_rights_union_identity(bits in proptest::num::u16::ANY) {
             let a = Rights::from_bits(bits);
+
             prop_assert_eq!(a.union(Rights::empty()), a);
         }
 
@@ -3304,6 +3311,7 @@ mod tests {
         ) {
             let a = Rights::from_bits(a_bits);
             let b = Rights::from_bits(b_bits);
+
             prop_assert_eq!(a.attenuate(b).bits(), a.bits() & b.bits());
         }
 
@@ -3316,6 +3324,7 @@ mod tests {
             let a = Rights::from_bits(a_bits);
             let b = Rights::from_bits(b_bits);
             let result = a.attenuate(b);
+
             // result's bits are a subset of a's bits
             prop_assert_eq!(result.bits() & a.bits(), result.bits());
         }
@@ -3328,6 +3337,7 @@ mod tests {
         ) {
             let a = Rights::from_bits(a_bits);
             let b = Rights::from_bits(b_bits);
+
             prop_assert!(a.union(b).contains(a));
         }
 
@@ -3335,6 +3345,7 @@ mod tests {
         #[test]
         fn prop_rights_contains_reflexive(bits in proptest::num::u16::ANY) {
             let a = Rights::from_bits(bits);
+
             prop_assert!(a.contains(a));
         }
 
@@ -3343,6 +3354,7 @@ mod tests {
         #[test]
         fn prop_rights_empty_contains_only_empty(bits in proptest::num::u16::ANY) {
             let a = Rights::from_bits(bits);
+
             if Rights::empty().contains(a) {
                 prop_assert_eq!(a.bits(), 0u16);
             }
@@ -3356,6 +3368,7 @@ mod tests {
         #[test]
         fn prop_slot_index_preserved_in_low_bits(index in 0u32..=MAX_HANDLE_INDEX) {
             let h = Handle { index, slot_tag: SlotTag(0) };
+
             prop_assert_eq!(h.encode() & 0xFFFF, index as u64);
         }
 
@@ -3367,6 +3380,7 @@ mod tests {
         ) {
             let h = Handle { index, slot_tag: SlotTag(slot_tag) };
             let decoded = Handle::decode(h.encode());
+
             prop_assert!(decoded.index <= MAX_HANDLE_INDEX);
         }
     }
@@ -3377,6 +3391,7 @@ mod tests {
     #[test]
     fn prop_cap_absent_sentinel() {
         let decoded = Handle::decode(CAP_ABSENT);
+
         assert_eq!(decoded.index, 0xFFFF);
         assert_eq!(decoded.index, MAX_HANDLE_INDEX);
     }

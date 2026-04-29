@@ -863,7 +863,6 @@ mod tests {
         let (id_a, _) = store.insert(TestObject { value: 1, tag: 0 }).unwrap();
         let (id_b, _) = store.insert(TestObject { value: 2, tag: 0 }).unwrap();
         let (id_c, _) = store.insert(TestObject { value: 3, tag: 0 }).unwrap();
-
         let mut visited_ids = alloc::vec::Vec::new();
 
         store.for_each_mut(|id, _obj| {

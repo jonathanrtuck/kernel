@@ -51,15 +51,19 @@ impl Rng {
     fn new(seed: u64) -> Self {
         // xorshift64 must not be seeded with zero — adjust if needed.
         let state = if seed == 0 { 1 } else { seed };
+
         Self { state }
     }
 
     fn next(&mut self) -> u64 {
         let mut x = self.state;
+
         x ^= x << 13;
         x ^= x >> 7;
         x ^= x << 17;
+
         self.state = x;
+
         x
     }
 
@@ -106,7 +110,9 @@ impl HandlePool {
         if self.count == 0 {
             return BOGUS_HANDLE;
         }
+
         let index = rng.range(self.count as u64) as usize;
+
         self.handles[index]
     }
 
@@ -118,11 +124,13 @@ impl HandlePool {
         if self.count == 0 {
             return None;
         }
+
         let index = rng.range(self.count as u64) as usize;
         let handle = self.handles[index];
         // Swap with last entry and shrink count.
         self.count -= 1;
         self.handles[index] = self.handles[self.count];
+
         Some(handle)
     }
 }
@@ -137,8 +145,8 @@ extern "C" fn _start() -> ! {
     // good server, never a random handle.
     let handler_field = alloc_field(8);
     let ipc_field = alloc_field(8);
-    spawn_echo_server(handler_field, ipc_field);
 
+    spawn_echo_server(handler_field, ipc_field);
     // Required before Call (SVC #3) can be used from this Observer.
     setup_reply_field();
 
@@ -149,7 +157,8 @@ extern "C" fn _start() -> ! {
     // initial material for capability operations.
     for _ in 0..4 {
         // 16384 bytes = 1 page — smallest valid split.
-        let result = space_split(ROOT_SPACE_HANDLE, 16384);
+        let result = space_split(ROOT_SPACE_HANDLE, 16_384);
+
         if result.is_ok() {
             pool.push(result.value());
         }
@@ -165,6 +174,7 @@ extern "C" fn _start() -> ! {
             0 => {
                 // Clone: duplicate a capability.
                 let result = clone_cap(pool.random(&mut rng));
+
                 if result.is_ok() {
                     pool.push(result.value());
                 }
@@ -172,6 +182,7 @@ extern "C" fn _start() -> ! {
             1 => {
                 // Mint: attenuate a capability with random rights and badge.
                 let result = mint(pool.random(&mut rng), rng.next(), rng.next());
+
                 if result.is_ok() {
                     pool.push(result.value());
                 }
@@ -223,6 +234,7 @@ extern "C" fn _start() -> ! {
                 let pages = rng.range(4) + 1;
                 let size = pages * 16384;
                 let result = space_split(ROOT_SPACE_HANDLE, size);
+
                 if result.is_ok() {
                     pool.push(result.value());
                 }

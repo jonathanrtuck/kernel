@@ -58,6 +58,7 @@ mod tests {
             if self.count >= self.entries.len() {
                 return;
             }
+
             self.entries[self.count] = Some(id);
             self.count += 1;
         }
@@ -71,6 +72,7 @@ mod tests {
                 return;
             };
             let last = self.count - 1;
+
             // Swap-remove: overwrite entries[idx] with entries[last].
             self.entries[idx] = self.entries[last];
             self.entries[last] = None;
@@ -122,12 +124,10 @@ mod tests {
     fn loom_scheduler_concurrent_enqueue() {
         loom::model(|| {
             let queue = Arc::new(Mutex::new(ModelQueue::new()));
-
             let queue_a = queue.clone();
             let handle_a = thread::spawn(move || {
                 queue_a.lock().expect("lock a").enqueue(1);
             });
-
             let queue_b = queue.clone();
             let handle_b = thread::spawn(move || {
                 queue_b.lock().expect("lock b").enqueue(2);
@@ -176,7 +176,6 @@ mod tests {
             let handle_a = thread::spawn(move || {
                 queue_a.lock().expect("lock a").enqueue(4);
             });
-
             // Thread B: dequeue ID 2 (exercises concurrent swap-remove).
             let queue_b = queue.clone();
             let handle_b = thread::spawn(move || {
@@ -215,14 +214,12 @@ mod tests {
         loom::model(|| {
             let queue = Arc::new(Mutex::new(ModelQueue::new()));
             let result = Arc::new(loom::sync::Mutex::new(None::<u32>));
-
             // Thread A: enqueue 1, then enqueue 2.
             let queue_a = queue.clone();
             let handle_a = thread::spawn(move || {
                 queue_a.lock().expect("lock a first").enqueue(1);
                 queue_a.lock().expect("lock a second").enqueue(2);
             });
-
             // Thread B: call pick_next once (races with the two enqueues above).
             let queue_b = queue.clone();
             let result_b = result.clone();
@@ -258,7 +255,6 @@ mod tests {
     fn loom_scheduler_no_duplicates() {
         loom::model(|| {
             let queue = Arc::new(Mutex::new(ModelQueue::new()));
-
             // Thread A: enqueue ID 1 twice (simulates a buggy caller or
             // a race where two paths both decide to enqueue the same Observer).
             let queue_a = queue.clone();
@@ -266,7 +262,6 @@ mod tests {
                 queue_a.lock().expect("lock a first").enqueue(1);
                 queue_a.lock().expect("lock a second").enqueue(1);
             });
-
             // Thread B: also tries to enqueue ID 1 (concurrent duplicate attempt).
             let queue_b = queue.clone();
             let handle_b = thread::spawn(move || {

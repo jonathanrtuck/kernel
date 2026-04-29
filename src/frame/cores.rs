@@ -1973,10 +1973,8 @@ mod tests {
 
         let old_capacity = 8u32;
         let new_capacity = 16u32;
-
         let mut observer = Observer::test_with_cap_table(old_capacity);
         let obs_ptr = NonNull::from(&mut observer);
-
         // Allocate new (larger) entries array and copy old entries into it.
         let new_entries = alloc_test_entries(new_capacity);
 
@@ -2021,7 +2019,6 @@ mod tests {
         let capacity = 8u32;
         let mut observer = Observer::test_with_cap_table(capacity);
         let obs_ptr = NonNull::from(&mut observer);
-
         let same_entries = alloc_test_entries(capacity);
         let result = observer_extend_cap_table(obs_ptr, same_entries, capacity);
 
@@ -2039,7 +2036,6 @@ mod tests {
         let capacity = 16u32;
         let mut observer = Observer::test_with_cap_table(capacity);
         let obs_ptr = NonNull::from(&mut observer);
-
         let smaller_entries = alloc_test_entries(8);
         let result = observer_extend_cap_table(obs_ptr, smaller_entries, 8);
 

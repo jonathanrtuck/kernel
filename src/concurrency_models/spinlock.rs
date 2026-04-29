@@ -75,7 +75,6 @@ mod tests {
             const ITERS: usize = 2;
 
             let lock = Arc::new(ModelLock::new(0));
-
             let lock_a = lock.clone();
             let handle_a = thread::spawn(move || {
                 for _ in 0..ITERS {
@@ -85,7 +84,6 @@ mod tests {
                     lock_a.release();
                 }
             });
-
             let lock_b = lock.clone();
             let handle_b = thread::spawn(move || {
                 for _ in 0..ITERS {
@@ -118,7 +116,6 @@ mod tests {
         loom::model(|| {
             let locked = Arc::new(AtomicBool::new(false));
             let holder_count = Arc::new(AtomicUsize::new(0));
-
             let locked_a = locked.clone();
             let count_a = holder_count.clone();
             let handle_a = thread::spawn(move || {
@@ -129,17 +126,19 @@ mod tests {
                 {
                     thread::yield_now();
                 }
+
                 // Critical section: assert no concurrent holder.
                 let prev = count_a.fetch_add(1, Ordering::Relaxed);
+
                 assert_eq!(
                     prev, 0,
                     "thread A acquired lock but holder_count was non-zero"
                 );
+
                 // Release
                 count_a.fetch_sub(1, Ordering::Relaxed);
                 locked_a.store(false, Ordering::Release);
             });
-
             let locked_b = locked.clone();
             let count_b = holder_count.clone();
             let handle_b = thread::spawn(move || {
@@ -150,12 +149,15 @@ mod tests {
                 {
                     thread::yield_now();
                 }
+
                 // Critical section: assert no concurrent holder.
                 let prev = count_b.fetch_add(1, Ordering::Relaxed);
+
                 assert_eq!(
                     prev, 0,
                     "thread B acquired lock but holder_count was non-zero"
                 );
+
                 // Release
                 count_b.fetch_sub(1, Ordering::Relaxed);
                 locked_b.store(false, Ordering::Release);

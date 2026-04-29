@@ -76,10 +76,14 @@ mod tests {
         if field.waiter.load(Ordering::Acquire) {
             // Pop the waiter atomically (under the lock) and deliver directly.
             field.waiter.store(false, Ordering::Relaxed);
+
             let mut delivery = field.direct_delivery.lock().expect("delivery lock");
+
             *delivery = Some(value);
+
             drop(delivery);
             drop(queue);
+
             // Signal the blocked receiver.
             field.waiter_woken.store(true, Ordering::Release);
         } else {
@@ -120,6 +124,7 @@ mod tests {
 
         // Read the directly-delivered value.
         let mut delivery = field.direct_delivery.lock().expect("delivery lock");
+
         delivery
             .take()
             .expect("direct delivery must be set by sender")
@@ -136,16 +141,15 @@ mod tests {
     fn loom_ipc_send_then_receive() {
         loom::model(|| {
             let field = Arc::new(ModelField::new());
-
             let field_sender = field.clone();
             let sender = thread::spawn(move || {
                 model_send(&field_sender, 42);
             });
-
             let field_receiver = field.clone();
             let receiver = thread::spawn(move || model_receive(&field_receiver));
 
             sender.join().expect("sender");
+
             let value = receiver.join().expect("receiver");
 
             assert_eq!(
@@ -164,16 +168,14 @@ mod tests {
     fn loom_ipc_receive_then_send() {
         loom::model(|| {
             let field = Arc::new(ModelField::new());
-
             let field_receiver = field.clone();
             let receiver = thread::spawn(move || model_receive(&field_receiver));
-
             let field_sender = field.clone();
             let sender = thread::spawn(move || {
                 model_send(&field_sender, 99);
             });
-
             let value = receiver.join().expect("receiver");
+
             sender.join().expect("sender");
 
             assert_eq!(
@@ -195,12 +197,10 @@ mod tests {
     fn loom_ipc_two_senders_one_receiver() {
         loom::model(|| {
             let field = Arc::new(ModelField::new());
-
             let field_a = field.clone();
             let sender_a = thread::spawn(move || {
                 model_send(&field_a, 10);
             });
-
             let field_b = field.clone();
             let sender_b = thread::spawn(move || {
                 model_send(&field_b, 20);
@@ -213,7 +213,6 @@ mod tests {
             // Receive both messages (no blocking needed — both enqueued).
             let first = model_receive(&field);
             let second = model_receive(&field);
-
             // Order may vary — assert both values arrived exactly once.
             let mut received = [first, second];
 

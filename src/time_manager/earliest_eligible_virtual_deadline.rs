@@ -755,6 +755,7 @@ mod tests {
 
                 for i in 0..count {
                     let ptr = NonNull::from(&mut observers[i]);
+
                     sched.enqueue(ptr);
                 }
 
@@ -763,6 +764,7 @@ mod tests {
                         sched.pick_next().is_some(),
                         "pick_next must return Some when queue has {count} observers"
                     );
+
                     sched.on_preempt();
                 }
             }
@@ -783,6 +785,7 @@ mod tests {
 
                 for i in 0..count {
                     let ptr = NonNull::from(&mut observers[i]);
+
                     sched.enqueue(ptr);
                 }
 
@@ -792,8 +795,10 @@ mod tests {
                     if let Some(picked) = sched.pick_next() {
                         for j in 0..count {
                             let ptr = NonNull::from(&mut observers[j]);
+
                             if picked == ptr {
                                 counts[j] += 1;
+
                                 break;
                             }
                         }
@@ -831,7 +836,9 @@ mod tests {
                 for i in 0..count {
                     observers[i].responsiveness = profiles[i].0;
                     observers[i].throughput = profiles[i].1;
+
                     let ptr = NonNull::from(&mut observers[i]);
+
                     sched.enqueue(ptr);
                 }
 
@@ -842,8 +849,10 @@ mod tests {
                     if let Some(picked) = sched.pick_next() {
                         for j in 0..count {
                             let ptr = NonNull::from(&mut observers[j]);
+
                             if picked == ptr {
                                 seen[j] = true;
+
                                 break;
                             }
                         }
@@ -877,7 +886,6 @@ mod tests {
                 let mut observers: [Observer; 30] =
                     core::array::from_fn(|_| make_observer());
                 let mut sched = EarliestEligibleVirtualDeadline::new();
-
                 // Stack-based tracking: which observer indices are currently enqueued.
                 // [enqueued_stack] is a fixed array used as a LIFO stack.
                 let mut enqueued_stack = [0usize; 30];
@@ -889,7 +897,9 @@ mod tests {
                         // Enqueue next Observer if we have capacity.
                         if next_obs_idx < observers.len() && sched.queue_depth() < 64 {
                             let ptr = NonNull::from(&mut observers[next_obs_idx]);
+
                             sched.enqueue(ptr);
+
                             enqueued_stack[stack_len] = next_obs_idx;
                             stack_len += 1;
                             next_obs_idx += 1;
@@ -897,8 +907,10 @@ mod tests {
                     } else if stack_len > 0 {
                         // Dequeue most recently enqueued Observer.
                         stack_len -= 1;
+
                         let obs_idx = enqueued_stack[stack_len];
                         let ptr = NonNull::from(&mut observers[obs_idx]);
+
                         sched.dequeue(ptr);
                     }
                 }
@@ -915,9 +927,11 @@ mod tests {
                 // Verify contains() is accurate for all observers touched.
                 let currently_enqueued: [bool; 30] = {
                     let mut arr = [false; 30];
+
                     for i in 0..stack_len {
                         arr[enqueued_stack[i]] = true;
                     }
+
                     arr
                 };
 
@@ -925,6 +939,7 @@ mod tests {
                     let ptr = NonNull::from(&mut observers[i]);
                     let in_queue = sched.contains(ptr);
                     let expected = currently_enqueued[i];
+
                     prop_assert_eq!(
                         in_queue,
                         expected,
@@ -948,10 +963,8 @@ mod tests {
                 let mut observers: [Observer; 20] =
                     core::array::from_fn(|_| make_observer());
                 let mut sched = EarliestEligibleVirtualDeadline::new();
-
                 // Each test_default observer has compute_aggregate=100 → weight=100.
                 const WEIGHT_PER_OBS: u32 = 100;
-
                 // Stack-based tracking of enqueued observer indices.
                 let mut enqueued_stack = [0usize; 20];
                 let mut stack_len = 0usize;
@@ -961,19 +974,24 @@ mod tests {
                     if *op {
                         if next_obs_idx < observers.len() && sched.queue_depth() < 64 {
                             let ptr = NonNull::from(&mut observers[next_obs_idx]);
+
                             sched.enqueue(ptr);
+
                             enqueued_stack[stack_len] = next_obs_idx;
                             stack_len += 1;
                             next_obs_idx += 1;
                         }
                     } else if stack_len > 0 {
                         stack_len -= 1;
+
                         let obs_idx = enqueued_stack[stack_len];
                         let ptr = NonNull::from(&mut observers[obs_idx]);
+
                         sched.dequeue(ptr);
                     }
 
                     let expected_weight = stack_len as u32 * WEIGHT_PER_OBS;
+
                     prop_assert_eq!(
                         sched.total_weight,
                         expected_weight,
@@ -1007,7 +1025,9 @@ mod tests {
                 for i in 0..count {
                     observers[i].responsiveness = profiles[i].0;
                     observers[i].throughput = profiles[i].1;
+
                     let ptr = NonNull::from(&mut observers[i]);
+
                     sched.enqueue(ptr);
                 }
 
@@ -1017,6 +1037,7 @@ mod tests {
                         sched.pick_next().is_some(),
                         "pick_next returned None with {count} observers enqueued"
                     );
+
                     sched.on_preempt();
                 }
             }
@@ -1098,7 +1119,6 @@ mod tests {
             // best_vd is small. Then test should_switch_to with a throughput-
             // oriented receiver that will have a large slice (late deadline).
             let mut sched = EarliestEligibleVirtualDeadline::new();
-
             // Enqueue a very responsive observer — short slice = early deadline.
             let mut queued = make_observer_with_profile(127, 0); // max R, no T
             let qptr = NonNull::from(&mut queued);
@@ -1108,7 +1128,6 @@ mod tests {
             // The receiver is batch-oriented — long slice = late deadline.
             let mut receiver = make_observer_with_profile(0, 127); // max T, no R
             let rptr = NonNull::from(&mut receiver);
-
             // The batch receiver's hypothetical VD will be much later than
             // the interactive observer's current VD. should_switch_to must
             // return false (don't preempt the interactive observer for the

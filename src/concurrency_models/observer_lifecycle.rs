@@ -68,10 +68,12 @@ mod tests {
                 PrimaryState::Inert | PrimaryState::Faulted => {
                     self.state = PrimaryState::Runnable;
                     self.suspended = false;
+
                     Ok(())
                 }
                 PrimaryState::Runnable | PrimaryState::Blocked if self.suspended => {
                     self.suspended = false;
+
                     Ok(())
                 }
                 _ => Err(()),
@@ -92,6 +94,7 @@ mod tests {
             match self.state {
                 PrimaryState::Runnable => {
                     self.state = PrimaryState::Blocked;
+
                     Ok(())
                 }
                 _ => Err(()),
@@ -105,6 +108,7 @@ mod tests {
             match self.state {
                 PrimaryState::Blocked => {
                     self.state = PrimaryState::Runnable;
+
                     Ok(!self.suspended)
                 }
                 _ => Err(()),
@@ -118,6 +122,7 @@ mod tests {
             match self.state {
                 PrimaryState::Runnable => {
                     self.state = PrimaryState::Faulted;
+
                     Ok(())
                 }
                 _ => Err(()),
@@ -146,7 +151,6 @@ mod tests {
     fn loom_observer_resume_suspend_race() {
         loom::model(|| {
             let observer = Arc::new(Mutex::new(ModelObserver::new(PrimaryState::Inert, false)));
-
             let obs_a = observer.clone();
             let handle_a = thread::spawn(move || {
                 obs_a
@@ -155,7 +159,6 @@ mod tests {
                     .resume()
                     .expect("resume from Inert must succeed");
             });
-
             let obs_b = observer.clone();
             let handle_b = thread::spawn(move || {
                 obs_b.lock().expect("lock b").suspend();
@@ -201,7 +204,6 @@ mod tests {
         loom::model(|| {
             let observer = Arc::new(Mutex::new(ModelObserver::new(PrimaryState::Blocked, false)));
             let should_enqueue_result = Arc::new(Mutex::new(false));
-
             let obs_a = observer.clone();
             let result_a = should_enqueue_result.clone();
             let handle_a = thread::spawn(move || {
@@ -212,7 +214,6 @@ mod tests {
                     .expect("unblock from Blocked must succeed");
                 *result_a.lock().expect("result lock") = should_enqueue;
             });
-
             let obs_b = observer.clone();
             let handle_b = thread::spawn(move || {
                 obs_b.lock().expect("lock b").suspend();
@@ -267,14 +268,12 @@ mod tests {
             )));
             let fault_result = Arc::new(Mutex::new(false));
             let block_result = Arc::new(Mutex::new(false));
-
             let obs_a = observer.clone();
             let fault_ok = fault_result.clone();
             let handle_a = thread::spawn(move || {
                 let ok = obs_a.lock().expect("lock a").fault().is_ok();
                 *fault_ok.lock().expect("fault result lock") = ok;
             });
-
             let obs_b = observer.clone();
             let block_ok = block_result.clone();
             let handle_b = thread::spawn(move || {
@@ -326,7 +325,6 @@ mod tests {
     fn loom_observer_full_lifecycle() {
         loom::model(|| {
             let observer = Arc::new(Mutex::new(ModelObserver::new(PrimaryState::Inert, false)));
-
             // Thread A: resume() then block() (two separate lock acquisitions).
             let obs_a = observer.clone();
             let handle_a = thread::spawn(move || {
@@ -339,7 +337,6 @@ mod tests {
                 // block() may fail if B's unblock somehow races (Loom explores this).
                 let _ = obs_a.lock().expect("lock a block").block();
             });
-
             // Thread B: attempt unblock() once. This may find the observer in
             // Inert (before A's resume), Runnable (between A's resume and block),
             // or Blocked (after A's block). Only the Blocked case succeeds.
@@ -389,14 +386,12 @@ mod tests {
             )));
             let result_a = Arc::new(Mutex::new(Ok(())));
             let result_b = Arc::new(Mutex::new(Ok(())));
-
             let obs_a = observer.clone();
             let res_a = result_a.clone();
             let handle_a = thread::spawn(move || {
                 let r = obs_a.lock().expect("lock a").resume();
                 *res_a.lock().expect("result a lock") = r;
             });
-
             let obs_b = observer.clone();
             let res_b = result_b.clone();
             let handle_b = thread::spawn(move || {

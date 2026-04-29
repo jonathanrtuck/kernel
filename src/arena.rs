@@ -1385,6 +1385,7 @@ mod tests {
                 match arena.allocate() {
                     Ok((id, obj)) => {
                         obj.value = id.0;
+
                         ids.push(id);
                     }
                     Err(AllocError::OutOfMemory) => break,
@@ -1393,9 +1394,13 @@ mod tests {
 
             // All live ids must be distinct — no two allocations share an ObjectId.
             let mut sorted = ids.clone();
+
             sorted.sort_by_key(|id| id.0);
+
             let original_len = sorted.len();
+
             sorted.dedup_by_key(|id| id.0);
+
             prop_assert_eq!(
                 sorted.len(),
                 original_len,
@@ -1473,9 +1478,13 @@ mod tests {
 
                 // After every operation: assert all live ids are distinct.
                 let mut sorted = live_ids.clone();
+
                 sorted.sort_by_key(|id| id.0);
+
                 let len = sorted.len();
+
                 sorted.dedup_by_key(|id| id.0);
+
                 prop_assert_eq!(
                     sorted.len(),
                     len,
@@ -1496,6 +1505,7 @@ mod tests {
 
             for i in 0..count {
                 let expected_value = offset.wrapping_add(i);
+
                 match arena.allocate() {
                     Ok((id, obj)) => {
                         obj.value = expected_value;
@@ -1510,6 +1520,7 @@ mod tests {
                 let actual = arena
                     .get(id)
                     .expect("allocate() must return an id that get() can retrieve");
+
                 prop_assert_eq!(
                     actual.value,
                     expected,
@@ -1545,6 +1556,7 @@ mod tests {
             // Choose a valid free index (modulo actual count).
             let free_index = (free_index_raw as usize) % actual_count;
             let freed_id = ids[free_index];
+
             arena.free(freed_id);
 
             // Freed id must return None.
@@ -1559,6 +1571,7 @@ mod tests {
                 if i == free_index {
                     continue;
                 }
+
                 prop_assert!(
                     arena.get(id).is_some(),
                     "live id {} (index {}) must remain retrievable after freeing index {}",
@@ -1595,7 +1608,6 @@ mod tests {
             }
 
             let expected_live = live_ids.len();
-
             // Count how many ids in live_ids actually return Some from get().
             let actual_live = live_ids.iter().filter(|&&id| arena.get(id).is_some()).count();
 
