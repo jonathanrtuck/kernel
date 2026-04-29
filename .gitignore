@@ -1,6 +1,6 @@
 .claude/settings.local.json
 .DS_Store
-.explore/state/
+.explore/
 .missions/
 .planning/
 .vscode/
