@@ -644,7 +644,12 @@ fn install_reply_field<S: crate::time_manager::Scheduler + 'static>()
         _ => u64::MAX,
     };
 
-    // SAFETY: same as space_info handler.
+    // SAFETY: observer points to a live Observer (extracted from
+    // core.current which is non-None). A4 non-reentrancy guarantees
+    // exclusive access — no concurrent access to this Observer's
+    // RegisterState is possible. register_state.as_ptr() is valid
+    // for the lifetime of the Observer object. We cast to *mut
+    // RegisterState to write the result into x0.
     unsafe {
         let obs = observer.as_ref();
         let rs = &mut *(obs.register_state.as_ptr().as_ptr()
