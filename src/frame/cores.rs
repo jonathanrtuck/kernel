@@ -1848,4 +1848,204 @@ mod tests {
             "D83: kernel_stack_top raw byte offset 16 must match"
         );
     }
+
+    // ── observer_read_pc (D100) ────────────────────────────────────────
+
+    #[test]
+    fn test_observer_read_pc_returns_saved_pc() {
+        // Covers: observer_read_pc reads ELR_EL1 from the Observer's RegisterState.
+        let rs_ptr = alloc_test_register_state();
+
+        // Write a known PC value into the RegisterState.
+        // SAFETY: rs_ptr from alloc_test_register_state — valid, aligned.
+        unsafe {
+            let rs =
+                &mut *(rs_ptr.as_ptr() as *mut crate::frame::arch::register_state::RegisterState);
+
+            rs.pc = 0xFFFF_0000_1234_5678;
+        }
+
+        let mut observer = Observer::test_default();
+
+        observer.register_state = RegisterStateHandle::new(rs_ptr);
+
+        let obs_ptr = NonNull::from(&mut observer);
+        let pc = observer_read_pc(obs_ptr);
+
+        assert_eq!(
+            pc, 0xFFFF_0000_1234_5678,
+            "observer_read_pc must return the PC saved in RegisterState"
+        );
+    }
+
+    #[test]
+    fn test_observer_read_pc_returns_zero_on_fresh_state() {
+        // A fresh RegisterState is zeroed — PC should be 0.
+        let rs_ptr = alloc_test_register_state();
+        let mut observer = Observer::test_default();
+
+        observer.register_state = RegisterStateHandle::new(rs_ptr);
+
+        let obs_ptr = NonNull::from(&mut observer);
+
+        assert_eq!(
+            observer_read_pc(obs_ptr),
+            0,
+            "fresh RegisterState has PC = 0"
+        );
+    }
+
+    // ── observer_save_syscall / observer_take_saved_syscall (D-3.1b) ──
+
+    #[test]
+    fn test_observer_save_take_syscall_roundtrip() {
+        // Covers: observer_save_syscall stores the operation, observer_take_saved_syscall
+        // reads and clears it.
+        let mut observer = Observer::test_default();
+        let obs_ptr = NonNull::from(&mut observer);
+
+        observer_save_syscall(obs_ptr, crate::syscall::TypedOperation::ObserverResume);
+
+        let taken = observer_take_saved_syscall(obs_ptr);
+
+        match taken {
+            crate::observer::SavedSyscallContext::Typed(op) => {
+                assert_eq!(
+                    op,
+                    crate::syscall::TypedOperation::ObserverResume,
+                    "saved operation must roundtrip"
+                );
+            }
+            _ => panic!("expected SavedSyscallContext::Typed after save"),
+        }
+    }
+
+    #[test]
+    fn test_observer_take_saved_syscall_clears_state() {
+        // After take, the Observer's saved_syscall must be None.
+        let mut observer = Observer::test_default();
+        let obs_ptr = NonNull::from(&mut observer);
+
+        observer_save_syscall(obs_ptr, crate::syscall::TypedOperation::Destroy);
+        observer_take_saved_syscall(obs_ptr);
+
+        let second_take = observer_take_saved_syscall(obs_ptr);
+
+        match second_take {
+            crate::observer::SavedSyscallContext::None => {}
+            _ => panic!("second take must return None — state was not cleared"),
+        }
+    }
+
+    #[test]
+    fn test_observer_save_syscall_various_operations() {
+        // Covers several TypedOperation variants through save/take.
+        let operations = [
+            crate::syscall::TypedOperation::Clone,
+            crate::syscall::TypedOperation::Close,
+            crate::syscall::TypedOperation::Mint,
+            crate::syscall::TypedOperation::ObserverWriteRegisters,
+        ];
+
+        for op in &operations {
+            let mut observer = Observer::test_default();
+            let obs_ptr = NonNull::from(&mut observer);
+
+            observer_save_syscall(obs_ptr, *op);
+
+            let taken = observer_take_saved_syscall(obs_ptr);
+
+            match taken {
+                crate::observer::SavedSyscallContext::Typed(saved_op) => {
+                    assert_eq!(saved_op, *op, "operation must roundtrip through save/take");
+                }
+                _ => panic!("expected Typed variant for op {:?}", op as *const _),
+            }
+        }
+    }
+
+    // ── observer_extend_cap_table (D-3.1a, D40) ───────────────────────
+
+    #[test]
+    fn test_observer_extend_cap_table_increases_capacity() {
+        // Covers: observer_extend_cap_table — extends from small to large capacity.
+        use crate::frame::capabilities::{alloc_test_entries, init_freelist};
+
+        let old_capacity = 8u32;
+        let new_capacity = 16u32;
+
+        let mut observer = Observer::test_with_cap_table(old_capacity);
+        let obs_ptr = NonNull::from(&mut observer);
+
+        // Allocate new (larger) entries array and copy old entries into it.
+        let new_entries = alloc_test_entries(new_capacity);
+
+        // Copy existing entries into positions 0..old_capacity.
+        // SAFETY: Both arrays are valid, non-overlapping heap allocations
+        // of Entry. observer.cap_table is the old array with old_capacity entries.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                observer.cap_table.as_ptr(),
+                new_entries.as_ptr(),
+                old_capacity as usize,
+            );
+        }
+
+        // Initialize the new slots (old_capacity..new_capacity) as a freelist.
+        init_freelist(new_entries, new_capacity, old_capacity);
+
+        let result = observer_extend_cap_table(obs_ptr, new_entries, new_capacity);
+
+        assert!(result, "extend must return true on success");
+
+        // Capacity must be updated.
+        let cap = unsafe { (*obs_ptr.as_ptr()).cap_table_capacity };
+
+        assert_eq!(cap, new_capacity, "cap_table_capacity must be updated");
+
+        // free_head must point to the first new slot.
+        let free_head = unsafe { (*obs_ptr.as_ptr()).cap_table_free_head };
+
+        assert_eq!(
+            free_head,
+            Some(old_capacity),
+            "free_head must point to first new slot after extend"
+        );
+    }
+
+    #[test]
+    fn test_observer_extend_cap_table_rejects_same_capacity() {
+        // Covers: extend must return false if new_capacity <= old_capacity.
+        use crate::frame::capabilities::alloc_test_entries;
+
+        let capacity = 8u32;
+        let mut observer = Observer::test_with_cap_table(capacity);
+        let obs_ptr = NonNull::from(&mut observer);
+
+        let same_entries = alloc_test_entries(capacity);
+        let result = observer_extend_cap_table(obs_ptr, same_entries, capacity);
+
+        assert!(
+            !result,
+            "extend must return false if new_capacity == old_capacity"
+        );
+    }
+
+    #[test]
+    fn test_observer_extend_cap_table_rejects_smaller_capacity() {
+        // Covers: extend must return false if new_capacity < old_capacity.
+        use crate::frame::capabilities::alloc_test_entries;
+
+        let capacity = 16u32;
+        let mut observer = Observer::test_with_cap_table(capacity);
+        let obs_ptr = NonNull::from(&mut observer);
+
+        let smaller_entries = alloc_test_entries(8);
+        let result = observer_extend_cap_table(obs_ptr, smaller_entries, 8);
+
+        assert!(
+            !result,
+            "extend must return false if new_capacity < old_capacity"
+        );
+    }
 }

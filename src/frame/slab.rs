@@ -754,4 +754,199 @@ mod tests {
 
         assert!(store.get(ObjectId(0)).is_none());
     }
+
+    // ── insert (sound API, freelist reuse and push paths) ────────────
+
+    #[test]
+    fn insert_push_path_assigns_sequential_ids() {
+        // Covers: insert() new slot path (no prior freelist entries).
+        let mut store: SlabStore<TestObject> = SlabStore::new();
+        let id_0 = store.insert(TestObject { value: 10, tag: 1 }).unwrap().0;
+        let id_1 = store.insert(TestObject { value: 20, tag: 2 }).unwrap().0;
+
+        assert_eq!(id_0, ObjectId(0));
+        assert_eq!(id_1, ObjectId(1));
+        assert_eq!(store.get(id_0).unwrap().value, 10);
+        assert_eq!(store.get(id_1).unwrap().value, 20);
+    }
+
+    #[test]
+    fn insert_freelist_reuse_path() {
+        // Covers: insert() freelist reuse path after a slot is freed.
+        let mut store: SlabStore<TestObject> = SlabStore::new();
+        let (id_0, _) = store.insert(TestObject { value: 1, tag: 0 }).unwrap();
+        let (id_1, _) = store.insert(TestObject { value: 2, tag: 0 }).unwrap();
+
+        store.free(id_0);
+
+        // LIFO freelist: freed slot 0 should be reused.
+        let (reused_id, reused_obj) = store.insert(TestObject { value: 99, tag: 7 }).unwrap();
+
+        assert_eq!(reused_id, id_0, "insert must reuse freed slot");
+        assert_eq!(reused_obj.value, 99, "inserted value must be visible");
+        assert_eq!(reused_obj.tag, 7, "inserted tag must be visible");
+        // Slot 1 must be untouched.
+        assert_eq!(store.get(id_1).unwrap().value, 2);
+    }
+
+    #[test]
+    fn insert_at_capacity_returns_out_of_memory() {
+        // Covers: insert() OOM path — all 256 slots full.
+        let mut store: SlabStore<TestObject> = SlabStore::new();
+        let max = 256u32;
+
+        for i in 0..max {
+            store
+                .insert(TestObject {
+                    value: i as u64,
+                    tag: 0,
+                })
+                .unwrap();
+        }
+
+        let result = store.insert(TestObject { value: 999, tag: 0 });
+
+        assert_eq!(
+            result.unwrap_err(),
+            AllocError::OutOfMemory,
+            "insert past capacity must return OutOfMemory"
+        );
+    }
+
+    #[test]
+    fn insert_value_retrievable_via_get() {
+        // Verify that a value placed via insert is readable via get.
+        let mut store: SlabStore<TestObject> = SlabStore::new();
+        let (id, _) = store
+            .insert(TestObject {
+                value: 0xDEAD,
+                tag: 42,
+            })
+            .unwrap();
+        let retrieved = store.get(id).unwrap();
+
+        assert_eq!(retrieved.value, 0xDEAD);
+        assert_eq!(retrieved.tag, 42);
+    }
+
+    #[test]
+    fn insert_after_exhaust_and_free_succeeds() {
+        // Covers: insert freelist path after capacity exhaustion + free.
+        let mut store: SlabStore<TestObject> = SlabStore::new();
+        let max = 256u32;
+
+        for i in 0..max {
+            store
+                .insert(TestObject {
+                    value: i as u64,
+                    tag: 0,
+                })
+                .unwrap();
+        }
+
+        assert!(store.insert(TestObject { value: 0, tag: 0 }).is_err());
+
+        store.free(ObjectId(50));
+
+        let (id, obj) = store.insert(TestObject { value: 777, tag: 3 }).unwrap();
+
+        assert_eq!(id, ObjectId(50), "freed slot must be reused by insert");
+        assert_eq!(obj.value, 777);
+    }
+
+    // ── for_each_mut (iterates all occupied slots) ────────────────────
+
+    #[test]
+    fn for_each_mut_visits_all_occupied_slots() {
+        // Covers: for_each_mut visiting every live slot.
+        let mut store: SlabStore<TestObject> = SlabStore::new();
+        let (id_a, _) = store.insert(TestObject { value: 1, tag: 0 }).unwrap();
+        let (id_b, _) = store.insert(TestObject { value: 2, tag: 0 }).unwrap();
+        let (id_c, _) = store.insert(TestObject { value: 3, tag: 0 }).unwrap();
+
+        let mut visited_ids = alloc::vec::Vec::new();
+
+        store.for_each_mut(|id, _obj| {
+            visited_ids.push(id);
+        });
+
+        visited_ids.sort_by_key(|id| id.0);
+
+        assert_eq!(visited_ids, alloc::vec![id_a, id_b, id_c]);
+    }
+
+    #[test]
+    fn for_each_mut_skips_freed_slots() {
+        // Covers: for_each_mut must NOT visit freed (None) slots.
+        let mut store: SlabStore<TestObject> = SlabStore::new();
+        let (id_a, _) = store.allocate().unwrap();
+        let (id_b, _) = store.allocate().unwrap();
+        let (id_c, _) = store.allocate().unwrap();
+
+        store.free(id_b);
+
+        let mut visited_ids = alloc::vec::Vec::new();
+
+        store.for_each_mut(|id, _obj| {
+            visited_ids.push(id);
+        });
+
+        visited_ids.sort_by_key(|id| id.0);
+
+        assert!(
+            !visited_ids.contains(&id_b),
+            "for_each_mut must not visit freed slot"
+        );
+        assert!(visited_ids.contains(&id_a));
+        assert!(visited_ids.contains(&id_c));
+        assert_eq!(visited_ids.len(), 2);
+    }
+
+    #[test]
+    fn for_each_mut_mutates_values() {
+        // Covers: the mutable callback can modify slot contents.
+        let mut store: SlabStore<TestObject> = SlabStore::new();
+        let (id, _) = store.insert(TestObject { value: 0, tag: 0 }).unwrap();
+
+        store.for_each_mut(|_, obj| {
+            obj.value = 0xCAFE;
+            obj.tag = 99;
+        });
+
+        let retrieved = store.get(id).unwrap();
+
+        assert_eq!(retrieved.value, 0xCAFE);
+        assert_eq!(retrieved.tag, 99);
+    }
+
+    #[test]
+    fn for_each_mut_on_empty_store_is_noop() {
+        // Covers: for_each_mut on a store with no allocated slots.
+        let mut store: SlabStore<TestObject> = SlabStore::new();
+        let mut count = 0u32;
+
+        store.for_each_mut(|_, _| {
+            count += 1;
+        });
+
+        assert_eq!(
+            count, 0,
+            "for_each_mut on empty store must visit zero slots"
+        );
+    }
+
+    #[test]
+    fn for_each_mut_visits_correct_object_ids() {
+        // Verify ObjectId passed to callback matches the allocated id.
+        let mut store: SlabStore<TestObject> = SlabStore::new();
+        let (id, _) = store.insert(TestObject { value: 42, tag: 0 }).unwrap();
+
+        store.for_each_mut(|visited_id, obj| {
+            assert_eq!(
+                visited_id, id,
+                "ObjectId passed to callback must match allocated id"
+            );
+            assert_eq!(obj.value, 42);
+        });
+    }
 }
