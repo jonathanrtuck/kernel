@@ -47,7 +47,12 @@ Plans:
   4. Every inline asm `options()` annotation is justified against the ARM Architecture Reference Manual — any unjustified `nomem` is removed or replaced
   5. Speculation barriers are present for all user-provided index dereferences in frame/
   6. A per-file audit record exists documenting status (clean / fixed / known-risk) for every file in frame/
-**Plans**: TBD
+**Plans:** 4 plans
+Plans:
+- [ ] 02-01-PLAN.md — Audit cores.rs + fields.rs (hot-path dispatch, 127 unsafe blocks)
+- [ ] 02-02-PLAN.md — Audit mapping.rs + mmu.rs + boot.rs + slab.rs (memory subsystem)
+- [ ] 02-03-PLAN.md — Audit lock.rs + capabilities.rs + mod.rs + exception.rs + arch files (infrastructure)
+- [ ] 02-04-PLAN.md — Per-file audit report document (SAFE-06)
 
 ### Phase 3: Coverage
 **Goal**: Coverage is measurable on demand, every source file with critical paths below 50% is identified, and targeted tests bring uncovered paths above 80%
@@ -93,7 +98,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Property Testing | 3/3 | Complete   | 2026-04-29 |
-| 2. Unsafe Audit | 0/TBD | Not started | - |
+| 2. Unsafe Audit | 0/4 | Not started | - |
 | 3. Coverage | 0/TBD | Not started | - |
 | 4. Fuzzing | 0/TBD | Not started | - |
 | 5. Concurrency Modeling | 0/TBD | Not started | - |
