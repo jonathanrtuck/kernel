@@ -9,12 +9,12 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 ### Property Testing
 
-- [ ] **PROP-01**: Capability encoding roundtrips correctly for all valid ObjectType/Rights/badge combinations
-- [ ] **PROP-02**: Arena allocation invariants hold: no double-alloc, freed slots reusable, no ID overlap
-- [ ] **PROP-03**: Rights bitmask operations are consistent (union, intersection, subset, attenuation)
+- [x] **PROP-01**: Capability encoding roundtrips correctly for all valid ObjectType/Rights/badge combinations
+- [x] **PROP-02**: Arena allocation invariants hold: no double-alloc, freed slots reusable, no ID overlap
+- [x] **PROP-03**: Rights bitmask operations are consistent (union, intersection, subset, attenuation)
 - [ ] **PROP-04**: EEVDF scheduler properties hold: eligible threads always picked, virtual deadline ordering maintained
-- [ ] **PROP-05**: Capability slot arithmetic never overflows or produces invalid indices
-- [ ] **PROP-06**: proptest integrated into `cargo test` and `scripts/verify` pipeline
+- [x] **PROP-05**: Capability slot arithmetic never overflows or produces invalid indices
+- [x] **PROP-06**: proptest integrated into `cargo test` and `scripts/verify` pipeline
 
 ### Unsafe Audit
 
@@ -75,12 +75,12 @@ Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| PROP-01 | Phase 1 | Pending |
-| PROP-02 | Phase 1 | Pending |
-| PROP-03 | Phase 1 | Pending |
+| PROP-01 | Phase 1 | Complete |
+| PROP-02 | Phase 1 | Complete |
+| PROP-03 | Phase 1 | Complete |
 | PROP-04 | Phase 1 | Pending |
-| PROP-05 | Phase 1 | Pending |
-| PROP-06 | Phase 1 | Pending |
+| PROP-05 | Phase 1 | Complete |
+| PROP-06 | Phase 1 | Complete |
 | SAFE-01 | Phase 2 | Pending |
 | SAFE-02 | Phase 2 | Pending |
 | SAFE-03 | Phase 2 | Pending |

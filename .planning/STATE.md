@@ -1,3 +1,17 @@
+---
+gsd_state_version: 1.0
+milestone: v1.0
+milestone_name: milestone
+status: Ready to execute
+stopped_at: Completed 01-property-testing 01-02-PLAN.md
+last_updated: "2026-04-29T00:10:54.457Z"
+progress:
+  total_phases: 5
+  completed_phases: 0
+  total_plans: 3
+  completed_plans: 2
+---
+
 # Project State
 
 ## Project Reference
@@ -5,20 +19,17 @@
 See: .planning/PROJECT.md (updated 2026-04-28)
 
 **Core value:** Every kernel invariant is tested by at least one technique that can find bugs the developer didn't anticipate.
-**Current focus:** Phase 1 — Property Testing
+**Current focus:** Phase 01 — property-testing
 
 ## Current Position
 
-Phase: 1 of 5 (Property Testing)
-Plan: — of — in current phase
-Status: Ready to plan
-Last activity: 2026-04-28 — Roadmap created; milestone v1.0 phases defined
-
-Progress: [░░░░░░░░░░] 0%
+Phase: 01 (property-testing) — EXECUTING
+Plan: 3 of 3
 
 ## Performance Metrics
 
 **Velocity:**
+
 - Total plans completed: 0
 - Average duration: —
 - Total execution time: 0 hours
@@ -30,10 +41,13 @@ Progress: [░░░░░░░░░░] 0%
 | - | - | - | - |
 
 **Recent Trend:**
+
 - Last 5 plans: —
 - Trend: —
 
 *Updated after each plan completion*
+| Phase 01-property-testing P01 | 8 | 2 tasks | 2 files |
+| Phase 01-property-testing P02 | 15 | 1 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -45,6 +59,10 @@ Recent decisions affecting current work:
 - Proptest before Verus: finds unknown unknowns cheaply; Verus proves known properties expensively
 - Unsafe audit deferred until frame/ stabilizes: audit most valuable when surface isn't actively changing
 - Host-side concurrency modeling: bare-metal has no threading library; model protocols in std-compatible harness
+- [Phase 01-property-testing]: Proptest strategies use full u16 range for Rights algebra to test laws on arbitrary bit patterns, not just 14 valid bits
+- [Phase 01-property-testing]: proptest! blocks grouped by requirement ID with comment headers for traceability (PROP-01, PROP-03, PROP-05)
+- [Phase 01-property-testing]: Vec<bool> op-sequence encoding preferred over ArenaOp enum for proptest — avoids index-tracking complexity in strategy
+- [Phase 01-property-testing]: OutOfMemory in proptest bodies treated as skip (not failure) — test arena has finite slab backing
 
 ### Pending Todos
 
@@ -56,6 +74,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-28
-Stopped at: Roadmap created — 27 requirements mapped across 5 phases; ready to begin /gsd:plan-phase 1
+Last session: 2026-04-29T00:10:54.455Z
+Stopped at: Completed 01-property-testing 01-02-PLAN.md
 Resume file: None
