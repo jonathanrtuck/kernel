@@ -22,7 +22,7 @@ pub enum IpcOperation {
 ///
 /// Dense table dispatch. Grouped by type for self-documentation.
 /// Future rights-mask additions append to their respective type groups.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
 pub enum TypedOperation {
     // Observer operations (D39 — nine rights)
