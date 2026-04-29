@@ -475,9 +475,12 @@ fn configure_and_enable() {
     // Invalidate TLBs and enable MMU
     // -----------------------------------------------------------------------
 
+    // ARM ARM D5.10: ISB required after MAIR/TCR/TTBR writes to ensure
+    // system register changes are visible before the TLBI sequence.
     sysreg::isb();
 
-    // DSB ISHST (store-only): ARM ARM D5.10 recommended pre-TLBI barrier.
+    // ARM ARM D5.10: DSB ISHST drains page-table stores before TLBI so
+    // hardware walkers on other cores observe updated descriptors.
     sysreg::dsb_ishst();
 
     // IS broadcast: PSCI leaves TLB state IMPLEMENTATION DEFINED.
