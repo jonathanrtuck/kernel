@@ -2,13 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: Ready to execute
-last_updated: "2026-04-29T00:29:23.681Z"
+status: Phase complete — ready for verification
+stopped_at: Completed 02-unsafe-audit 02-04-PLAN.md
+last_updated: "2026-04-29T00:35:00.112Z"
 progress:
   total_phases: 5
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 7
-  completed_plans: 6
+  completed_plans: 7
 ---
 
 # Project State
@@ -50,6 +51,7 @@ tasks | 2 files | | Phase 01-property-testing P02 | 15 | 1 tasks | 2 files | |
 Phase 01-property-testing P03 | 5 | 1 tasks | 3 files |
 | Phase 02-unsafe-audit P01 | 12 | 2 tasks | 2 files |
 | Phase 02-unsafe-audit P03 | 10m | 2 tasks | 4 files |
+| Phase 02-unsafe-audit P04 | 10 | 1 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -91,6 +93,8 @@ affecting current work:
 - [Phase 02-unsafe-audit]: ARM ARM D5.10 ISB and DSB ISHST citations added inline in configure_and_enable — makes MMU-enable sequence self-documenting at the call site
 - [Phase 02-unsafe-audit]: Each unsafe branch in an if-else chain needs its own SAFETY comment even when invariants are identical
 - [Phase 02-unsafe-audit]: MaybeUninit::zeroed().assume_init() is UB for NonNull-containing types; insert() is the sound API for Field and Observer
+- [Phase 02-unsafe-audit]: speculation.rs doc-comment example is counted in verify's raw grep total but is not a real unsafe block — documented in AUDIT-REPORT.md as a known limitation
+- [Phase 02-unsafe-audit]: SAFETY comment extras (e.g., fields.rs 53 comments for 42 blocks) are correctly treated as better-than-minimum coverage, not gaps
 
 ### Pending Todos
 
@@ -102,6 +106,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-28T00:00:00.000Z
-Stopped at: Completed 02-unsafe-audit 02-02-PLAN.md
+Last session: 2026-04-29T00:35:00.110Z
+Stopped at: Completed 02-unsafe-audit 02-04-PLAN.md
 Resume file: None

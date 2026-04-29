@@ -24,7 +24,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: Property Testing** - Proptest for capability encoding, arena
       allocation, rights bitmasks, and scheduler properties (completed
       2026-04-29)
-- [ ] **Phase 2: Unsafe Audit** - Structured audit of every unsafe block in
+- [x] **Phase 2: Unsafe Audit** - Structured audit of every unsafe block in (completed 2026-04-29)
       frame/ with gap remediation and documented status
 - [ ] **Phase 3: Coverage** - Measure per-file coverage, identify blind spots,
       write targeted tests to bring critical paths above 80%
@@ -79,7 +79,7 @@ SAFE-05, SAFE-06 **Success Criteria** (what must be TRUE):
 5. Speculation barriers are present for all user-provided index dereferences in
    frame/
 6. A per-file audit record exists documenting status (clean / fixed /
-   known-risk) for every file in frame/ **Plans:** 4 plans Plans:
+   known-risk) for every file in frame/ **Plans:** 4/4 plans complete
 
 - [x] 02-01-PLAN.md — Audit cores.rs + fields.rs (hot-path dispatch, 127 unsafe
       blocks)
@@ -87,7 +87,7 @@ SAFE-05, SAFE-06 **Success Criteria** (what must be TRUE):
       subsystem)
 - [x] 02-03-PLAN.md — Audit lock.rs + capabilities.rs + mod.rs + exception.rs +
       arch files (infrastructure)
-- [ ] 02-04-PLAN.md — Per-file audit report document (SAFE-06)
+- [x] 02-04-PLAN.md — Per-file audit report document (SAFE-06)
 
 ### Phase 3: Coverage
 
@@ -151,7 +151,7 @@ CONC-05 **Success Criteria** (what must be TRUE):
 | Phase                   | Plans Complete | Status      | Completed  |
 | ----------------------- | -------------- | ----------- | ---------- |
 | 1. Property Testing     | 3/3            | Complete    | 2026-04-29 |
-| 2. Unsafe Audit         | 3/4            | Executing   | -          |
+| 2. Unsafe Audit         | 4/4 | Complete   | 2026-04-29 |
 | 3. Coverage             | 0/TBD          | Not started | -          |
 | 4. Fuzzing              | 0/TBD          | Not started | -          |
 | 5. Concurrency Modeling | 0/TBD          | Not started | -          |

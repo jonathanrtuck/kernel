@@ -34,7 +34,7 @@ Requirements for this milestone. Each maps to roadmap phases.
       (nomem/nostack/preserves_flags justified per ARM ARM)
 - [x] **SAFE-05**: Speculation barriers present for all user-provided index
       dereferences in frame/
-- [ ] **SAFE-06**: Audit findings documented with per-file status (clean / fixed
+- [x] **SAFE-06**: Audit findings documented with per-file status (clean / fixed
       / known-risk)
 
 ### Coverage
@@ -111,7 +111,7 @@ Updated during roadmap creation.
 | SAFE-03     | Phase 2 | Complete |
 | SAFE-04     | Phase 2 | Complete |
 | SAFE-05     | Phase 2 | Complete |
-| SAFE-06     | Phase 2 | Pending  |
+| SAFE-06     | Phase 2 | Complete |
 | COV-01      | Phase 3 | Pending  |
 | COV-02      | Phase 3 | Pending  |
 | COV-03      | Phase 3 | Pending  |
