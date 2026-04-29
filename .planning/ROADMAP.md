@@ -103,7 +103,12 @@ paths below 50% is identified, and targeted tests bring uncovered paths above
 3. Targeted tests are written for every critical uncovered path identified in
    the above list, bringing those paths above 80% line coverage
 4. Coverage tooling is integrated so it can be run alongside or as part of
-   `scripts/verify` **Plans**: TBD
+   `scripts/verify` **Plans:** 1/3 plans executed
+
+Plans:
+- [x] 03-01-PLAN.md — Create scripts/coverage + integrate into scripts/verify
+- [ ] 03-02-PLAN.md — Identify all files below 50% coverage with classification
+- [ ] 03-03-PLAN.md — Write targeted tests for uncovered critical paths
 
 ### Phase 4: Fuzzing
 
@@ -152,6 +157,6 @@ CONC-05 **Success Criteria** (what must be TRUE):
 | ----------------------- | -------------- | ----------- | ---------- |
 | 1. Property Testing     | 3/3            | Complete    | 2026-04-29 |
 | 2. Unsafe Audit         | 4/4 | Complete   | 2026-04-29 |
-| 3. Coverage             | 0/TBD          | Not started | -          |
+| 3. Coverage             | 1/3 | In Progress|  |
 | 4. Fuzzing              | 0/TBD          | Not started | -          |
 | 5. Concurrency Modeling | 0/TBD          | Not started | -          |

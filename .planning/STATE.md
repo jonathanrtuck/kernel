@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: Phase complete — ready for verification
-stopped_at: Completed 02-unsafe-audit 02-04-PLAN.md
-last_updated: "2026-04-29T00:35:00.112Z"
+status: Ready to execute
+stopped_at: Completed 03-coverage 03-01-PLAN.md
+last_updated: "2026-04-29T00:46:43.239Z"
 progress:
   total_phases: 5
   completed_phases: 2
-  total_plans: 7
-  completed_plans: 7
+  total_plans: 10
+  completed_plans: 8
 ---
 
 # Project State
@@ -19,13 +19,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-28)
 
 **Core value:** Every kernel invariant is tested by at least one technique that
-can find bugs the developer didn't anticipate. **Current focus:** Phase 02 —
+can find bugs the developer didn't anticipate. **Current focus:** Phase 03 — coverage
 unsafe-audit
 
 ## Current Position
 
-Phase: 02 (unsafe-audit) — EXECUTING
-Plan: 4 of 4
+Phase: 03 (coverage) — EXECUTING
+Plan: 2 of 3
 
 ## Performance Metrics
 
@@ -52,6 +52,7 @@ Phase 01-property-testing P03 | 5 | 1 tasks | 3 files |
 | Phase 02-unsafe-audit P01 | 12 | 2 tasks | 2 files |
 | Phase 02-unsafe-audit P03 | 10m | 2 tasks | 4 files |
 | Phase 02-unsafe-audit P04 | 10 | 1 tasks | 1 files |
+| Phase 03-coverage P01 | 15 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -95,6 +96,7 @@ affecting current work:
 - [Phase 02-unsafe-audit]: MaybeUninit::zeroed().assume_init() is UB for NonNull-containing types; insert() is the sound API for Field and Observer
 - [Phase 02-unsafe-audit]: speculation.rs doc-comment example is counted in verify's raw grep total but is not a real unsafe block — documented in AUDIT-REPORT.md as a known limitation
 - [Phase 02-unsafe-audit]: SAFETY comment extras (e.g., fields.rs 53 comments for 42 blocks) are correctly treated as better-than-minimum coverage, not gaps
+- [Phase 03-coverage]: Coverage tooling (03-01): JSON --summary-only for verify integration; text output for human-facing scripts/coverage; coverage informational-only, never a gate
 
 ### Pending Todos
 
@@ -106,6 +108,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-29T00:35:00.110Z
-Stopped at: Completed 02-unsafe-audit 02-04-PLAN.md
+Last session: 2026-04-29T00:46:43.238Z
+Stopped at: Completed 03-coverage 03-01-PLAN.md
 Resume file: None

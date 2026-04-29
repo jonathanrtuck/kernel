@@ -39,12 +39,12 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 ### Coverage
 
-- [ ] **COV-01**: Code coverage measurement produces per-file line and branch
+- [x] **COV-01**: Code coverage measurement produces per-file line and branch
       coverage reports
 - [ ] **COV-02**: Identify all source files with <50% line coverage
 - [ ] **COV-03**: Write targeted tests to bring uncovered critical paths above
       80%
-- [ ] **COV-04**: Coverage measurement integrated into scripts/verify or
+- [x] **COV-04**: Coverage measurement integrated into scripts/verify or
       available as scripts/coverage
 
 ### Fuzzing
@@ -112,10 +112,10 @@ Updated during roadmap creation.
 | SAFE-04     | Phase 2 | Complete |
 | SAFE-05     | Phase 2 | Complete |
 | SAFE-06     | Phase 2 | Complete |
-| COV-01      | Phase 3 | Pending  |
+| COV-01      | Phase 3 | Complete |
 | COV-02      | Phase 3 | Pending  |
 | COV-03      | Phase 3 | Pending  |
-| COV-04      | Phase 3 | Pending  |
+| COV-04      | Phase 3 | Complete |
 | FUZZ-01     | Phase 4 | Pending  |
 | FUZZ-02     | Phase 4 | Pending  |
 | FUZZ-03     | Phase 4 | Pending  |
