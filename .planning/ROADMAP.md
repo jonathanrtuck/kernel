@@ -30,7 +30,11 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. Arena allocation tests confirm no double-alloc, no ID overlap, and freed slots are reusable across any sequence proptest generates
   4. Rights bitmask operations (union, intersection, subset, attenuation) satisfy all algebraic laws under proptest
   5. `scripts/verify` passes with proptest cases included in the test run
-**Plans**: TBD
+**Plans:** 3 plans
+Plans:
+- [ ] 01-01-PLAN.md — Capability proptest: Handle roundtrip, Rights algebra, slot arithmetic + proptest dependency
+- [ ] 01-02-PLAN.md — Arena proptest: alloc/free sequence invariants
+- [ ] 01-03-PLAN.md — EEVDF scheduler proptest: fairness, starvation, consistency
 
 ### Phase 2: Unsafe Audit
 **Goal**: Every unsafe block in frame/ has a verified SAFETY comment, aliasing is clean, asm options are justified, and findings are documented per-file
@@ -88,7 +92,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Property Testing | 0/TBD | Not started | - |
+| 1. Property Testing | 0/3 | Planned | - |
 | 2. Unsafe Audit | 0/TBD | Not started | - |
 | 3. Coverage | 0/TBD | Not started | - |
 | 4. Fuzzing | 0/TBD | Not started | - |
