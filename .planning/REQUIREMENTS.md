@@ -12,7 +12,7 @@ Requirements for this milestone. Each maps to roadmap phases.
 - [x] **PROP-01**: Capability encoding roundtrips correctly for all valid ObjectType/Rights/badge combinations
 - [x] **PROP-02**: Arena allocation invariants hold: no double-alloc, freed slots reusable, no ID overlap
 - [x] **PROP-03**: Rights bitmask operations are consistent (union, intersection, subset, attenuation)
-- [ ] **PROP-04**: EEVDF scheduler properties hold: eligible threads always picked, virtual deadline ordering maintained
+- [x] **PROP-04**: EEVDF scheduler properties hold: eligible threads always picked, virtual deadline ordering maintained
 - [x] **PROP-05**: Capability slot arithmetic never overflows or produces invalid indices
 - [x] **PROP-06**: proptest integrated into `cargo test` and `scripts/verify` pipeline
 
@@ -78,7 +78,7 @@ Updated during roadmap creation.
 | PROP-01 | Phase 1 | Complete |
 | PROP-02 | Phase 1 | Complete |
 | PROP-03 | Phase 1 | Complete |
-| PROP-04 | Phase 1 | Pending |
+| PROP-04 | Phase 1 | Complete |
 | PROP-05 | Phase 1 | Complete |
 | PROP-06 | Phase 1 | Complete |
 | SAFE-01 | Phase 2 | Pending |

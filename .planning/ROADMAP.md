@@ -12,7 +12,7 @@ Five phases of systematic verification, ordered by confidence gained per effort 
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Property Testing** - Proptest for capability encoding, arena allocation, rights bitmasks, and scheduler properties
+- [x] **Phase 1: Property Testing** - Proptest for capability encoding, arena allocation, rights bitmasks, and scheduler properties (completed 2026-04-29)
 - [ ] **Phase 2: Unsafe Audit** - Structured audit of every unsafe block in frame/ with gap remediation and documented status
 - [ ] **Phase 3: Coverage** - Measure per-file coverage, identify blind spots, write targeted tests to bring critical paths above 80%
 - [ ] **Phase 4: Fuzzing** - Bare-metal syscall fuzzer covering capability, IPC, and memory operations with seed-reproducible runs
@@ -30,11 +30,11 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. Arena allocation tests confirm no double-alloc, no ID overlap, and freed slots are reusable across any sequence proptest generates
   4. Rights bitmask operations (union, intersection, subset, attenuation) satisfy all algebraic laws under proptest
   5. `scripts/verify` passes with proptest cases included in the test run
-**Plans:** 2/3 plans executed
+**Plans:** 3/3 plans complete
 Plans:
 - [x] 01-01-PLAN.md — Capability proptest: Handle roundtrip, Rights algebra, slot arithmetic + proptest dependency
 - [x] 01-02-PLAN.md — Arena proptest: alloc/free sequence invariants
-- [ ] 01-03-PLAN.md — EEVDF scheduler proptest: fairness, starvation, consistency
+- [x] 01-03-PLAN.md — EEVDF scheduler proptest: fairness, starvation, consistency
 
 ### Phase 2: Unsafe Audit
 **Goal**: Every unsafe block in frame/ has a verified SAFETY comment, aliasing is clean, asm options are justified, and findings are documented per-file
@@ -92,7 +92,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Property Testing | 2/3 | In Progress|  |
+| 1. Property Testing | 3/3 | Complete   | 2026-04-29 |
 | 2. Unsafe Audit | 0/TBD | Not started | - |
 | 3. Coverage | 0/TBD | Not started | - |
 | 4. Fuzzing | 0/TBD | Not started | - |
