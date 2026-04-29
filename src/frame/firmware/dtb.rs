@@ -52,9 +52,12 @@ pub fn scan(dtb_ptr: usize) -> Option<BootInfo> {
         return None;
     }
 
-    // SAFETY: The DTB is placed at a known address by the hypervisor/firmware.
-    // We're in single-threaded physical-mode boot. Read just the header first
-    // to discover totalsize, then create the full slice.
+    // SAFETY: dtb_ptr is non-null (checked above). The firmware/hypervisor
+    // guarantees the DTB blob at dtb_ptr is at least HEADER_SIZE (40) bytes —
+    // a well-formed FDT header is always exactly 40 bytes per the DTB spec
+    // (Devicetree Specification v0.3 §5.2). We read only the header to
+    // discover totalsize before creating a larger slice. Single-threaded
+    // early boot: no concurrent access to this memory region.
     let header = unsafe { core::slice::from_raw_parts(dtb_ptr as *const u8, HEADER_SIZE) };
     let magic = read_be_u32(header, 0);
 
@@ -68,8 +71,10 @@ pub fn scan(dtb_ptr: usize) -> Option<BootInfo> {
         return None;
     }
 
-    // SAFETY: totalsize comes from the validated FDT header. The entire blob
-    // is within the RAM region placed by the hypervisor.
+    // SAFETY: totalsize was read from the FDT header and validated to be
+    // >= HEADER_SIZE (checked above). The firmware places the DTB in a
+    // contiguous RAM region of at least totalsize bytes starting at dtb_ptr.
+    // Single-threaded early boot means no concurrent access to this region.
     let blob = unsafe { core::slice::from_raw_parts(dtb_ptr as *const u8, totalsize) };
 
     scan_blob(blob)
