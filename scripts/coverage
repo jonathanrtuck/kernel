@@ -1,0 +1,94 @@
+#!/bin/bash
+# Coverage reporting via cargo-llvm-cov.
+#
+# Modes:
+#   (default)  per-file line/function/region summary to stdout
+#   --html     HTML report in target/llvm-cov/html/
+#   --text     annotated source with line-level coverage markers to stdout
+#   --json     machine-readable JSON to stdout
+#
+# Coverage is informational only — never a gate.
+
+set -eo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+pass() { printf "${GREEN}pass${RESET}  %s\n" "$1"; }
+fail() { printf "${RED}FAIL${RESET}  %s\n" "$1"; exit 1; }
+info() { printf "${DIM}info${RESET}  %s\n" "$1"; }
+
+TARGET="aarch64-apple-darwin"
+BASE_FLAGS="--target $TARGET --no-cfg-coverage"
+
+MODE="default"
+
+for arg in "$@"; do
+    case "$arg" in
+        --html) MODE="html" ;;
+        --text) MODE="text" ;;
+        --json) MODE="json" ;;
+        -h|--help)
+            echo "Usage: scripts/coverage [--html|--text|--json]"
+            echo ""
+            echo "  (default)  per-file summary table to stdout"
+            echo "  --html     HTML report in target/llvm-cov/html/"
+            echo "  --text     annotated source to stdout"
+            echo "  --json     machine-readable JSON to stdout"
+            exit 0
+            ;;
+        *)
+            echo "error: unknown flag: $arg" >&2
+            exit 1
+            ;;
+    esac
+done
+
+case "$MODE" in
+    default)
+        # Run with plain text output (per-file table) to stdout.
+        # Capture output so we can extract the overall percentage.
+        COV_OUTPUT=$(cargo llvm-cov $BASE_FLAGS 2>&1)
+        echo "$COV_OUTPUT"
+
+        # Extract line coverage percentage from the TOTAL line.
+        # Format: "TOTAL  <regions>  <miss>  <pct>%  <funcs>  <miss>  <pct>%  <lines>  <miss>  <pct>%  ..."
+        TOTAL_PCT=$(echo "$COV_OUTPUT" | grep '^TOTAL' | awk '{
+            for (i = 1; i <= NF; i++) {
+                if ($i ~ /[0-9]+\.[0-9]+%/) {
+                    # Third percentage field is line coverage.
+                    pct_count++
+                    if (pct_count == 3) { print $i; exit }
+                }
+            }
+        }')
+
+        echo ""
+        if [ -n "$TOTAL_PCT" ]; then
+            info "overall line coverage: $TOTAL_PCT"
+        else
+            info "overall line coverage: (could not parse TOTAL line)"
+        fi
+        ;;
+
+    html)
+        info "generating HTML coverage report"
+        cargo llvm-cov $BASE_FLAGS --html 2>&1
+        REPORT="target/llvm-cov/html/index.html"
+        if [ -f "$REPORT" ]; then
+            pass "HTML report: $REPORT"
+        else
+            fail "HTML report not found at $REPORT"
+        fi
+        ;;
+
+    text)
+        cargo llvm-cov $BASE_FLAGS --text 2>&1
+        ;;
+
+    json)
+        cargo llvm-cov $BASE_FLAGS --json 2>/dev/null
+        ;;
+esac

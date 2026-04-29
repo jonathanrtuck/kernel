@@ -36,6 +36,11 @@ pass "clippy clean"
 "$SCRIPT_DIR/test"
 pass "all tests"
 
+# coverage: Measure line coverage after tests pass. Informational only — not a gate.
+COV_PCT=$(cargo llvm-cov --target aarch64-apple-darwin --no-cfg-coverage --json --summary-only 2>/dev/null \
+    | jq -r '.data[0].totals.lines.percent | (. * 100 | round / 100 | tostring) + "%"' 2>/dev/null || echo "(unavailable)")
+info "line coverage: $COV_PCT"
+
 # f: Framekernel discipline — all unsafe confined to frame/.
 # The crate-level #![deny(unsafe_code)] with #[allow(unsafe_code)] on mod frame
 # enforces this at compile time. This check is belt-and-suspenders visibility.
