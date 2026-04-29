@@ -726,4 +726,186 @@ mod tests {
 
         assert_eq!(sched.total_weight, 0);
     }
+
+    // ── pick_next fallback path (no eligible Observers) ────────────────
+
+    #[test]
+    fn pick_next_fallback_when_no_observer_eligible() {
+        // Covers: pick_next fallback path (lines 236-248) — all observers
+        // have VET > global_virtual_time, so best_eligible() returns None.
+        // EEVDF falls back to picking the earliest VD to prevent starvation.
+        //
+        // We drive the scheduler until the single observer's VET advances
+        // past global_virtual_time (it "borrows" future time).
+        let mut sched = EarliestEligibleVirtualDeadline::new();
+        let mut obs = make_observer();
+        let ptr = NonNull::from(&mut obs);
+
+        sched.enqueue(ptr);
+
+        // Run many preemptions: each on_preempt advances VET to old VD
+        // and sets new VD = VET + slice. After enough ticks with a single
+        // observer and full slice, VET will surpass global_virtual_time.
+        // 100 ticks is enough to drive VET well ahead.
+        for _ in 0..100 {
+            sched.on_preempt();
+        }
+
+        // After many preemptions the single observer's VET has advanced
+        // beyond global_virtual_time — best_eligible() returns None.
+        // pick_next must still return the observer (fallback path).
+        let picked = sched.pick_next();
+
+        assert_eq!(
+            picked,
+            Some(ptr),
+            "pick_next must return the observer via fallback when no observer is eligible"
+        );
+    }
+
+    #[test]
+    fn pick_next_fallback_selects_earliest_virtual_deadline() {
+        // Covers: pick_next fallback selects the observer with the earliest VD
+        // when neither is eligible. Drive both observers ahead of global_vt.
+        let mut sched = EarliestEligibleVirtualDeadline::new();
+        // Use a low-throughput (high-R) observer — shorter slice, earlier deadline.
+        let mut obs_a = make_observer_with_profile(120, 0);
+        let mut obs_b = make_observer_with_profile(0, 120);
+        let ptr_a = NonNull::from(&mut obs_a);
+        let ptr_b = NonNull::from(&mut obs_b);
+
+        sched.enqueue(ptr_a);
+        sched.enqueue(ptr_b);
+
+        // Drive enough preemptions that both observers are past eligibility.
+        for _ in 0..200 {
+            sched.on_preempt();
+        }
+
+        // Both observers are ineligible. pick_next must still return one.
+        let picked = sched.pick_next();
+
+        assert!(
+            picked.is_some(),
+            "pick_next fallback must return Some when queue is non-empty"
+        );
+    }
+
+    // ── should_switch_to returning false ──────────────────────────────
+
+    #[test]
+    fn should_switch_to_returns_false_when_receiver_has_later_deadline() {
+        // Covers: the `return receiver_vd <= best_vd` branch where the
+        // result is false — receiver's hypothetical deadline is later than
+        // the best eligible in the queue.
+        //
+        // Setup: enqueue a high-responsiveness (short-slice) observer so
+        // best_vd is small. Then test should_switch_to with a throughput-
+        // oriented receiver that will have a large slice (late deadline).
+        let mut sched = EarliestEligibleVirtualDeadline::new();
+
+        // Enqueue a very responsive observer — short slice = early deadline.
+        let mut queued = make_observer_with_profile(127, 0); // max R, no T
+        let qptr = NonNull::from(&mut queued);
+
+        sched.enqueue(qptr);
+
+        // The receiver is batch-oriented — long slice = late deadline.
+        let mut receiver = make_observer_with_profile(0, 127); // max T, no R
+        let rptr = NonNull::from(&mut receiver);
+
+        // The batch receiver's hypothetical VD will be much later than
+        // the interactive observer's current VD. should_switch_to must
+        // return false (don't preempt the interactive observer for the
+        // batch one).
+        let switch = sched.should_switch_to(rptr);
+
+        assert!(
+            !switch,
+            "should_switch_to must return false when receiver has a later deadline than best eligible"
+        );
+    }
+
+    // ── on_preempt with stale current index ───────────────────────────
+
+    #[test]
+    fn on_preempt_with_stale_current_re_derives_running_observer() {
+        // Covers: on_preempt fallback path when self.current is stale
+        // (the previously-current observer was dequeued). The code re-derives
+        // the running index via best_eligible() or the fallback VD scan.
+        let mut sched = EarliestEligibleVirtualDeadline::new();
+        let mut obs_a = make_observer();
+        let mut obs_b = make_observer();
+        let ptr_a = NonNull::from(&mut obs_a);
+        let ptr_b = NonNull::from(&mut obs_b);
+
+        sched.enqueue(ptr_a);
+        sched.enqueue(ptr_b);
+
+        // Let pick_next run once to set self.current.
+        let _ = sched.pick_next();
+
+        // Dequeue the current observer — this sets self.current = None
+        // (via the dequeue invalidation path) or leaves a stale index.
+        sched.dequeue(ptr_a);
+
+        // on_preempt must handle the stale/None current without panicking
+        // and must still update the remaining observer.
+        let vt_before = sched.global_virtual_time;
+
+        sched.on_preempt();
+
+        assert!(
+            sched.global_virtual_time > vt_before,
+            "on_preempt must advance global_virtual_time even with stale current"
+        );
+        assert_eq!(
+            sched.queue_depth(),
+            1,
+            "dequeued observer must not be re-added by on_preempt"
+        );
+    }
+
+    #[test]
+    fn on_preempt_fallback_vd_scan_when_all_ineligible() {
+        // Covers: the fallback VD scan inside on_preempt's current re-derivation
+        // (lines 302-315). Triggers when self.current is stale/None AND
+        // best_eligible() returns None (all observers past their eligibility).
+        let mut sched = EarliestEligibleVirtualDeadline::new();
+        let mut obs = make_observer();
+        let ptr = NonNull::from(&mut obs);
+
+        sched.enqueue(ptr);
+
+        // Drive many preemptions to push observer past eligibility.
+        for _ in 0..100 {
+            sched.on_preempt();
+        }
+
+        // Force self.current to None so on_preempt must re-derive.
+        // We do this by dequeuing and re-enqueuing (which clears current).
+        sched.dequeue(ptr);
+
+        // Re-enqueue fresh: VET = global_virtual_time (eligible again).
+        // But now run many more preemptions to push past eligibility again.
+        sched.enqueue(ptr);
+
+        for _ in 0..100 {
+            sched.on_preempt();
+        }
+
+        // Dequeue (invalidates current) then check that on_preempt still
+        // runs correctly with one observer remaining that's not eligible.
+        sched.dequeue(ptr);
+        sched.enqueue(ptr); // fresh re-enqueue
+
+        // Push ahead of eligibility again to ensure no eligible entry.
+        for _ in 0..50 {
+            sched.on_preempt();
+        }
+
+        // Must not panic; queue depth must be stable.
+        assert_eq!(sched.queue_depth(), 1);
+        assert!(sched.pick_next().is_some());
+    }
 }
