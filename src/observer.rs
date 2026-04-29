@@ -903,4 +903,237 @@ mod tests {
         assert!(!PrimaryState::Runnable.is_stopped());
         assert!(!PrimaryState::Blocked.is_stopped());
     }
+
+    // ── Loom concurrency models ──────────────────────────────────────
+
+    #[cfg(test)]
+    mod loom_tests {
+        use loom::sync::{Arc, Mutex};
+        use loom::thread;
+
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum PrimaryState {
+            Inert,
+            Runnable,
+            Blocked,
+            Faulted,
+        }
+
+        struct ModelObserver {
+            state: PrimaryState,
+            suspended: bool,
+        }
+
+        impl ModelObserver {
+            fn new(state: PrimaryState, suspended: bool) -> Self {
+                ModelObserver { state, suspended }
+            }
+
+            fn resume(&mut self) -> Result<(), ()> {
+                match self.state {
+                    PrimaryState::Inert | PrimaryState::Faulted => {
+                        self.state = PrimaryState::Runnable;
+                        self.suspended = false;
+
+                        Ok(())
+                    }
+                    PrimaryState::Runnable | PrimaryState::Blocked if self.suspended => {
+                        self.suspended = false;
+
+                        Ok(())
+                    }
+                    _ => Err(()),
+                }
+            }
+
+            fn suspend(&mut self) {
+                self.suspended = true;
+            }
+
+            fn block(&mut self) -> Result<(), ()> {
+                match self.state {
+                    PrimaryState::Runnable => {
+                        self.state = PrimaryState::Blocked;
+
+                        Ok(())
+                    }
+                    _ => Err(()),
+                }
+            }
+
+            fn unblock(&mut self) -> Result<bool, ()> {
+                match self.state {
+                    PrimaryState::Blocked => {
+                        self.state = PrimaryState::Runnable;
+
+                        Ok(!self.suspended)
+                    }
+                    _ => Err(()),
+                }
+            }
+
+            fn fault(&mut self) -> Result<(), ()> {
+                match self.state {
+                    PrimaryState::Runnable => {
+                        self.state = PrimaryState::Faulted;
+
+                        Ok(())
+                    }
+                    _ => Err(()),
+                }
+            }
+        }
+
+        #[test]
+        fn loom_observer_resume_suspend_race() {
+            loom::model(|| {
+                let observer = Arc::new(Mutex::new(ModelObserver::new(PrimaryState::Inert, false)));
+                let obs_a = observer.clone();
+                let handle_a = thread::spawn(move || {
+                    obs_a
+                        .lock()
+                        .expect("lock a")
+                        .resume()
+                        .expect("resume from Inert");
+                });
+                let obs_b = observer.clone();
+                let handle_b = thread::spawn(move || {
+                    obs_b.lock().expect("lock b").suspend();
+                });
+
+                handle_a.join().expect("thread a");
+                handle_b.join().expect("thread b");
+
+                let obs = observer.lock().expect("final lock");
+
+                assert_eq!(obs.state, PrimaryState::Runnable);
+            });
+        }
+
+        #[test]
+        fn loom_observer_unblock_suspend_race() {
+            loom::model(|| {
+                let observer =
+                    Arc::new(Mutex::new(ModelObserver::new(PrimaryState::Blocked, false)));
+                let obs_a = observer.clone();
+                let handle_a = thread::spawn(move || {
+                    obs_a
+                        .lock()
+                        .expect("lock a")
+                        .unblock()
+                        .expect("unblock from Blocked");
+                });
+                let obs_b = observer.clone();
+                let handle_b = thread::spawn(move || {
+                    obs_b.lock().expect("lock b").suspend();
+                });
+                handle_a.join().expect("thread a");
+                handle_b.join().expect("thread b");
+
+                let obs = observer.lock().expect("final lock");
+
+                assert_eq!(obs.state, PrimaryState::Runnable);
+            });
+        }
+
+        #[test]
+        fn loom_observer_fault_block_race() {
+            loom::model(|| {
+                let observer = Arc::new(Mutex::new(ModelObserver::new(
+                    PrimaryState::Runnable,
+                    false,
+                )));
+                let fault_result = Arc::new(Mutex::new(false));
+                let block_result = Arc::new(Mutex::new(false));
+                let obs_a = observer.clone();
+                let fault_ok = fault_result.clone();
+                let handle_a = thread::spawn(move || {
+                    let ok = obs_a.lock().expect("lock a").fault().is_ok();
+
+                    *fault_ok.lock().expect("fault result lock") = ok;
+                });
+                let obs_b = observer.clone();
+                let block_ok = block_result.clone();
+                let handle_b = thread::spawn(move || {
+                    let ok = obs_b.lock().expect("lock b").block().is_ok();
+
+                    *block_ok.lock().expect("block result lock") = ok;
+                });
+                handle_a.join().expect("thread a");
+                handle_b.join().expect("thread b");
+
+                let fault_succeeded = *fault_result.lock().expect("read fault");
+                let block_succeeded = *block_result.lock().expect("read block");
+
+                assert!(fault_succeeded ^ block_succeeded);
+            });
+        }
+
+        #[test]
+        fn loom_observer_full_lifecycle() {
+            loom::model(|| {
+                let observer = Arc::new(Mutex::new(ModelObserver::new(PrimaryState::Inert, false)));
+                let obs_a = observer.clone();
+                let handle_a = thread::spawn(move || {
+                    obs_a
+                        .lock()
+                        .expect("lock a resume")
+                        .resume()
+                        .expect("resume from Inert");
+                    let _ = obs_a.lock().expect("lock a block").block();
+                });
+                let obs_b = observer.clone();
+                let handle_b = thread::spawn(move || {
+                    let _ = obs_b.lock().expect("lock b").unblock();
+                });
+
+                handle_a.join().expect("thread a");
+                handle_b.join().expect("thread b");
+
+                let obs = observer.lock().expect("final lock");
+
+                assert!(
+                    obs.state == PrimaryState::Runnable
+                        || obs.state == PrimaryState::Blocked
+                        || obs.state == PrimaryState::Faulted
+                );
+            });
+        }
+
+        #[test]
+        fn loom_observer_double_resume_rejected() {
+            loom::model(|| {
+                let observer = Arc::new(Mutex::new(ModelObserver::new(
+                    PrimaryState::Runnable,
+                    false,
+                )));
+                let result_a = Arc::new(Mutex::new(Ok(())));
+                let result_b = Arc::new(Mutex::new(Ok(())));
+                let obs_a = observer.clone();
+                let res_a = result_a.clone();
+                let handle_a = thread::spawn(move || {
+                    let r = obs_a.lock().expect("lock a").resume();
+
+                    *res_a.lock().expect("result a lock") = r;
+                });
+                let obs_b = observer.clone();
+                let res_b = result_b.clone();
+                let handle_b = thread::spawn(move || {
+                    let r = obs_b.lock().expect("lock b").resume();
+
+                    *res_b.lock().expect("result b lock") = r;
+                });
+
+                handle_a.join().expect("thread a");
+                handle_b.join().expect("thread b");
+
+                assert!(result_a.lock().expect("read a").is_err());
+                assert!(result_b.lock().expect("read b").is_err());
+
+                let obs = observer.lock().expect("final lock");
+
+                assert_eq!(obs.state, PrimaryState::Runnable);
+            });
+        }
+    }
 }

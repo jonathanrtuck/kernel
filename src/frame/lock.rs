@@ -333,4 +333,122 @@ mod tests {
 
         assert_eq!(*guard, 45);
     }
+
+    // ── Loom concurrency models ──────────────────────────────────────
+
+    #[cfg(test)]
+    mod loom_tests {
+        use loom::sync::Arc;
+        use loom::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use loom::thread;
+
+        struct ModelLock {
+            locked: AtomicBool,
+            value: AtomicUsize,
+        }
+
+        impl ModelLock {
+            fn new(initial: usize) -> Self {
+                ModelLock {
+                    locked: AtomicBool::new(false),
+                    value: AtomicUsize::new(initial),
+                }
+            }
+
+            fn acquire(&self) {
+                while self
+                    .locked
+                    .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+                    .is_err()
+                {
+                    thread::yield_now();
+                }
+            }
+
+            fn release(&self) {
+                self.locked.store(false, Ordering::Release);
+            }
+        }
+
+        #[test]
+        fn loom_spinlock_mutual_exclusion() {
+            loom::model(|| {
+                const ITERS: usize = 2;
+
+                let lock = Arc::new(ModelLock::new(0));
+                let lock_a = lock.clone();
+                let handle_a = thread::spawn(move || {
+                    for _ in 0..ITERS {
+                        lock_a.acquire();
+
+                        let old = lock_a.value.load(Ordering::Relaxed);
+
+                        lock_a.value.store(old + 1, Ordering::Relaxed);
+                        lock_a.release();
+                    }
+                });
+                let lock_b = lock.clone();
+                let handle_b = thread::spawn(move || {
+                    for _ in 0..ITERS {
+                        lock_b.acquire();
+
+                        let old = lock_b.value.load(Ordering::Relaxed);
+
+                        lock_b.value.store(old + 1, Ordering::Relaxed);
+                        lock_b.release();
+                    }
+                });
+
+                handle_a.join().expect("thread a");
+                handle_b.join().expect("thread b");
+
+                assert_eq!(lock.value.load(Ordering::Relaxed), ITERS * 2);
+            });
+        }
+
+        #[test]
+        fn loom_spinlock_no_concurrent_holders() {
+            loom::model(|| {
+                let locked = Arc::new(AtomicBool::new(false));
+                let holder_count = Arc::new(AtomicUsize::new(0));
+                let locked_a = locked.clone();
+                let count_a = holder_count.clone();
+                let handle_a = thread::spawn(move || {
+                    while locked_a
+                        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+                        .is_err()
+                    {
+                        thread::yield_now();
+                    }
+
+                    let prev = count_a.fetch_add(1, Ordering::Relaxed);
+
+                    assert_eq!(prev, 0);
+
+                    count_a.fetch_sub(1, Ordering::Relaxed);
+                    locked_a.store(false, Ordering::Release);
+                });
+                let locked_b = locked.clone();
+                let count_b = holder_count.clone();
+                let handle_b = thread::spawn(move || {
+                    while locked_b
+                        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+                        .is_err()
+                    {
+                        thread::yield_now();
+                    }
+
+                    let prev = count_b.fetch_add(1, Ordering::Relaxed);
+
+                    assert_eq!(prev, 0);
+
+                    count_b.fetch_sub(1, Ordering::Relaxed);
+                    locked_b.store(false, Ordering::Release);
+                });
+
+                handle_a.join().expect("thread a");
+                handle_b.join().expect("thread b");
+            });
+        }
+    }
 }

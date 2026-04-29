@@ -1223,4 +1223,190 @@ mod tests {
             assert!(sched.pick_next().is_some());
         }
     }
+
+    // ── Loom concurrency models ──────────────────────────────────────
+
+    #[cfg(test)]
+    mod loom_tests {
+        use loom::sync::{Arc, Mutex};
+        use loom::thread;
+
+        struct ModelQueue {
+            entries: [Option<u32>; 8],
+            count: usize,
+        }
+
+        impl ModelQueue {
+            fn new() -> Self {
+                ModelQueue {
+                    entries: [None; 8],
+                    count: 0,
+                }
+            }
+
+            fn enqueue(&mut self, id: u32) {
+                if self.contains(id) {
+                    return;
+                }
+                if self.count >= self.entries.len() {
+                    return;
+                }
+
+                self.entries[self.count] = Some(id);
+                self.count += 1;
+            }
+
+            fn dequeue(&mut self, id: u32) {
+                let Some(idx) = self.find(id) else {
+                    return;
+                };
+
+                let last = self.count - 1;
+                self.entries[idx] = self.entries[last];
+                self.entries[last] = None;
+                self.count -= 1;
+            }
+
+            fn pick_next(&self) -> Option<u32> {
+                for i in 0..self.count {
+                    if let Some(id) = self.entries[i] {
+                        return Some(id);
+                    }
+                }
+
+                None
+            }
+
+            fn contains(&self, id: u32) -> bool {
+                self.find(id).is_some()
+            }
+
+            fn len(&self) -> usize {
+                self.count
+            }
+
+            fn find(&self, id: u32) -> Option<usize> {
+                for i in 0..self.count {
+                    if self.entries[i] == Some(id) {
+                        return Some(i);
+                    }
+                }
+
+                None
+            }
+        }
+
+        #[test]
+        fn loom_scheduler_concurrent_enqueue() {
+            loom::model(|| {
+                let queue = Arc::new(Mutex::new(ModelQueue::new()));
+                let queue_a = queue.clone();
+                let handle_a = thread::spawn(move || {
+                    queue_a.lock().expect("lock a").enqueue(1);
+                });
+                let queue_b = queue.clone();
+                let handle_b = thread::spawn(move || {
+                    queue_b.lock().expect("lock b").enqueue(2);
+                });
+
+                handle_a.join().expect("thread a");
+                handle_b.join().expect("thread b");
+
+                let q = queue.lock().expect("final lock");
+
+                assert_eq!(q.len(), 2);
+                assert!(q.contains(1));
+                assert!(q.contains(2));
+            });
+        }
+
+        #[test]
+        fn loom_scheduler_enqueue_dequeue_consistency() {
+            loom::model(|| {
+                let queue = Arc::new(Mutex::new(ModelQueue::new()));
+
+                {
+                    let mut q = queue.lock().expect("setup lock");
+
+                    q.enqueue(1);
+                    q.enqueue(2);
+                    q.enqueue(3);
+                }
+
+                let queue_a = queue.clone();
+                let handle_a = thread::spawn(move || {
+                    queue_a.lock().expect("lock a").enqueue(4);
+                });
+                let queue_b = queue.clone();
+                let handle_b = thread::spawn(move || {
+                    queue_b.lock().expect("lock b").dequeue(2);
+                });
+
+                handle_a.join().expect("thread a");
+                handle_b.join().expect("thread b");
+
+                let q = queue.lock().expect("final lock");
+
+                assert!(!q.contains(2));
+                assert!(q.contains(1));
+                assert!(q.contains(3));
+                assert!(q.contains(4));
+                assert_eq!(q.len(), 3);
+            });
+        }
+
+        #[test]
+        fn loom_scheduler_pick_next_during_mutation() {
+            loom::model(|| {
+                let queue = Arc::new(Mutex::new(ModelQueue::new()));
+                let result = Arc::new(loom::sync::Mutex::new(None::<u32>));
+                let queue_a = queue.clone();
+                let handle_a = thread::spawn(move || {
+                    queue_a.lock().expect("lock a first").enqueue(1);
+                    queue_a.lock().expect("lock a second").enqueue(2);
+                });
+                let queue_b = queue.clone();
+                let result_b = result.clone();
+                let handle_b = thread::spawn(move || {
+                    let v = queue_b.lock().expect("lock b").pick_next();
+
+                    *result_b.lock().expect("result lock") = v;
+                });
+
+                handle_a.join().expect("thread a");
+                handle_b.join().expect("thread b");
+
+                let observed = *result.lock().expect("read result");
+
+                match observed {
+                    None | Some(1) | Some(2) => {}
+                    Some(garbage) => panic!("pick_next returned garbage value {garbage}"),
+                }
+            });
+        }
+
+        #[test]
+        fn loom_scheduler_no_duplicates() {
+            loom::model(|| {
+                let queue = Arc::new(Mutex::new(ModelQueue::new()));
+                let queue_a = queue.clone();
+                let handle_a = thread::spawn(move || {
+                    queue_a.lock().expect("lock a first").enqueue(1);
+                    queue_a.lock().expect("lock a second").enqueue(1);
+                });
+                let queue_b = queue.clone();
+                let handle_b = thread::spawn(move || {
+                    queue_b.lock().expect("lock b").enqueue(1);
+                });
+
+                handle_a.join().expect("thread a");
+                handle_b.join().expect("thread b");
+
+                let q = queue.lock().expect("final lock");
+
+                assert_eq!(q.len(), 1);
+                assert!(q.contains(1));
+            });
+        }
+    }
 }

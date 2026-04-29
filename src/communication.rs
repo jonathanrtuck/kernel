@@ -2314,4 +2314,132 @@ mod tests {
             "D45: source must be untouched"
         );
     }
+
+    // ── Loom concurrency models ──────────────────────────────────────
+
+    #[cfg(test)]
+    mod loom_tests {
+        extern crate alloc;
+
+        use alloc::collections::VecDeque;
+        use loom::sync::Arc;
+        use loom::sync::Mutex;
+        use loom::sync::atomic::{AtomicBool, Ordering};
+        use loom::thread;
+
+        struct ModelField {
+            queue: Mutex<VecDeque<u64>>,
+            waiter: AtomicBool,
+            waiter_woken: AtomicBool,
+            direct_delivery: Mutex<Option<u64>>,
+        }
+
+        impl ModelField {
+            fn new() -> Self {
+                ModelField {
+                    queue: Mutex::new(VecDeque::new()),
+                    waiter: AtomicBool::new(false),
+                    waiter_woken: AtomicBool::new(false),
+                    direct_delivery: Mutex::new(None),
+                }
+            }
+        }
+
+        fn model_send(field: &ModelField, value: u64) {
+            let mut queue = field.queue.lock().expect("queue lock");
+            if field.waiter.load(Ordering::Acquire) {
+                field.waiter.store(false, Ordering::Relaxed);
+
+                let mut delivery = field.direct_delivery.lock().expect("delivery lock");
+
+                *delivery = Some(value);
+
+                drop(delivery);
+                drop(queue);
+
+                field.waiter_woken.store(true, Ordering::Release);
+            } else {
+                queue.push_back(value);
+            }
+        }
+
+        fn model_receive(field: &ModelField) -> u64 {
+            {
+                let mut queue = field.queue.lock().expect("queue lock");
+
+                if let Some(value) = queue.pop_front() {
+                    return value;
+                }
+
+                field.waiter.store(true, Ordering::Release);
+            }
+
+            loop {
+                if field.waiter_woken.load(Ordering::Acquire) {
+                    break;
+                }
+
+                thread::yield_now();
+            }
+
+            let mut delivery = field.direct_delivery.lock().expect("delivery lock");
+
+            delivery.take().expect("direct delivery must be set")
+        }
+
+        #[test]
+        fn loom_ipc_send_then_receive() {
+            loom::model(|| {
+                let field = Arc::new(ModelField::new());
+                let field_sender = field.clone();
+                let sender = thread::spawn(move || model_send(&field_sender, 42));
+                let field_receiver = field.clone();
+                let receiver = thread::spawn(move || model_receive(&field_receiver));
+
+                sender.join().expect("sender");
+
+                let value = receiver.join().expect("receiver");
+
+                assert_eq!(value, 42);
+            });
+        }
+
+        #[test]
+        fn loom_ipc_receive_then_send() {
+            loom::model(|| {
+                let field = Arc::new(ModelField::new());
+                let field_receiver = field.clone();
+                let receiver = thread::spawn(move || model_receive(&field_receiver));
+                let field_sender = field.clone();
+                let sender = thread::spawn(move || model_send(&field_sender, 99));
+                let value = receiver.join().expect("receiver");
+
+                sender.join().expect("sender");
+
+                assert_eq!(value, 99);
+            });
+        }
+
+        #[test]
+        fn loom_ipc_two_senders_one_receiver() {
+            loom::model(|| {
+                let field = Arc::new(ModelField::new());
+                let field_a = field.clone();
+                let sender_a = thread::spawn(move || model_send(&field_a, 10));
+                let field_b = field.clone();
+                let sender_b = thread::spawn(move || model_send(&field_b, 20));
+
+                sender_a.join().expect("sender a");
+                sender_b.join().expect("sender b");
+
+                let first = model_receive(&field);
+                let second = model_receive(&field);
+                let mut received = [first, second];
+
+                received.sort_unstable();
+
+                assert_eq!(received, [10, 20]);
+            });
+        }
+    }
 }
