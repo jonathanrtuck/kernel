@@ -99,9 +99,18 @@ pub struct Lock<T> {
     data: core::cell::UnsafeCell<T>,
 }
 
-// SAFETY: Lock<T> is Send + Sync if T is Send — the lock provides
-// mutual exclusion, so the protected data can be accessed from any core.
+// SAFETY: Lock<T> is Send if T is Send. Moving a Lock to another
+// thread is safe because ownership of the Lock implies exclusive
+// access to the contained T, and T: Send means T itself is safe
+// to send across threads.
 unsafe impl<T: Send> Send for Lock<T> {}
+
+// SAFETY: Lock<T> is Sync if T is Send (not T: Sync). Multiple
+// threads sharing a &Lock<T> is safe because the AtomicBool
+// compare_exchange guarantees only one thread holds the lock at a
+// time (mutual exclusion). Only one LockGuard exists per Lock at
+// any moment, so the &T or &mut T produced by Deref/DerefMut are
+// never accessible to a second thread concurrently.
 unsafe impl<T: Send> Sync for Lock<T> {}
 
 impl<T> Lock<T> {
@@ -187,8 +196,13 @@ impl<T> core::ops::Deref for LockGuard<'_, T> {
 
 impl<T> core::ops::DerefMut for LockGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
-        // SAFETY: same as Deref — exclusive access guaranteed by the
-        // held lock. &mut self ensures no aliasing of the guard itself.
+        // SAFETY: the lock is held (we are inside a LockGuard) so we
+        // have exclusive access — no other thread can acquire the lock
+        // simultaneously (AtomicBool compare_exchange enforces this).
+        // `&mut self` guarantees the guard itself is not aliased, so
+        // there is no second LockGuard producing a concurrent &mut T.
+        // UnsafeCell::get() returns a *mut T valid for the lifetime of
+        // the Lock, which outlives this guard via the 'a lifetime bound.
         unsafe { &mut *self.lock.data.get() }
     }
 }

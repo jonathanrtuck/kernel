@@ -208,7 +208,9 @@ pub fn tlbi_vale1is(va_asid: u64) {
 /// ARM ARM: TLBI ASIDE1IS invalidates by ASID only in inner-shareable domain.
 #[inline(always)]
 pub fn tlbi_aside1is(asid_val: u64) {
-    // SAFETY: TLBI invalidates cached translations. Affects the memory system.
+    // SAFETY: TLBI invalidates cached translations. Affects the memory system
+    // (future page walks will re-read page tables after invalidation).
+    // No `nomem` — LLVM must not reorder memory accesses past this.
     unsafe {
         core::arch::asm!("tlbi aside1is, {0}", in(reg) asid_val, options(nostack));
     }
