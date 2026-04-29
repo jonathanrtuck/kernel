@@ -15,6 +15,7 @@ path = "src/main.rs"
 test = false
 
 [dev-dependencies]
+loom = "0.7"
 proptest = "1"
 
 [profile.dev]

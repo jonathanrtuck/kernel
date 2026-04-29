@@ -27,6 +27,9 @@ pub mod syscall;
 pub mod time;
 pub mod time_manager;
 
+#[cfg(test)]
+mod concurrency_models;
+
 // ── Wave 1 integration tests ──────────────────────────────────────
 //
 // Cross-module tests verifying Arena, Capability Table, and Field
