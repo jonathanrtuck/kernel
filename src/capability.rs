@@ -1054,6 +1054,7 @@ impl Table {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     // ── D-3.1a: growth slot constant ────────────────────────────────
 
@@ -3204,5 +3205,179 @@ mod tests {
     #[test]
     fn cap_absent_is_max_u64() {
         assert_eq!(CAP_ABSENT, u64::MAX);
+    }
+
+    // ── PROP-01: Handle encode/decode roundtrip ──────────────────────
+
+    proptest! {
+        /// PROP-01: For any valid index and 48-bit slot_tag, encoding and then
+        /// decoding the Handle yields the original index and slot_tag.
+        #[test]
+        fn prop_handle_encode_decode_roundtrip(
+            index in 0u32..=MAX_HANDLE_INDEX,
+            slot_tag in 0u64..=0xFFFF_FFFF_FFFFu64,
+        ) {
+            let h = Handle { index, slot_tag: SlotTag(slot_tag) };
+            let decoded = Handle::decode(h.encode());
+            prop_assert_eq!(decoded.index, index);
+            prop_assert_eq!(decoded.slot_tag.0, slot_tag);
+        }
+
+        /// PROP-01: Decoding then re-encoding yields the same u64 when the
+        /// handle is constructed from valid fields (index in 16-bit range,
+        /// tag in 48-bit range).
+        #[test]
+        fn prop_handle_decode_encode_roundtrip(
+            index in 0u32..=MAX_HANDLE_INDEX,
+            slot_tag in 0u64..=0xFFFF_FFFF_FFFFu64,
+        ) {
+            let h = Handle { index, slot_tag: SlotTag(slot_tag) };
+            let encoded = h.encode();
+            let redecoded = Handle::decode(encoded);
+            prop_assert_eq!(redecoded.encode(), encoded);
+        }
+
+        /// PROP-01: SlotTag::abi_matches is reflexive — any tag matches itself.
+        #[test]
+        fn prop_slot_tag_abi_matches_reflexive(v in proptest::num::u64::ANY) {
+            prop_assert!(SlotTag(v).abi_matches(SlotTag(v)));
+        }
+
+        /// PROP-01: SlotTag::abi_matches ignores bits 48..63 — tags with
+        /// matching lower 48 bits but different high bits still match.
+        #[test]
+        fn prop_slot_tag_abi_matches_ignores_high_bits(
+            tag in 0u64..=0xFFFF_FFFF_FFFFu64,
+            high_bits in proptest::num::u64::ANY,
+        ) {
+            let high_mask = high_bits & !0xFFFF_FFFF_FFFFu64;
+            prop_assert!(SlotTag(tag).abi_matches(SlotTag(tag | high_mask)));
+        }
+    }
+
+    // ── PROP-03: Rights bitmask algebraic laws ───────────────────────
+
+    proptest! {
+        /// PROP-03: Union is idempotent — a | a == a.
+        #[test]
+        fn prop_rights_union_idempotent(bits in proptest::num::u16::ANY) {
+            let a = Rights::from_bits(bits);
+            prop_assert_eq!(a.union(a), a);
+        }
+
+        /// PROP-03: Union is commutative — a | b == b | a.
+        #[test]
+        fn prop_rights_union_commutative(
+            a_bits in proptest::num::u16::ANY,
+            b_bits in proptest::num::u16::ANY,
+        ) {
+            let a = Rights::from_bits(a_bits);
+            let b = Rights::from_bits(b_bits);
+            prop_assert_eq!(a.union(b), b.union(a));
+        }
+
+        /// PROP-03: Union is associative — (a | b) | c == a | (b | c).
+        #[test]
+        fn prop_rights_union_associative(
+            a_bits in proptest::num::u16::ANY,
+            b_bits in proptest::num::u16::ANY,
+            c_bits in proptest::num::u16::ANY,
+        ) {
+            let a = Rights::from_bits(a_bits);
+            let b = Rights::from_bits(b_bits);
+            let c = Rights::from_bits(c_bits);
+            prop_assert_eq!(a.union(b).union(c), a.union(b.union(c)));
+        }
+
+        /// PROP-03: Empty is the identity for union — a | empty == a.
+        #[test]
+        fn prop_rights_union_identity(bits in proptest::num::u16::ANY) {
+            let a = Rights::from_bits(bits);
+            prop_assert_eq!(a.union(Rights::empty()), a);
+        }
+
+        /// PROP-03: Attenuate is bitwise AND — (a & b).bits() == a.bits() & b.bits().
+        #[test]
+        fn prop_rights_attenuate_is_bitwise_and(
+            a_bits in proptest::num::u16::ANY,
+            b_bits in proptest::num::u16::ANY,
+        ) {
+            let a = Rights::from_bits(a_bits);
+            let b = Rights::from_bits(b_bits);
+            prop_assert_eq!(a.attenuate(b).bits(), a.bits() & b.bits());
+        }
+
+        /// PROP-03: Attenuate can only remove rights — result is a subset of a.
+        #[test]
+        fn prop_rights_attenuate_only_removes(
+            a_bits in proptest::num::u16::ANY,
+            b_bits in proptest::num::u16::ANY,
+        ) {
+            let a = Rights::from_bits(a_bits);
+            let b = Rights::from_bits(b_bits);
+            let result = a.attenuate(b);
+            // result's bits are a subset of a's bits
+            prop_assert_eq!(result.bits() & a.bits(), result.bits());
+        }
+
+        /// PROP-03: Contains is true after union — (a | b).contains(a).
+        #[test]
+        fn prop_rights_contains_after_union(
+            a_bits in proptest::num::u16::ANY,
+            b_bits in proptest::num::u16::ANY,
+        ) {
+            let a = Rights::from_bits(a_bits);
+            let b = Rights::from_bits(b_bits);
+            prop_assert!(a.union(b).contains(a));
+        }
+
+        /// PROP-03: Contains is reflexive — a.contains(a) is always true.
+        #[test]
+        fn prop_rights_contains_reflexive(bits in proptest::num::u16::ANY) {
+            let a = Rights::from_bits(bits);
+            prop_assert!(a.contains(a));
+        }
+
+        /// PROP-03: Empty contains only empty —
+        /// Rights::empty().contains(a) implies a.bits() == 0.
+        #[test]
+        fn prop_rights_empty_contains_only_empty(bits in proptest::num::u16::ANY) {
+            let a = Rights::from_bits(bits);
+            if Rights::empty().contains(a) {
+                prop_assert_eq!(a.bits(), 0u16);
+            }
+        }
+    }
+
+    // ── PROP-05: Slot arithmetic bounds ─────────────────────────────
+
+    proptest! {
+        /// PROP-05: For any valid index, the low 16 bits of encode() equal the index.
+        #[test]
+        fn prop_slot_index_preserved_in_low_bits(index in 0u32..=MAX_HANDLE_INDEX) {
+            let h = Handle { index, slot_tag: SlotTag(0) };
+            prop_assert_eq!(h.encode() & 0xFFFF, index as u64);
+        }
+
+        /// PROP-05: Decoding any encoded handle yields an index within the valid range.
+        #[test]
+        fn prop_encoded_index_bounded(
+            index in 0u32..=MAX_HANDLE_INDEX,
+            slot_tag in 0u64..=0xFFFF_FFFF_FFFFu64,
+        ) {
+            let h = Handle { index, slot_tag: SlotTag(slot_tag) };
+            let decoded = Handle::decode(h.encode());
+            prop_assert!(decoded.index <= MAX_HANDLE_INDEX);
+        }
+    }
+
+    /// PROP-05: CAP_ABSENT (u64::MAX) decodes to index 0xFFFF (MAX_HANDLE_INDEX).
+    /// This verifies the sentinel decodes predictably — the index field extracts
+    /// the low 16 bits of u64::MAX, which is 0xFFFF.
+    #[test]
+    fn prop_cap_absent_sentinel() {
+        let decoded = Handle::decode(CAP_ABSENT);
+        assert_eq!(decoded.index, 0xFFFF);
+        assert_eq!(decoded.index, MAX_HANDLE_INDEX);
     }
 }
