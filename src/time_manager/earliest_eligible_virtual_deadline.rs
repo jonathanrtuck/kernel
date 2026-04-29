@@ -726,4 +726,300 @@ mod tests {
 
         assert_eq!(sched.total_weight, 0);
     }
+
+    // ── PROP-04: EEVDF scheduler properties ──────────────────────────
+
+    #[cfg(test)]
+    mod prop_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// Generate a valid (responsiveness, throughput) pair where r + t <= 128.
+        fn valid_profile() -> impl Strategy<Value = (u8, u8)> {
+            (0u8..=128u8).prop_flat_map(|r| (Just(r), 0u8..=(128 - r)))
+        }
+
+        proptest! {
+            /// pick_next always returns Some when the queue is non-empty.
+            ///
+            /// This is a necessary precondition for all other EEVDF properties:
+            /// no Observer is lost, and the scheduler never "forgets" runnable work.
+            #[test]
+            fn prop_eevdf_pick_next_nonempty_always_some(
+                count in 1usize..=6,
+                ticks in 1u32..=100,
+            ) {
+                let mut observers: [Observer; 6] =
+                    core::array::from_fn(|_| make_observer());
+                let mut sched = EarliestEligibleVirtualDeadline::new();
+
+                for i in 0..count {
+                    let ptr = NonNull::from(&mut observers[i]);
+                    sched.enqueue(ptr);
+                }
+
+                for _ in 0..ticks {
+                    prop_assert!(
+                        sched.pick_next().is_some(),
+                        "pick_next must return Some when queue has {count} observers"
+                    );
+                    sched.on_preempt();
+                }
+            }
+
+            /// Equal-weight Observers each receive at least 33% of their fair share.
+            ///
+            /// With N equal-weight Observers over `ticks` cycles, each should receive
+            /// at least ticks / (count * 3) picks. Tolerance of 3x provides margin for
+            /// EEVDF's virtual-time startup transients.
+            #[test]
+            fn prop_eevdf_fairness_equal_weight(
+                count in 2usize..=4,
+                ticks in 40u32..=120,
+            ) {
+                let mut observers: [Observer; 4] =
+                    core::array::from_fn(|_| make_observer());
+                let mut sched = EarliestEligibleVirtualDeadline::new();
+
+                for i in 0..count {
+                    let ptr = NonNull::from(&mut observers[i]);
+                    sched.enqueue(ptr);
+                }
+
+                let mut counts = [0u32; 4];
+
+                for _ in 0..ticks {
+                    if let Some(picked) = sched.pick_next() {
+                        for j in 0..count {
+                            let ptr = NonNull::from(&mut observers[j]);
+                            if picked == ptr {
+                                counts[j] += 1;
+                                break;
+                            }
+                        }
+                    }
+                    sched.on_preempt();
+                }
+
+                // Each Observer should get at least 1/3 of its fair share.
+                let lower_bound = ticks / (count as u32 * 3);
+
+                for i in 0..count {
+                    prop_assert!(
+                        counts[i] >= lower_bound,
+                        "observer {i} got {} ticks, expected >= {} (count={count}, ticks={ticks})",
+                        counts[i],
+                        lower_bound
+                    );
+                }
+            }
+
+            /// Every enqueued Observer is selected at least once (no starvation).
+            ///
+            /// After 200 * count on_preempt cycles, every Observer must have been
+            /// returned by pick_next at least once, regardless of scheduling profile.
+            #[test]
+            fn prop_eevdf_no_starvation(
+                profiles in prop::collection::vec(valid_profile(), 2..=4),
+            ) {
+                let count = profiles.len();
+                // Fixed-size array — profiles has at most 4 elements.
+                let mut observers: [Observer; 4] =
+                    core::array::from_fn(|_| make_observer());
+                let mut sched = EarliestEligibleVirtualDeadline::new();
+
+                for i in 0..count {
+                    observers[i].responsiveness = profiles[i].0;
+                    observers[i].throughput = profiles[i].1;
+                    let ptr = NonNull::from(&mut observers[i]);
+                    sched.enqueue(ptr);
+                }
+
+                let run_ticks = 200 * count as u32;
+                let mut seen = [false; 4];
+
+                for _ in 0..run_ticks {
+                    if let Some(picked) = sched.pick_next() {
+                        for j in 0..count {
+                            let ptr = NonNull::from(&mut observers[j]);
+                            if picked == ptr {
+                                seen[j] = true;
+                                break;
+                            }
+                        }
+                    }
+                    sched.on_preempt();
+                }
+
+                for i in 0..count {
+                    prop_assert!(
+                        seen[i],
+                        "observer {i} (profile {:?}) was never selected after {run_ticks} ticks",
+                        profiles[i]
+                    );
+                }
+            }
+
+            /// Enqueue/dequeue sequences maintain consistent queue_depth and contains().
+            ///
+            /// A sequence of bool operations (true=enqueue next, false=dequeue most recent)
+            /// must leave queue_depth() matching the tracked expected count, and contains()
+            /// must be accurate for every Observer touched during the sequence.
+            ///
+            /// Uses a fixed-size array of 30 Observers and a stack-based tracking
+            /// structure (no heap allocation) compatible with the no_std kernel target.
+            #[test]
+            fn prop_eevdf_enqueue_dequeue_consistency(
+                ops in prop::collection::vec(any::<bool>(), 2..30),
+            ) {
+                // 30 stack-allocated Observers — one per possible enqueue in the
+                // ops sequence (ops.len() <= 29, so 30 is always enough).
+                let mut observers: [Observer; 30] =
+                    core::array::from_fn(|_| make_observer());
+                let mut sched = EarliestEligibleVirtualDeadline::new();
+
+                // Stack-based tracking: which observer indices are currently enqueued.
+                // [enqueued_stack] is a fixed array used as a LIFO stack.
+                let mut enqueued_stack = [0usize; 30];
+                let mut stack_len = 0usize;
+                let mut next_obs_idx = 0usize;
+
+                for op in &ops {
+                    if *op {
+                        // Enqueue next Observer if we have capacity.
+                        if next_obs_idx < observers.len() && sched.queue_depth() < 64 {
+                            let ptr = NonNull::from(&mut observers[next_obs_idx]);
+                            sched.enqueue(ptr);
+                            enqueued_stack[stack_len] = next_obs_idx;
+                            stack_len += 1;
+                            next_obs_idx += 1;
+                        }
+                    } else if stack_len > 0 {
+                        // Dequeue most recently enqueued Observer.
+                        stack_len -= 1;
+                        let obs_idx = enqueued_stack[stack_len];
+                        let ptr = NonNull::from(&mut observers[obs_idx]);
+                        sched.dequeue(ptr);
+                    }
+                }
+
+                // Verify queue_depth matches expected count.
+                prop_assert_eq!(
+                    sched.queue_depth(),
+                    stack_len as u32,
+                    "queue_depth mismatch: expected {}, got {}",
+                    stack_len,
+                    sched.queue_depth()
+                );
+
+                // Verify contains() is accurate for all observers touched.
+                let currently_enqueued: [bool; 30] = {
+                    let mut arr = [false; 30];
+                    for i in 0..stack_len {
+                        arr[enqueued_stack[i]] = true;
+                    }
+                    arr
+                };
+
+                for i in 0..next_obs_idx {
+                    let ptr = NonNull::from(&mut observers[i]);
+                    let in_queue = sched.contains(ptr);
+                    let expected = currently_enqueued[i];
+                    prop_assert_eq!(
+                        in_queue,
+                        expected,
+                        "observer {}: contains()={} but expected {}",
+                        i,
+                        in_queue,
+                        expected
+                    );
+                }
+            }
+
+            /// total_weight equals the sum of weights of currently-enqueued Observers.
+            ///
+            /// All test_default Observers have compute_aggregate=100, so weight=100.
+            /// After each enqueue/dequeue operation, total_weight must match
+            /// enqueued_count * 100.
+            #[test]
+            fn prop_eevdf_total_weight_tracks(
+                ops in prop::collection::vec(any::<bool>(), 2..20),
+            ) {
+                let mut observers: [Observer; 20] =
+                    core::array::from_fn(|_| make_observer());
+                let mut sched = EarliestEligibleVirtualDeadline::new();
+
+                // Each test_default observer has compute_aggregate=100 → weight=100.
+                const WEIGHT_PER_OBS: u32 = 100;
+
+                // Stack-based tracking of enqueued observer indices.
+                let mut enqueued_stack = [0usize; 20];
+                let mut stack_len = 0usize;
+                let mut next_obs_idx = 0usize;
+
+                for op in &ops {
+                    if *op {
+                        if next_obs_idx < observers.len() && sched.queue_depth() < 64 {
+                            let ptr = NonNull::from(&mut observers[next_obs_idx]);
+                            sched.enqueue(ptr);
+                            enqueued_stack[stack_len] = next_obs_idx;
+                            stack_len += 1;
+                            next_obs_idx += 1;
+                        }
+                    } else if stack_len > 0 {
+                        stack_len -= 1;
+                        let obs_idx = enqueued_stack[stack_len];
+                        let ptr = NonNull::from(&mut observers[obs_idx]);
+                        sched.dequeue(ptr);
+                    }
+
+                    let expected_weight = stack_len as u32 * WEIGHT_PER_OBS;
+                    prop_assert_eq!(
+                        sched.total_weight,
+                        expected_weight,
+                        "total_weight={} but expected {} ({} observers enqueued)",
+                        sched.total_weight,
+                        expected_weight,
+                        stack_len
+                    );
+                }
+            }
+
+            /// pick_next returns an eligible Observer whenever one exists.
+            ///
+            /// This is the core EEVDF invariant: eligible-first selection. We verify
+            /// the observable consequence — when the queue is non-empty the scheduler
+            /// always makes a selection (never returns None) — since the internal VET
+            /// and global_virtual_time fields are not accessible from tests. Full
+            /// eligible-first correctness is covered by the deterministic
+            /// `high_responsiveness_observer_selected_first` and
+            /// `interactive_scheduled_more_frequently` unit tests.
+            #[test]
+            fn prop_eevdf_eligible_first(
+                profiles in prop::collection::vec(valid_profile(), 2..=6),
+                ticks in 1u32..=50,
+            ) {
+                let count = profiles.len();
+                let mut observers: [Observer; 6] =
+                    core::array::from_fn(|_| make_observer());
+                let mut sched = EarliestEligibleVirtualDeadline::new();
+
+                for i in 0..count {
+                    observers[i].responsiveness = profiles[i].0;
+                    observers[i].throughput = profiles[i].1;
+                    let ptr = NonNull::from(&mut observers[i]);
+                    sched.enqueue(ptr);
+                }
+
+                for _ in 0..ticks {
+                    // The invariant: a non-empty scheduler always picks someone.
+                    prop_assert!(
+                        sched.pick_next().is_some(),
+                        "pick_next returned None with {count} observers enqueued"
+                    );
+                    sched.on_preempt();
+                }
+            }
+        }
+    }
 }
