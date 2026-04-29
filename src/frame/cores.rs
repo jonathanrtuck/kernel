@@ -455,11 +455,16 @@ pub fn observer_prepare_wait(
 ) -> &'static mut crate::observer::WaitEntry {
     use crate::observer::{WaitEntry, WaitState};
 
-    // SAFETY: observer_ptr points to a live Observer. A4 non-reentrancy
-    // guarantees exclusive access on this core. We set the wait_state
-    // field and then return a mutable reference into it. The 'static
-    // lifetime is bounded by the Observer's arena lifetime (same
-    // invariant as read_ipc_registers).
+    // SAFETY: observer_ptr points to a live Observer in the arena. A4
+    // non-reentrancy guarantees no other code on this core accesses the
+    // Observer concurrently. We write wait_state and immediately return a
+    // raw-pointer-derived &mut into it. The caller must uphold: (a) not
+    // overwrite observer.wait_state while the returned reference is live,
+    // and (b) not create any other &mut Observer while the reference is live.
+    // The 'static tag is necessary for the API boundary; the actual validity
+    // window is bounded by the next observer_clear_wait / observer_unblock
+    // call (both overwrite wait_state, ending the borrow). A4 ensures the
+    // single-core exclusive-access invariant holds for this window.
     unsafe {
         let observer = &mut *observer_ptr.as_ptr();
 
@@ -492,7 +497,12 @@ pub fn observer_prepare_pending(
     use crate::observer::{WaitEntry, WaitState};
 
     // SAFETY: observer_ptr points to a live Observer in Faulted state.
-    // A4 non-reentrancy guarantees exclusive access on this core.
+    // A4 non-reentrancy guarantees no other code on this core accesses the
+    // Observer concurrently. Same aliasing invariant as observer_prepare_wait:
+    // the caller must not overwrite observer.wait_state or create another
+    // &mut Observer while the returned reference is live. The 'static tag is
+    // bounded in practice by the pending-list consumption path (which reads
+    // and clears both wait_state and deferred_fault_message).
     unsafe {
         let observer = &mut *observer_ptr.as_ptr();
 

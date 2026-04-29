@@ -186,14 +186,20 @@ pub fn waiter_remove(
 
     if let Some(mut prev_ptr) = entry.prev {
         // SAFETY: prev_ptr was set by a prior push_back and points to a
-        // valid WaitEntry in this list. The caller holds &mut on the Field.
+        // valid WaitEntry in this list. The list invariant forbids cycles
+        // (entry.prev != entry itself), so prev_ptr.as_mut() does not alias
+        // the entry reference held by the caller. The caller holds &mut Field.
         unsafe {
             prev_ptr.as_mut().next = entry.next;
         }
     }
     if let Some(mut next_ptr) = entry.next {
         // SAFETY: next_ptr was set by a prior push_back and points to a
-        // valid WaitEntry in this list. The caller holds &mut on the Field.
+        // valid WaitEntry in this list. The list invariant forbids cycles
+        // (entry.next != entry itself), so next_ptr.as_mut() does not alias
+        // the entry reference. next_ptr != prev_ptr for any 3+-element list
+        // since the list is singly-linked in each direction. The caller
+        // holds &mut Field, ensuring exclusive access.
         unsafe {
             next_ptr.as_mut().prev = entry.prev;
         }
@@ -674,7 +680,9 @@ pub fn badge_map_decrement(map_ptr: NonNull<BadgeMap>, badge: u64) -> bool {
                     let last_idx = map.count as usize - 1;
 
                     if i != last_idx {
-                        // SAFETY: i and last_idx are both < count.
+                        // SAFETY: i and last_idx are both < count, so both pointers
+                        // are within the valid entries array. i != last_idx guarantees
+                        // the source and destination are distinct elements (no overlap).
                         core::ptr::copy_nonoverlapping(entries.add(last_idx), entries.add(i), 1);
                     }
 
@@ -767,6 +775,9 @@ pub fn drain_pending_closures(field: &mut crate::field::Field) -> u32 {
                     let last_idx = map.count as usize - 1;
 
                     if i != last_idx {
+                        // SAFETY: i and last_idx are both < count, so both pointers
+                        // are within the valid entries array. i != last_idx guarantees
+                        // the source and destination are distinct elements (no overlap).
                         core::ptr::copy_nonoverlapping(entries.add(last_idx), entries.add(i), 1);
                     }
 
