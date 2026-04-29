@@ -34,8 +34,11 @@ all cores without requiring an inter-processor interrupt.
 Every kernel object has a `refcount: u32` field tracking how many capability
 entries reference it. The refcount is incremented when a capability to the
 object is installed in any Observer's table and decremented when a capability is
-closed. When the refcount reaches zero, the object is eligible for destruction
-(D33).
+closed. When the refcount reaches zero, the kernel auto-destroys the object
+inline on the close path (D107). Structural backing returns to the root Space
+(D31), not to the closer. Explicit Destroy (code 7) remains for force-killing
+objects with live references (refcount > 0), where the destroyer receives the
+backing Space cap (D98).
 
 ### Type Conversion (D32)
 
@@ -52,12 +55,12 @@ objects.
 Capabilities are held in a per-Observer flat array (D8). Three slots are
 reserved:
 
-| Slot | Purpose                                        | Derivation |
-| ---- | ---------------------------------------------- | ---------- |
-| 0    | Fault handler Field                            | D21        |
-| 1    | Reply Field                                    | D43        |
-| 2    | Self-reference (Observer cap with full rights) | D57        |
-| 3+   | User-available slots                           | D8         |
+| Slot | Purpose                                           | Derivation |
+| ---- | ------------------------------------------------- | ---------- |
+| 0    | Fault handler Field                               | D21        |
+| 1    | Reply Field (userspace-created via SetReplyField) | D43, D106  |
+| 2    | Self-reference (Observer cap with full rights)    | D57        |
+| 3+   | User-available slots                              | D8         |
 
 ---
 
@@ -186,19 +189,32 @@ the Observer must use the `ClockRead` typed operation (code 17, D48).
 
 ### Destruction
 
-**Syscall:** `Destroy` (code 7). Requires `DESTROY` right.
+Two destruction paths exist:
 
-Destroying an Observer initiates a preemptible cascade (D33, D98). The cascade
-iterates the Observer's capability table, closing each entry. Closed
-capabilities decrement target objects' refcounts; objects reaching zero refcount
-are themselves destroyed, potentially pushing nested cascade levels (up to
-`MAX_CASCADE_DEPTH` = 4). The cascade processes entries in bounded steps
-(`CASCADE_STEP_SIZE` = 16 entries per step), yielding to the scheduler between
-steps so higher-priority Observers can run.
+**Explicit Destroy** — `Destroy` (code 7). Requires `DESTROY` right. Force-kills
+the object regardless of refcount. The backing Space is returned to the
+destroyer as a new Space capability (reverse type conversion, D98). If the
+target is an Observer, destruction initiates a preemptible cascade (D33, D98).
 
-The destroying Observer is blocked for the duration of the cascade (D98). On
-completion, the backing Space is returned to the destroyer as a new Space
-capability (reverse type conversion, D98).
+**Auto-destroy on zero refcount (D107)** — When any Close operation brings an
+object's refcount to zero, the kernel destroys the object inline on the close
+path. Structural backing returns to the kernel's root Space (D31), not to the
+closer. The closer gave up their last cap — CloseResult does not report whether
+auto-destroy fired.
+
+Auto-destroying a non-Observer type is O(1). Auto-destroying an Observer
+triggers a preemptible cascade (D33) — the closer bears the cascade cost but
+D33's preemptibility bounds per-step latency. Users wanting direct resource
+reclamation (backing Space cap returned to them) should call Destroy instead of
+Close.
+
+**Cascade mechanics (D33, D98).** An Observer cascade iterates the Observer's
+capability table, closing each entry. Closed capabilities decrement target
+objects' refcounts; objects reaching zero refcount are themselves destroyed,
+potentially pushing nested cascade levels (up to `MAX_CASCADE_DEPTH` = 4). The
+cascade processes entries in bounded steps (`CASCADE_STEP_SIZE` = 16 entries per
+step), yielding to the scheduler between steps so higher-priority Observers can
+run. The destroying/closing Observer is blocked for the duration of the cascade.
 
 Only Observers cascade. Space, Time, Field, and Pulsar destruction is O(1).
 

@@ -3060,12 +3060,13 @@ their respective type groups.
 
 **Large return value convention — userspace buffer pointer:**
 
-For operations exceeding the register budget (observer_read_registers,
-observer_write_registers), the caller provides x0 = buffer pointer, x1 = buffer
-length. The kernel validates the VA (D24 cap-mapping invariant) and reads/writes
-using LDTR/STTR instructions (respecting ARMv8.1 PAN). No per-Observer
-allocation. No well-known addresses (D26 preserved). Symmetric for read and
-write operations.
+For future operations that exceed the register budget, the caller provides x0 =
+buffer pointer, x1 = buffer length. The kernel validates the VA (D24 cap-mapping
+invariant) and reads/writes using LDTR/STTR instructions (respecting ARMv8.1
+PAN). No per-Observer allocation. No well-known addresses (D26 preserved).
+Symmetric for read and write operations. Originally specified for
+WriteRegisters/ReadRegisters, but D103 settled those as inline register
+transfers (4 values fit in argument registers).
 
 **ReplyRecv register assignment:**
 
@@ -4443,8 +4444,8 @@ consistent snapshot. The timer counter is volatile; unlike stable RegisterState,
 it must be pushed.
 
 Does NOT settle: ~~cap resolution protocol~~ (D77), ~~global state
-organization~~ (D82), ~~error/fault delivery paths~~ (D80), fast-path assembly
-as separate routine vs. branch within exception.S.
+organization~~ (D82), ~~error/fault delivery paths~~ (D80), ~~fast-path assembly
+as separate routine vs. branch within exception.S~~ (D87: deferred).
 
 - **Rests on:** D1 (per-core hot path), D7 (IPC vs typed split), D47 (register
   layout, ESR-only dispatch), D49 (error signaling encoding), D50 (fast-path
@@ -4456,6 +4457,30 @@ as separate routine vs. branch within exception.S.
   the ResumeFastPath variant), or if D74 is revised (save model change would
   restructure the pull interface).
 - **Journal:** `journal/076-dispatch-entry-contract.md`.
+
+### D77 — Cap resolution protocol: handle decoding and validation sequence
+
+A userspace handle value (raw u64) is decoded and validated through an 8-step
+sequence to produce a mutable reference to a kernel object. Handle ABI encoding:
+lower 32 bits = cap table index, upper 32 bits = slot tag. Any u64 decodes to a
+valid Handle struct — invalid handles are caught during resolution.
+
+Resolution check sequence: (1) decode index and slot_tag, (2) bounds check with
+Spectre v1 barrier, (3) entry lookup via pointer arithmetic, (4) slot tag check
+(D11 ABA defense), (5) occupancy check, (6) generation check against live arena
+generation (D67 revocation, lazy rewrite on mismatch), (7) rights check (D52),
+(8) type check (skipped for generic operations). Check ordering is
+security-critical: tag before generation prevents information leaks, generation
+before rights prevents rights checking on revoked capabilities.
+
+Resolution acquires no lock — it operates on the Observer's per-core cap table
+pointer (D1). The caller acquires the target arena lock after resolution
+succeeds. Two-phase resolution supported: `resolve_cap_entry` (steps 1–5) and
+`resolve_cap` (full composed form).
+
+- **Rests on:** D4, D8, D11, D52, D67, D75, D82.
+- **Status:** settled.
+- **Journal:** `journal/077-cap-resolution-protocol.md`.
 
 ### D78 — IPC message ownership: explicit transfer through return types
 
@@ -4617,6 +4642,82 @@ type makes assembly layout unknowable). Dynamic deadline allocation rejected
 - **Rests on:** D1, D46, D56, D74.
 - **Status:** settled.
 - **Journal:** `journal/083-per-core-data-organization.md`.
+
+### D84 — EL0 exception entry mechanics: 7-instruction bootstrap
+
+EL0 exception entry saves all user registers to RegisterState via TPIDR_EL1 in a
+7-instruction (28-byte) vector preamble. The core problem — reading TPIDR_EL1
+requires a scratch register while all 31 GPRs hold user values — is solved by
+parking x0-x1 on SP_EL1 (the kernel stack, valid from boot, inaccessible to
+EL0). Key insight: after `stp x0, x1` and `mrs x0, tpidr_el1`, x1 still holds
+its user value and can be saved directly without a stack round-trip. Only x0
+needs the stack recovery. 28 bytes is well within the 128-byte vector entry
+limit.
+
+ESR_EL1 and FAR_EL1 are passed as function parameters to the Rust handler (not
+saved to RegisterState — they are exception-specific transients, not Observer
+identity). SP_EL0 and TPIDR_EL0 saved alongside system registers in the common
+handler. The EL0 path does not allocate a TrapFrame on the kernel stack
+(TrapFrame is EL1h only).
+
+- **Rests on:** D74, D83, A2.
+- **Status:** settled.
+- **Journal:** `journal/084-el0-exception-entry-mechanics.md`.
+
+### D85 — Context switch restore sequence: TTBR0 switch, CNTKCTL, GPR restore, eret
+
+Register restore before eret follows a fixed ordering: (1) TTBR0 switch with
+`isb; tlbi vmalle1is; dsb ish; isb` if the target Observer's Space differs from
+current TTBR0 (comparison skip for same-Space switches), (2) CNTKCTL_EL1 clock
+access via branchless `bfi` (D66), (3) system registers (SP_EL0, ELR_EL1,
+SPSR_EL1, TPIDR_EL0), (4) FP/SIMD, (5) GPRs with x0 (base pointer) loaded last.
+No ISB needed between the last `msr` and `eret` — eret is a context
+synchronization event (ARM ARM D1.13.4). Idle path: WFI at EL1 with IRQs
+enabled; no EL0 context setup.
+
+Corrects the implementation plan: the leading `dsb ish` before TLBI is
+unnecessary (no page table writes precede it). The TTBR0 comparison skip saves
+~40–80 cycles on same-Space switches.
+
+- **Rests on:** D74, D66, D83, A2.
+- **Status:** settled.
+- **Journal:** `journal/085-context-switch-restore-sequence.md`.
+
+### D86 — SVC decode and EL0 exception dispatch
+
+ESR_EL1 field extraction (EC[31:26], ISS[24:0]) routes EL0 exceptions to the
+correct handler. SVC AArch64 (EC 0x15): SVC #0 → typed dispatch via x4 op code,
+SVC #1–#5 → IPC dispatch (Send/Receive/Call/ReplyRecv/Yield), SVC #6+ → fault.
+Instruction abort (EC 0x20) and data abort (EC 0x24) → VM fault delivery with
+FAR_EL1. Unknown (EC 0x00) → undefined instruction fault. All other EC values →
+HardwareException fault delivery.
+
+SVC #0 with invalid x4 (≥ operation count) delivers a fault, not silent ignore.
+EL0 IRQ dispatch (source 9) mirrors EL1h logic but restores via RegisterState
+instead of TrapFrame. SError (source 11) is fatal. Match-based dispatch is safe
+from Spectre v1 (constant outputs, no memory dereferences).
+
+- **Rests on:** D47, D48, D49, D12, D61, A2.
+- **Status:** settled.
+- **Journal:** `journal/086-svc-decode-el0-dispatch.md`.
+
+### D87 — IPC fast-path register pass-through: deferred
+
+x0–x3 pass-through is conceptual, not literal: D74 saves x0–x3 unconditionally
+to sender's RegisterState on all EL0 paths. On the fast path, the restore
+assembly would read x0–x3 from the sender's RegisterState (via PerCoreData)
+before switching to the receiver's. Saves ~8–16 cycles (~2–4% of fast-path
+budget) by avoiding 4 stores to receiver's RegisterState and Message
+construction for data words.
+
+Implementation deferred: marginal savings relative to complexity (dual load
+sources, PerCoreData ordering constraints). No interface changes needed to add
+later — re-introduce `DirectSwitch` variant and conditional skip in restore
+assembly. For now, `DirectSwitch` treated as `WokeReceiver` on the slow path.
+
+- **Rests on:** D50, D74, D79.
+- **Status:** settled (mechanics), implementation deferred.
+- **Journal:** `journal/087-ipc-fast-path-mechanics.md`.
 
 ### D88 — TTBR0/TTBR1 split contract
 

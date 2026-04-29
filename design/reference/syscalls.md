@@ -407,7 +407,7 @@ entry inherits the stored generation and is validated when used.
 
 #### Close (opcode 9)
 
-Relinquish a capability without destroying the object. D11.
+Relinquish a capability. D11, D107.
 
 | Register | Direction | Content                  |
 | -------- | --------- | ------------------------ |
@@ -417,9 +417,12 @@ Relinquish a capability without destroying the object. D11.
 
 **Required right:** None (always permitted). **Possible errors:** InvalidCap.
 
-Frees the capability table slot and decrements the object's reference count.
-Does not destroy the object even if the reference count reaches zero (use
-Destroy for that). InvalidCap if the slot is already empty.
+Frees the capability table slot and decrements the object's reference count. If
+the refcount reaches zero, the kernel auto-destroys the object inline (D107):
+structural backing returns to the root Space (D31), not to the closer. For
+Observers, auto-destroy triggers a preemptible cascade (D33). Users wanting the
+backing Space returned to them should call Destroy (code 7) instead. InvalidCap
+if the slot is already empty.
 
 #### Mint (opcode 10)
 
@@ -630,10 +633,34 @@ Observer capability (full Observer rights).
 
 The new Observer starts in Inert state (D39). Its capability table is populated
 with: slot 0 = fault handler Field (SEND right + handler badge), slot 1 = empty
-(reply Field, populated on first Call), slot 2 = self-reference (full Observer
-rights). Configuration follows the composable 5-step sequence (D35):
-CreateObserver, then ObserverInstallCap (for Space, Time, and other
-capabilities), ObserverWriteRegisters (for PC, SP, x0), and ObserverResume.
+(reply Field, installed by userspace via SetReplyField, D106), slot 2 =
+self-reference (full Observer rights). Configuration follows the composable
+setup sequence (D35): CreateObserver, then ObserverInstallCap (for Space, Time,
+and other capabilities), ObserverWriteRegisters (for PC, SP, x0),
+ObserverSetReplyField (for RPC Observers), and ObserverResume.
+
+#### ObserverSetReplyField (opcode 20)
+
+Install a Field capability as the Observer's reply Field (slot 1). D106.
+
+| Register | Direction | Content                                     |
+| -------- | --------- | ------------------------------------------- |
+| x0       | in        | Field capability handle (in caller's table) |
+| x5       | in        | Observer capability handle (target)         |
+| x4       | in        | 20 (opcode)                                 |
+| x0       | out       | 0 on success                                |
+
+**Required right:** INSTALL_CAP (on the Observer capability). **Possible
+errors:** InvalidCap, StaleCap, NoRight, WrongType.
+
+Installs the Field at the target Observer's reserved slot 1. The kernel
+auto-enables badge_tracking (D73) on the installed Field and closes any existing
+entry at slot 1 (D11). The installed capability entry carries RECEIVE right with
+badge 0.
+
+Non-RPC Observers skip SetReplyField entirely — no waste. Call() checks slot 1
+and returns an error if empty, preventing silent caller zombification (blocked
+on nothing, no badge-closure signal, permanently stuck).
 
 ### Resource acquisition
 
@@ -669,41 +696,43 @@ Dual-path dispatch (D104):
 
 ## Derivation cross-reference
 
-| Derivation | Topic                                     | Operations affected                           |
-| ---------- | ----------------------------------------- | --------------------------------------------- |
-| D7         | Split interaction model                   | All (IPC vs typed families)                   |
-| D13        | Queued fields, direct-switch fast path    | Send, Receive, Call, ReplyRecv                |
-| D16        | Reply via send-once cap                   | Call, ReplyRecv                               |
-| D17        | Badge semantics                           | Send, Call, ReplyRecv, Mint                   |
-| D28        | Fixed-size message format                 | All IPC                                       |
-| D31        | Resource acquisition                      | ResourceRequest                               |
-| D32        | Type conversion (Space consumed)          | CreateField, CreatePulsar, CreateObserver     |
-| D35        | Observer creation sequence                | CreateObserver                                |
-| D38        | Time linearity                            | TimeSplit, Clone (forbidden)                  |
-| D39        | Observer rights and state machine         | All Observer operations                       |
-| D41        | Space topology operations                 | SpaceSplit, SpaceMerge                        |
-| D42        | Scheduling profile                        | ObserverSetScheduling                         |
-| D44        | Pulsar timers                             | CreatePulsar, ClockRead                       |
-| D45        | Field split (badge-range routing)         | FieldSplit                                    |
-| D47        | Syscall ABI framework                     | All (SVC immediate, register convention)      |
-| D48        | Syscall enumeration (25 operations)       | All                                           |
-| D49        | Error signaling, encoding details         | All (error codes, cap-absent sentinel)        |
-| D50        | Direct-switch fast-path conditions        | Call, ReplyRecv                               |
-| D51        | Send-once flag                            | Send, Call                                    |
-| D52        | Per-type rights masks                     | All typed (rights checking)                   |
-| D57        | Scheduling budget (R + T <= 128)          | ObserverSetScheduling                         |
-| D62        | Pulsar creation API                       | CreatePulsar                                  |
-| D65        | Reply badge                               | Call                                          |
-| D66        | Per-Observer clock access                 | ClockRead                                     |
-| D67        | Generation counter for revocation         | All typed (generation check on object access) |
-| D72        | Duration parameter (relative nanoseconds) | CreatePulsar                                  |
-| D74        | Fast-path x0-x3 register pass-through     | Call, ReplyRecv                               |
-| D77        | Handle encoding and cap resolution        | All typed (handle decode, bounds check)       |
-| D95        | Structural backing layout                 | CreateObserver                                |
-| D97        | Cap table self-mutation                   | ObserverInstallCap, ObserverChangeHandler     |
-| D98        | Destroy cascade                           | Destroy                                       |
-| D103       | Inline register transfer                  | ObserverWriteRegisters, ObserverReadRegisters |
-| D104       | ResourceRequest dual-path dispatch        | ResourceRequest                               |
+| Derivation | Topic                                      | Operations affected                           |
+| ---------- | ------------------------------------------ | --------------------------------------------- |
+| D7         | Split interaction model                    | All (IPC vs typed families)                   |
+| D13        | Queued fields, direct-switch fast path     | Send, Receive, Call, ReplyRecv                |
+| D16        | Reply via send-once cap                    | Call, ReplyRecv                               |
+| D17        | Badge semantics                            | Send, Call, ReplyRecv, Mint                   |
+| D28        | Fixed-size message format                  | All IPC                                       |
+| D31        | Resource acquisition                       | ResourceRequest                               |
+| D32        | Type conversion (Space consumed)           | CreateField, CreatePulsar, CreateObserver     |
+| D35        | Observer creation sequence                 | CreateObserver                                |
+| D38        | Time linearity                             | TimeSplit, Clone (forbidden)                  |
+| D39        | Observer rights and state machine          | All Observer operations                       |
+| D41        | Space topology operations                  | SpaceSplit, SpaceMerge                        |
+| D42        | Scheduling profile                         | ObserverSetScheduling                         |
+| D44        | Pulsar timers                              | CreatePulsar, ClockRead                       |
+| D45        | Field split (badge-range routing)          | FieldSplit                                    |
+| D47        | Syscall ABI framework                      | All (SVC immediate, register convention)      |
+| D48        | Syscall enumeration (25 operations)        | All                                           |
+| D49        | Error signaling, encoding details          | All (error codes, cap-absent sentinel)        |
+| D50        | Direct-switch fast-path conditions         | Call, ReplyRecv                               |
+| D51        | Send-once flag                             | Send, Call                                    |
+| D52        | Per-type rights masks                      | All typed (rights checking)                   |
+| D57        | Scheduling budget (R + T <= 128)           | ObserverSetScheduling                         |
+| D62        | Pulsar creation API                        | CreatePulsar                                  |
+| D65        | Reply badge                                | Call                                          |
+| D66        | Per-Observer clock access                  | ClockRead                                     |
+| D67        | Generation counter for revocation          | All typed (generation check on object access) |
+| D72        | Duration parameter (relative nanoseconds)  | CreatePulsar                                  |
+| D74        | Fast-path x0-x3 register pass-through      | Call, ReplyRecv                               |
+| D77        | Handle encoding and cap resolution         | All typed (handle decode, bounds check)       |
+| D95        | Structural backing layout                  | CreateObserver                                |
+| D97        | Cap table self-mutation                    | ObserverInstallCap, ObserverChangeHandler     |
+| D98        | Destroy cascade                            | Destroy                                       |
+| D103       | Inline register transfer                   | ObserverWriteRegisters, ObserverReadRegisters |
+| D104       | ResourceRequest dual-path dispatch         | ResourceRequest                               |
+| D106       | Reply Field allocation (userspace-created) | ObserverSetReplyField, CreateObserver         |
+| D107       | Auto-destroy on zero refcount              | Close (inline destroy on refcount zero)       |
 
 ## Operation summary table
 
@@ -734,3 +763,4 @@ Dual-path dispatch (D104):
 | 23  | ClockRead              | SVC #0, x4=17 | any              | none                    |
 | 24  | CreateObserver         | SVC #0, x4=18 | Space (consumed) | SPLIT                   |
 | 25  | ResourceRequest        | SVC #0, x4=19 | Space            | DESTROY                 |
+| 26  | ObserverSetReplyField  | SVC #0, x4=20 | Observer         | INSTALL_CAP             |
