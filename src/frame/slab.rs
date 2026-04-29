@@ -70,6 +70,8 @@ impl<T> SlabStore<T> {
             Ok((ObjectId(index), value))
         } else if (self.slots.len() as u32) < self.max_slots {
             let index = self.slots.len() as u32;
+            // SAFETY: zeroed bytes. Caller MUST write all fields before reading.
+            // UB if T contains NonNull — use insert() for those types.
             let zeroed: T = unsafe { core::mem::MaybeUninit::<T>::zeroed().assume_init() };
 
             self.slots.push(Some(zeroed));
@@ -412,6 +414,9 @@ impl<T> SlabStore<T> {
             core::ptr::write(ptr as *mut T, value);
         }
 
+        // SAFETY: ptr is aligned to align_of::<T>() and within page bounds
+        // (same invariants as above). The slot now holds the written value.
+        // Exclusive access: arena lock (D53) + just removed from freelist.
         let reference = unsafe { &mut *(ptr as *mut T) };
 
         Ok((ObjectId(index), reference))
