@@ -151,7 +151,7 @@ CONC-05 **Success Criteria** (what must be TRUE):
 | Phase                   | Plans Complete | Status      | Completed  |
 | ----------------------- | -------------- | ----------- | ---------- |
 | 1. Property Testing     | 3/3            | Complete    | 2026-04-29 |
-| 2. Unsafe Audit         | 0/4            | Not started | -          |
+| 2. Unsafe Audit         | 3/4            | Executing   | -          |
 | 3. Coverage             | 0/TBD          | Not started | -          |
 | 4. Fuzzing              | 0/TBD          | Not started | -          |
 | 5. Concurrency Modeling | 0/TBD          | Not started | -          |

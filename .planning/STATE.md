@@ -88,6 +88,9 @@ affecting current work:
 - [Phase 02-unsafe-audit]: 'static lifetime in observer_prepare_wait is bounded by protocol window (next observer_clear_wait call), not arena lifetime
 - [Phase 02-unsafe-audit]: copy_nonoverlapping SAFETY comments must explicitly name the guard that ensures i != last_idx (non-overlap)
 - [Phase 02-unsafe-audit]: Linked list SAFETY comments must state the no-cycle invariant to prove aliasing safety of prev/next references
+- [Phase 02-unsafe-audit]: ARM ARM D5.10 ISB and DSB ISHST citations added inline in configure_and_enable — makes MMU-enable sequence self-documenting at the call site
+- [Phase 02-unsafe-audit]: Each unsafe branch in an if-else chain needs its own SAFETY comment even when invariants are identical
+- [Phase 02-unsafe-audit]: MaybeUninit::zeroed().assume_init() is UB for NonNull-containing types; insert() is the sound API for Field and Observer
 
 ### Pending Todos
 
@@ -99,5 +102,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-29T00:29:23.679Z
-01-03-PLAN.md Resume file: None
+Last session: 2026-04-28T00:00:00.000Z
+Stopped at: Completed 02-unsafe-audit 02-02-PLAN.md
+Resume file: None
